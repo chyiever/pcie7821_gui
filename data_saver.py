@@ -1,22 +1,29 @@
 """
 PCIe-7821 Data Saver Module
 Asynchronous data saving with queue-based buffering
+Saves phase data as 32-bit signed int binary files
 """
 
 import os
 import queue
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 import numpy as np
+
+from logger import get_logger
+
+log = get_logger("data_saver")
 
 
 class DataSaver:
     """
     Asynchronous data saver with queue-based buffering.
 
-    Saves data to binary files in the format: {file_no}-{HH}-{MM}-{SS}_D.bin
+    Saves data to binary files in the format: {序号}-{时}-{分}-{秒}-{采样率}.bin
+    Example: 1-12-30-45-2000.bin
     """
 
     def __init__(self, save_path: str = "save_data", buffer_size: int = 100):
@@ -36,18 +43,20 @@ class DataSaver:
         self._file_handle = None
         self._file_no = 0
         self._current_filename = ""
+        self._scan_rate = 2000  # Default scan rate
 
         # Statistics
         self._bytes_written = 0
         self._blocks_written = 0
         self._dropped_blocks = 0
 
-    def start(self, file_no: Optional[int] = None) -> str:
+    def start(self, file_no: Optional[int] = None, scan_rate: int = 2000) -> str:
         """
         Start data saving.
 
         Args:
             file_no: Optional file number. If None, auto-increment.
+            scan_rate: Scan rate in Hz for filename
 
         Returns:
             The filename being written to
@@ -64,13 +73,18 @@ class DataSaver:
         else:
             self._file_no += 1
 
-        # Create filename with timestamp
+        self._scan_rate = scan_rate
+
+        # Create filename with timestamp and scan rate
+        # Format: 序号-时-分-秒-采样率.bin
         now = datetime.now()
-        self._current_filename = f"{self._file_no:03d}-{now.hour:02d}-{now.minute:02d}-{now.second:02d}_D.bin"
+        self._current_filename = f"{self._file_no}-{now.hour:02d}-{now.minute:02d}-{now.second:02d}-{scan_rate}.bin"
 
         # Open file
         filepath = self.save_path / self._current_filename
         self._file_handle = open(filepath, 'wb')
+
+        log.info(f"Started saving to {filepath}")
 
         # Reset statistics
         self._bytes_written = 0
@@ -123,12 +137,15 @@ class DataSaver:
             self._file_handle.close()
             self._file_handle = None
 
+        log.info(f"Stopped saving. Bytes written: {self._bytes_written}, "
+                 f"Blocks: {self._blocks_written}, Dropped: {self._dropped_blocks}")
+
     def save(self, data: np.ndarray) -> bool:
         """
         Queue data for saving.
 
         Args:
-            data: NumPy array to save
+            data: NumPy array to save (will be converted to int32 for phase data)
 
         Returns:
             True if data was queued, False if queue is full
@@ -137,6 +154,10 @@ class DataSaver:
             return False
 
         try:
+            # Ensure data is int32 (32-bit signed int) for phase data
+            if data.dtype != np.int32:
+                data = data.astype(np.int32)
+
             self._data_queue.put_nowait(data.tobytes())
             return True
         except queue.Full:
@@ -154,7 +175,7 @@ class DataSaver:
             except queue.Empty:
                 continue
             except Exception as e:
-                print(f"DataSaver error: {e}")
+                log.error(f"DataSaver error: {e}")
 
     def _write_data(self, data: bytes):
         """Write data to file"""
@@ -193,6 +214,11 @@ class DataSaver:
         """Get current filename"""
         return self._current_filename
 
+    @property
+    def file_no(self) -> int:
+        """Get current file number"""
+        return self._file_no
+
     def __enter__(self):
         """Context manager entry"""
         return self
@@ -207,67 +233,87 @@ class DataSaver:
         self.stop()
 
 
-class MultiFileSaver(DataSaver):
+class TimedFileSaver(DataSaver):
     """
-    Data saver that creates new files based on size or time limits.
+    Data saver that creates new files every N seconds.
+    Default: 1 second per file.
+
+    Filename format: 序号-时-分-秒-采样率.bin
+    Example: 1-12-30-45-2000.bin, 2-12-30-46-2000.bin, ...
     """
 
     def __init__(self, save_path: str = "save_data",
-                 max_file_size_mb: float = 1024,
-                 max_file_duration_s: float = 0,
+                 file_duration_s: float = 1.0,
                  buffer_size: int = 100):
         """
-        Initialize multi-file saver.
+        Initialize timed file saver.
 
         Args:
             save_path: Directory to save files
-            max_file_size_mb: Maximum file size in MB (0 = unlimited)
-            max_file_duration_s: Maximum file duration in seconds (0 = unlimited)
+            file_duration_s: Duration per file in seconds (default 1.0)
             buffer_size: Maximum number of data blocks in queue
         """
         super().__init__(save_path, buffer_size)
-        self.max_file_size = int(max_file_size_mb * 1024 * 1024) if max_file_size_mb > 0 else 0
-        self.max_duration = max_file_duration_s
-        self._file_start_time: Optional[datetime] = None
+        self.file_duration = file_duration_s
+        self._file_start_time: float = 0
+        self._total_bytes_all_files = 0
+        self._total_files_created = 0
 
-    def start(self, file_no: Optional[int] = None) -> str:
+    def start(self, file_no: Optional[int] = None, scan_rate: int = 2000) -> str:
         """Start saving with auto-split capability"""
-        self._file_start_time = datetime.now()
-        return super().start(file_no)
+        self._file_start_time = time.time()
+        self._total_bytes_all_files = 0
+        self._total_files_created = 1
+        return super().start(file_no, scan_rate)
 
     def save(self, data: np.ndarray) -> bool:
-        """Save data with auto-split check"""
+        """Save data with auto-split check based on time"""
         if not self._running:
             return False
 
-        # Check if need to create new file
-        should_split = False
-
-        if self.max_file_size > 0 and self._bytes_written >= self.max_file_size:
-            should_split = True
-
-        if self.max_duration > 0 and self._file_start_time is not None:
-            elapsed = (datetime.now() - self._file_start_time).total_seconds()
-            if elapsed >= self.max_duration:
-                should_split = True
-
-        if should_split:
+        # Check if need to create new file (time-based)
+        elapsed = time.time() - self._file_start_time
+        if elapsed >= self.file_duration:
             self._split_file()
 
         return super().save(data)
 
     def _split_file(self):
         """Close current file and open new one"""
+        # Update total bytes
+        self._total_bytes_all_files += self._bytes_written
+
         # Close current file
         if self._file_handle is not None:
+            self._file_handle.flush()
             self._file_handle.close()
 
         # Increment file number and create new file
         self._file_no += 1
         now = datetime.now()
-        self._current_filename = f"{self._file_no:03d}-{now.hour:02d}-{now.minute:02d}-{now.second:02d}_D.bin"
+        self._current_filename = f"{self._file_no}-{now.hour:02d}-{now.minute:02d}-{now.second:02d}-{self._scan_rate}.bin"
 
         filepath = self.save_path / self._current_filename
         self._file_handle = open(filepath, 'wb')
         self._bytes_written = 0
-        self._file_start_time = now
+        self._file_start_time = time.time()
+        self._total_files_created += 1
+
+        log.info(f"Split to new file: {self._current_filename}")
+
+    def stop(self):
+        """Stop and update total statistics"""
+        self._total_bytes_all_files += self._bytes_written
+        super().stop()
+        log.info(f"Total files created: {self._total_files_created}, "
+                 f"Total bytes: {self._total_bytes_all_files}")
+
+    @property
+    def total_bytes_all_files(self) -> int:
+        """Get total bytes written across all files"""
+        return self._total_bytes_all_files + self._bytes_written
+
+    @property
+    def total_files_created(self) -> int:
+        """Get total number of files created"""
+        return self._total_files_created

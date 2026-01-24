@@ -26,7 +26,7 @@ from config import (
 )
 from pcie7821_api import PCIe7821API, PCIe7821Error
 from acquisition_thread import AcquisitionThread, SimulatedAcquisitionThread
-from data_saver import DataSaver
+from data_saver import TimedFileSaver
 from spectrum_analyzer import RealTimeSpectrumAnalyzer
 from logger import get_logger
 
@@ -51,7 +51,7 @@ class MainWindow(QMainWindow):
         # Initialize components
         self.api: Optional[PCIe7821API] = None
         self.acq_thread: Optional[AcquisitionThread] = None
-        self.data_saver: Optional[DataSaver] = None
+        self.data_saver: Optional[TimedFileSaver] = None
         self.spectrum_analyzer = RealTimeSpectrumAnalyzer()
 
         # Parameters
@@ -173,7 +173,7 @@ class MainWindow(QMainWindow):
         basic_layout.addWidget(QLabel("Pulse Width (ns):"), 3, 0)
         self.pulse_width_spin = QSpinBox()
         self.pulse_width_spin.setRange(10, 1000)
-        self.pulse_width_spin.setValue(120)
+        self.pulse_width_spin.setValue(100)
         self.pulse_width_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         basic_layout.addWidget(self.pulse_width_spin, 3, 1)
 
@@ -190,7 +190,7 @@ class MainWindow(QMainWindow):
         basic_layout.addWidget(QLabel("Bypass Points:"), 5, 0)
         self.bypass_spin = QSpinBox()
         self.bypass_spin.setRange(0, 65535)
-        self.bypass_spin.setValue(0)
+        self.bypass_spin.setValue(60)
         self.bypass_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         basic_layout.addWidget(self.bypass_spin, 5, 1)
 
@@ -252,15 +252,15 @@ class MainWindow(QMainWindow):
         phase_layout.addWidget(QLabel("Space Avg:"), 1, 0)
         self.space_avg_spin = QSpinBox()
         self.space_avg_spin.setRange(1, 64)
-        self.space_avg_spin.setValue(8)
+        self.space_avg_spin.setValue(25)
         self.space_avg_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.space_avg_spin, 1, 1)
 
         # Merge Points
         phase_layout.addWidget(QLabel("Merge Points:"), 2, 0)
         self.merge_points_spin = QSpinBox()
-        self.merge_points_spin.setRange(1, 16)
-        self.merge_points_spin.setValue(4)
+        self.merge_points_spin.setRange(1, 64)
+        self.merge_points_spin.setValue(25)
         self.merge_points_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.merge_points_spin, 2, 1)
 
@@ -315,8 +315,8 @@ class MainWindow(QMainWindow):
         # Frame Number
         display_layout.addWidget(QLabel("Frames:"), 2, 0)
         self.frame_num_spin = QSpinBox()
-        self.frame_num_spin.setRange(1, 1000)
-        self.frame_num_spin.setValue(20)
+        self.frame_num_spin.setRange(1, 10000)
+        self.frame_num_spin.setValue(1024)
         self.frame_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         display_layout.addWidget(self.frame_num_spin, 2, 1)
 
@@ -620,11 +620,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to start acquisition: {e}")
                 return
 
-        # Start data saver if enabled
+        # Start data saver if enabled (1 second per file)
         if params.save.enable:
             log.info(f"Starting data saver to {params.save.path}")
-            self.data_saver = DataSaver(params.save.path)
-            filename = self.data_saver.start()
+            self.data_saver = TimedFileSaver(params.save.path, file_duration_s=1.0)
+            filename = self.data_saver.start(scan_rate=params.basic.scan_rate)
             self.save_status_label.setText(f"Save: {filename}")
         else:
             self.save_status_label.setText("Save: Off")
@@ -720,6 +720,9 @@ class MainWindow(QMainWindow):
         # Save data if enabled
         if self.data_saver is not None and self.data_saver.is_running:
             self.data_saver.save(data)
+            # Update save status periodically
+            if self._data_count % 20 == 0:
+                self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {self.data_saver.current_filename}")
 
         # Update display
         try:
@@ -744,6 +747,9 @@ class MainWindow(QMainWindow):
         # Save data if enabled
         if self.data_saver is not None and self.data_saver.is_running:
             self.data_saver.save(data)
+            # Update save status periodically
+            if self._data_count % 20 == 0:
+                self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {self.data_saver.current_filename}")
 
         # Update display
         try:
