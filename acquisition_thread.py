@@ -6,7 +6,7 @@ QThread-based acquisition with signal-slot communication
 import time
 import numpy as np
 from typing import Optional
-from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition
+from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition, Qt
 
 from pcie7821_api import PCIe7821API, PCIe7821Error
 from config import DataSource, AllParams
@@ -14,6 +14,9 @@ from logger import get_logger
 
 # Module logger
 log = get_logger("acq_thread")
+
+# Minimum interval between GUI updates (ms)
+MIN_GUI_UPDATE_INTERVAL_MS = 50  # 20 FPS max
 
 
 class AcquisitionThread(QThread):
@@ -63,6 +66,12 @@ class AcquisitionThread(QThread):
         self._bytes_acquired = 0
         self._loop_count = 0
         self._last_log_time = 0
+
+        # GUI update throttling
+        self._last_gui_update_time = 0
+        self._pending_phase_data = None
+        self._pending_raw_data = None
+        self._pending_monitor_data = None
 
         log.info("AcquisitionThread initialized")
 
@@ -205,8 +214,9 @@ class AcquisitionThread(QThread):
             # Data is interleaved: ch0[0], ch1[0], ch0[1], ch1[1], ...
             data = data.reshape(-1, self._channel_num)
 
-        log.debug(f"Emitting data_ready signal: shape={data.shape}, dtype={data.dtype}")
-        self.data_ready.emit(data, self._data_source, self._channel_num)
+        # Throttle GUI updates to prevent signal queue backup
+        self._pending_raw_data = (data, self._data_source, self._channel_num)
+        self._emit_if_ready()
 
     def _read_phase_data(self):
         """Read phase demodulated data"""
@@ -221,18 +231,57 @@ class AcquisitionThread(QThread):
         if self._channel_num > 1:
             phase_data = phase_data.reshape(-1, self._channel_num)
 
-        log.debug(f"Emitting phase_data_ready signal: shape={phase_data.shape}")
-        self.phase_data_ready.emit(phase_data, self._channel_num)
+        # Store pending data for throttled emission
+        self._pending_phase_data = (phase_data, self._channel_num)
 
         # Also read monitor data when in phase mode
         try:
             monitor_data = self.api.read_monitor_data(
                 self._point_num_after_merge, self._channel_num
             )
-            log.debug(f"Emitting monitor_data_ready signal: shape={monitor_data.shape}")
-            self.monitor_data_ready.emit(monitor_data, self._channel_num)
+            self._pending_monitor_data = (monitor_data, self._channel_num)
         except PCIe7821Error as e:
             log.warning(f"Monitor data read failed (non-critical): {e}")
+
+        # Emit all pending data if enough time has passed
+        self._emit_if_ready()
+
+    def _emit_if_ready(self):
+        """Emit pending data signals if enough time has passed since last update"""
+        current_time = time.perf_counter() * 1000  # ms
+        elapsed = current_time - self._last_gui_update_time
+
+        if elapsed < MIN_GUI_UPDATE_INTERVAL_MS:
+            # Not enough time passed, skip this update (keep latest data pending)
+            return
+
+        # Emit all pending signals
+        signals_emitted = 0
+
+        if self._pending_phase_data is not None:
+            phase_data, channel_num = self._pending_phase_data
+            log.debug(f"Emitting phase_data_ready signal: shape={phase_data.shape}")
+            self.phase_data_ready.emit(phase_data, channel_num)
+            self._pending_phase_data = None
+            signals_emitted += 1
+
+        if self._pending_raw_data is not None:
+            data, data_source, channel_num = self._pending_raw_data
+            log.debug(f"Emitting data_ready signal: shape={data.shape}, dtype={data.dtype}")
+            self.data_ready.emit(data, data_source, channel_num)
+            self._pending_raw_data = None
+            signals_emitted += 1
+
+        if self._pending_monitor_data is not None:
+            monitor_data, channel_num = self._pending_monitor_data
+            log.debug(f"Emitting monitor_data_ready signal: shape={monitor_data.shape}")
+            self.monitor_data_ready.emit(monitor_data, channel_num)
+            self._pending_monitor_data = None
+            signals_emitted += 1
+
+        if signals_emitted > 0:
+            self._last_gui_update_time = current_time
+            log.debug(f"GUI update: emitted {signals_emitted} signals, elapsed={elapsed:.1f}ms")
 
     def stop(self):
         """Stop acquisition thread"""
@@ -369,12 +418,13 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                     if self._channel_num > 1:
                         phase_data = phase_data.reshape(-1, self._channel_num)
 
-                    self.phase_data_ready.emit(phase_data, self._channel_num)
+                    # Use throttled emission (same as real acquisition)
+                    self._pending_phase_data = (phase_data, self._channel_num)
                     self._bytes_acquired += len(phase_data.flatten()) * 4
 
                     # Simulated monitor data
                     monitor_data = np.random.randint(0, 65535, self._point_num_after_merge * self._channel_num, dtype=np.uint32)
-                    self.monitor_data_ready.emit(monitor_data, self._channel_num)
+                    self._pending_monitor_data = (monitor_data, self._channel_num)
                 else:
                     points = self._total_point_num * self._frame_num
                     data = np.random.randint(-32768, 32767, points * self._channel_num, dtype=np.int16)
@@ -382,11 +432,16 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                     if self._channel_num > 1:
                         data = data.reshape(-1, self._channel_num)
 
-                    self.data_ready.emit(data, self._data_source, self._channel_num)
+                    # Use throttled emission (same as real acquisition)
+                    self._pending_raw_data = (data, self._data_source, self._channel_num)
                     self._bytes_acquired += len(data.flatten()) * 2
 
-                # Emit buffer status
-                self.buffer_status.emit(100000, 10)
+                # Emit pending signals if enough time has passed
+                self._emit_if_ready()
+
+                # Emit buffer status (throttle this too - only every 10 loops)
+                if self._loop_count % 10 == 0:
+                    self.buffer_status.emit(100000, 10)
 
                 self._frames_acquired += self._frame_num
 
