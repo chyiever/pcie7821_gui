@@ -8,8 +8,14 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple
 import os
+import time
+import threading
 
 from config import DMA_ALIGNMENT, get_error_message
+from logger import get_logger, PerformanceTimer
+
+# Module logger
+log = get_logger("api")
 
 
 class AlignedBuffer:
@@ -48,6 +54,9 @@ class AlignedBuffer:
         # Store pointer for ctypes
         self._aligned_addr = raw_addr + offset
 
+        log.debug(f"AlignedBuffer created: size={size}, dtype={dtype}, "
+                  f"aligned_addr=0x{self._aligned_addr:X}, alignment_ok={self._aligned_addr % alignment == 0}")
+
     def get_ctypes_ptr(self):
         """Get ctypes pointer to aligned buffer"""
         if self.dtype == np.int16:
@@ -85,18 +94,26 @@ class PCIe7821API:
         """
         self.dll = None
         self._is_open = False
+        self._lock = threading.Lock()  # Thread safety for DLL calls
+
+        log.info("Initializing PCIe7821API...")
 
         # Find DLL
         if dll_path is None:
             dll_path = self._find_dll()
 
         if not os.path.exists(dll_path):
+            log.error(f"DLL not found: {dll_path}")
             raise FileNotFoundError(f"DLL not found: {dll_path}")
+
+        log.info(f"Loading DLL from: {dll_path}")
 
         # Load DLL
         try:
             self.dll = ctypes.CDLL(dll_path)
+            log.info("DLL loaded successfully")
         except OSError as e:
+            log.error(f"Failed to load DLL: {e}")
             raise RuntimeError(f"Failed to load DLL: {e}")
 
         # Setup function prototypes
@@ -106,6 +123,8 @@ class PCIe7821API:
         self._raw_buffer: Optional[AlignedBuffer] = None
         self._phase_buffer: Optional[AlignedBuffer] = None
         self._monitor_buffer: Optional[AlignedBuffer] = None
+
+        log.info("PCIe7821API initialized")
 
     def _find_dll(self) -> str:
         """Find the DLL in default locations"""
@@ -119,7 +138,9 @@ class PCIe7821API:
         ]
 
         for path in search_paths:
+            log.debug(f"Checking DLL path: {path}")
             if path.exists():
+                log.info(f"Found DLL at: {path}")
                 return str(path)
 
         raise FileNotFoundError(
@@ -128,6 +149,8 @@ class PCIe7821API:
 
     def _setup_prototypes(self):
         """Setup ctypes function prototypes"""
+        log.debug("Setting up function prototypes...")
+
         # int pcie7821_open()
         self.dll.pcie7821_open.restype = ctypes.c_int
         self.dll.pcie7821_open.argtypes = []
@@ -235,9 +258,12 @@ class PCIe7821API:
             ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)
         ]
 
+        log.debug("Function prototypes setup complete")
+
     def _check_result(self, result: int, operation: str = ""):
         """Check API result and raise exception on error"""
         if result != 0:
+            log.error(f"{operation} failed with code {result}: {get_error_message(result)}")
             raise PCIe7821Error(result, f"{operation}: {get_error_message(result)}")
 
     def open(self) -> int:
@@ -247,21 +273,33 @@ class PCIe7821API:
         Returns:
             0 on success, error code on failure
         """
-        result = self.dll.pcie7821_open()
-        if result == 0:
-            self._is_open = True
-        return result
+        log.info("Opening device...")
+        with self._lock:
+            start = time.perf_counter()
+            result = self.dll.pcie7821_open()
+            elapsed = (time.perf_counter() - start) * 1000
+
+            if result == 0:
+                self._is_open = True
+                log.info(f"Device opened successfully in {elapsed:.1f} ms")
+            else:
+                log.error(f"Failed to open device: error code {result}")
+
+            return result
 
     def close(self):
         """Close the PCIe-7821 device"""
-        if self.dll is not None:
-            self.dll.pcie7821_close()
-            self._is_open = False
+        log.info("Closing device...")
+        with self._lock:
+            if self.dll is not None:
+                self.dll.pcie7821_close()
+                self._is_open = False
+                log.info("Device closed")
 
-        # Release buffers
-        self._raw_buffer = None
-        self._phase_buffer = None
-        self._monitor_buffer = None
+            # Release buffers
+            self._raw_buffer = None
+            self._phase_buffer = None
+            self._monitor_buffer = None
 
     @property
     def is_open(self) -> bool:
@@ -275,7 +313,11 @@ class PCIe7821API:
         Args:
             clk_src: 0=internal, 1=external
         """
-        return self.dll.pcie7821_set_clk_src(clk_src)
+        log.debug(f"set_clk_src({clk_src})")
+        with self._lock:
+            result = self.dll.pcie7821_set_clk_src(clk_src)
+        log.debug(f"set_clk_src result: {result}")
+        return result
 
     def set_trig_dir(self, trig_dir: int) -> int:
         """
@@ -284,7 +326,11 @@ class PCIe7821API:
         Args:
             trig_dir: 0=input, 1=output
         """
-        return self.dll.pcie7821_set_trig_dir(trig_dir)
+        log.debug(f"set_trig_dir({trig_dir})")
+        with self._lock:
+            result = self.dll.pcie7821_set_trig_dir(trig_dir)
+        log.debug(f"set_trig_dir result: {result}")
+        return result
 
     def set_scan_rate(self, scan_rate: int) -> int:
         """
@@ -293,7 +339,11 @@ class PCIe7821API:
         Args:
             scan_rate: Scan rate in Hz
         """
-        return self.dll.pcie7821_set_scan_rate(scan_rate)
+        log.debug(f"set_scan_rate({scan_rate})")
+        with self._lock:
+            result = self.dll.pcie7821_set_scan_rate(scan_rate)
+        log.debug(f"set_scan_rate result: {result}")
+        return result
 
     def set_pulse_width(self, pulse_ns: int) -> int:
         """
@@ -302,7 +352,11 @@ class PCIe7821API:
         Args:
             pulse_ns: Pulse width in ns
         """
-        return self.dll.pcie7821_set_pusle_width(pulse_ns)
+        log.debug(f"set_pulse_width({pulse_ns})")
+        with self._lock:
+            result = self.dll.pcie7821_set_pusle_width(pulse_ns)
+        log.debug(f"set_pulse_width result: {result}")
+        return result
 
     def set_point_num_per_scan(self, point_num: int) -> int:
         """
@@ -311,7 +365,11 @@ class PCIe7821API:
         Args:
             point_num: Number of points per scan
         """
-        return self.dll.pcie7821_set_point_num_per_scan(point_num)
+        log.debug(f"set_point_num_per_scan({point_num})")
+        with self._lock:
+            result = self.dll.pcie7821_set_point_num_per_scan(point_num)
+        log.debug(f"set_point_num_per_scan result: {result}")
+        return result
 
     def set_bypass_point_num(self, bypass_num: int) -> int:
         """
@@ -320,7 +378,11 @@ class PCIe7821API:
         Args:
             bypass_num: Number of points to bypass
         """
-        return self.dll.pcie7821_set_bypass_point_num(bypass_num)
+        log.debug(f"set_bypass_point_num({bypass_num})")
+        with self._lock:
+            result = self.dll.pcie7821_set_bypass_point_num(bypass_num)
+        log.debug(f"set_bypass_point_num result: {result}")
+        return result
 
     def set_center_freq(self, freq_hz: int) -> int:
         """
@@ -329,7 +391,11 @@ class PCIe7821API:
         Args:
             freq_hz: Center frequency in Hz
         """
-        return self.dll.pcie7821_set_center_freq(freq_hz)
+        log.debug(f"set_center_freq({freq_hz})")
+        with self._lock:
+            result = self.dll.pcie7821_set_center_freq(freq_hz)
+        log.debug(f"set_center_freq result: {result}")
+        return result
 
     def set_upload_data_param(self, ch_num: int, data_src: int, data_rate: int) -> int:
         """
@@ -340,7 +406,11 @@ class PCIe7821API:
             data_src: Data source (0-4)
             data_rate: Data rate in ns
         """
-        return self.dll.pcie7821_set_upload_data_param(ch_num, data_src, data_rate)
+        log.debug(f"set_upload_data_param(ch_num={ch_num}, data_src={data_src}, data_rate={data_rate})")
+        with self._lock:
+            result = self.dll.pcie7821_set_upload_data_param(ch_num, data_src, data_rate)
+        log.debug(f"set_upload_data_param result: {result}")
+        return result
 
     def set_phase_dem_param(self, rate2phase: int, space_avg_order: int,
                             merge_point_num: int, diff_order: int,
@@ -356,10 +426,15 @@ class PCIe7821API:
             detrend_bw: Detrend filter bandwidth in Hz
             polarization_en: Enable polarization diversity
         """
-        return self.dll.pcie7821_set_phase_dem_param(
-            rate2phase, space_avg_order, merge_point_num,
-            diff_order, detrend_bw, int(polarization_en)
-        )
+        log.debug(f"set_phase_dem_param(rate2phase={rate2phase}, space_avg={space_avg_order}, "
+                  f"merge={merge_point_num}, diff={diff_order}, detrend_bw={detrend_bw}, polar={polarization_en})")
+        with self._lock:
+            result = self.dll.pcie7821_set_phase_dem_param(
+                rate2phase, space_avg_order, merge_point_num,
+                diff_order, detrend_bw, int(polarization_en)
+            )
+        log.debug(f"set_phase_dem_param result: {result}")
+        return result
 
     def query_buffer_points(self) -> int:
         """
@@ -369,7 +444,15 @@ class PCIe7821API:
             Number of points per channel available in buffer
         """
         point_num = ctypes.c_uint()
-        self.dll.pcie7821_point_num_per_ch_in_buf_query(ctypes.byref(point_num))
+        with self._lock:
+            start = time.perf_counter()
+            self.dll.pcie7821_point_num_per_ch_in_buf_query(ctypes.byref(point_num))
+            elapsed = (time.perf_counter() - start) * 1000
+
+        # Only log occasionally to avoid spam (every 100th call or when slow)
+        if elapsed > 10:
+            log.warning(f"query_buffer_points took {elapsed:.1f} ms, points={point_num.value}")
+
         return point_num.value
 
     def allocate_buffers(self, point_num: int, channel_num: int, frame_num: int,
@@ -384,18 +467,26 @@ class PCIe7821API:
             merge_point_num: Merge point number for phase data
             is_phase: Whether allocating for phase data
         """
+        log.info(f"Allocating buffers: point_num={point_num}, channels={channel_num}, "
+                 f"frames={frame_num}, merge={merge_point_num}")
+
         # Raw data buffer (short)
         raw_size = point_num * channel_num * frame_num
         self._raw_buffer = AlignedBuffer(raw_size, np.int16)
+        log.debug(f"Raw buffer allocated: {raw_size * 2 / 1024 / 1024:.2f} MB")
 
         # Phase data buffer (int)
         phase_point_num = point_num // merge_point_num
         phase_size = phase_point_num * channel_num * frame_num
         self._phase_buffer = AlignedBuffer(phase_size, np.int32)
+        log.debug(f"Phase buffer allocated: {phase_size * 4 / 1024 / 1024:.2f} MB")
 
         # Monitor data buffer (uint)
         monitor_size = phase_point_num * channel_num
         self._monitor_buffer = AlignedBuffer(monitor_size, np.uint32)
+        log.debug(f"Monitor buffer allocated: {monitor_size * 4 / 1024:.2f} KB")
+
+        log.info("Buffer allocation complete")
 
     def read_data(self, point_num_per_ch: int, channel_num: int) -> Tuple[np.ndarray, int]:
         """
@@ -412,17 +503,26 @@ class PCIe7821API:
 
         # Ensure buffer is large enough
         if self._raw_buffer is None or self._raw_buffer.size < total_points:
+            log.debug(f"Reallocating raw buffer: {total_points} points")
             self._raw_buffer = AlignedBuffer(total_points, np.int16)
 
         points_returned = ctypes.c_uint()
-        result = self.dll.pcie7821_read_data(
-            point_num_per_ch,
-            self._raw_buffer.get_ctypes_ptr(),
-            ctypes.byref(points_returned)
-        )
+
+        with self._lock:
+            start = time.perf_counter()
+            result = self.dll.pcie7821_read_data(
+                point_num_per_ch,
+                self._raw_buffer.get_ctypes_ptr(),
+                ctypes.byref(points_returned)
+            )
+            elapsed = (time.perf_counter() - start) * 1000
 
         if result != 0:
+            log.error(f"read_data failed: code {result}")
             raise PCIe7821Error(result, "read_data")
+
+        log.debug(f"read_data: requested={point_num_per_ch}, returned={points_returned.value}, "
+                  f"time={elapsed:.1f}ms")
 
         # Return copy of data
         return self._raw_buffer.array[:total_points].copy(), points_returned.value
@@ -442,17 +542,26 @@ class PCIe7821API:
 
         # Ensure buffer is large enough
         if self._phase_buffer is None or self._phase_buffer.size < total_points:
+            log.debug(f"Reallocating phase buffer: {total_points} points")
             self._phase_buffer = AlignedBuffer(total_points, np.int32)
 
         points_returned = ctypes.c_uint()
-        result = self.dll.pcie7821_read_phase_data(
-            point_num_per_ch,
-            self._phase_buffer.get_ctypes_ptr(),
-            ctypes.byref(points_returned)
-        )
+
+        with self._lock:
+            start = time.perf_counter()
+            result = self.dll.pcie7821_read_phase_data(
+                point_num_per_ch,
+                self._phase_buffer.get_ctypes_ptr(),
+                ctypes.byref(points_returned)
+            )
+            elapsed = (time.perf_counter() - start) * 1000
 
         if result != 0:
+            log.error(f"read_phase_data failed: code {result}")
             raise PCIe7821Error(result, "read_phase_data")
+
+        log.debug(f"read_phase_data: requested={point_num_per_ch}, returned={points_returned.value}, "
+                  f"time={elapsed:.1f}ms")
 
         return self._phase_buffer.array[:total_points].copy(), points_returned.value
 
@@ -471,24 +580,53 @@ class PCIe7821API:
 
         # Ensure buffer is large enough
         if self._monitor_buffer is None or self._monitor_buffer.size < total_points:
+            log.debug(f"Reallocating monitor buffer: {total_points} points")
             self._monitor_buffer = AlignedBuffer(total_points, np.uint32)
 
-        result = self.dll.pcie7821_read_monitor_data(
-            self._monitor_buffer.get_ctypes_ptr()
-        )
+        with self._lock:
+            start = time.perf_counter()
+            result = self.dll.pcie7821_read_monitor_data(
+                self._monitor_buffer.get_ctypes_ptr()
+            )
+            elapsed = (time.perf_counter() - start) * 1000
 
         if result != 0:
+            log.error(f"read_monitor_data failed: code {result}")
             raise PCIe7821Error(result, "read_monitor_data")
+
+        log.debug(f"read_monitor_data: points={total_points}, time={elapsed:.1f}ms")
 
         return self._monitor_buffer.array[:total_points].copy()
 
     def start(self) -> int:
         """Start acquisition"""
-        return self.dll.pcie7821_start()
+        log.info("Starting acquisition...")
+        with self._lock:
+            start = time.perf_counter()
+            result = self.dll.pcie7821_start()
+            elapsed = (time.perf_counter() - start) * 1000
+
+        if result == 0:
+            log.info(f"Acquisition started in {elapsed:.1f} ms")
+        else:
+            log.error(f"Failed to start acquisition: code {result}")
+
+        return result
 
     def stop(self) -> int:
         """Stop acquisition"""
-        return self.dll.pcie7821_stop()
+        log.info("Stopping acquisition...")
+        with self._lock:
+            start = time.perf_counter()
+            result = self.dll.pcie7821_stop()
+            elapsed = (time.perf_counter() - start) * 1000
+
+        if result == 0:
+            log.info(f"Acquisition stopped in {elapsed:.1f} ms")
+        else:
+            log.error(f"Failed to stop acquisition: code {result}")
+
+        return result
 
     def write_reg(self, addr: int, data: int) -> int:
         """
@@ -500,7 +638,10 @@ class PCIe7821API:
         """
         if addr % 4 != 0:
             raise ValueError("Register address must be 4-byte aligned")
-        return self.dll.pcie7821_test_wr_reg(addr, data)
+        log.debug(f"write_reg(addr=0x{addr:X}, data=0x{data:X})")
+        with self._lock:
+            result = self.dll.pcie7821_test_wr_reg(addr, data)
+        return result
 
     def read_reg(self, addr: int) -> int:
         """
@@ -515,7 +656,9 @@ class PCIe7821API:
         if addr % 4 != 0:
             raise ValueError("Register address must be 4-byte aligned")
         data = ctypes.c_uint()
-        self.dll.pcie7821_test_rd_reg(addr, ctypes.byref(data))
+        with self._lock:
+            self.dll.pcie7821_test_rd_reg(addr, ctypes.byref(data))
+        log.debug(f"read_reg(addr=0x{addr:X}) = 0x{data.value:X}")
         return data.value
 
     def __enter__(self):

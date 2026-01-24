@@ -10,6 +10,10 @@ from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition
 
 from pcie7821_api import PCIe7821API, PCIe7821Error
 from config import DataSource, AllParams
+from logger import get_logger
+
+# Module logger
+log = get_logger("acq_thread")
 
 
 class AcquisitionThread(QThread):
@@ -57,6 +61,10 @@ class AcquisitionThread(QThread):
         # Statistics
         self._frames_acquired = 0
         self._bytes_acquired = 0
+        self._loop_count = 0
+        self._last_log_time = 0
+
+        log.info("AcquisitionThread initialized")
 
     def configure(self, params: AllParams):
         """
@@ -72,23 +80,44 @@ class AcquisitionThread(QThread):
         self._channel_num = params.upload.channel_num
         self._data_source = params.upload.data_source
 
+        log.info(f"Configured: total_points={self._total_point_num}, "
+                 f"points_after_merge={self._point_num_after_merge}, "
+                 f"frames={self._frame_num}, channels={self._channel_num}, "
+                 f"data_source={self._data_source}")
+
     def run(self):
         """Thread main loop"""
+        log.info("=== Acquisition thread started ===")
         self._running = True
         self._frames_acquired = 0
         self._bytes_acquired = 0
+        self._loop_count = 0
+        self._last_log_time = time.time()
 
         self.acquisition_started.emit()
+        log.debug("acquisition_started signal emitted")
 
         try:
             while self._running:
+                self._loop_count += 1
+                loop_start = time.perf_counter()
+
+                # Periodic status log (every 5 seconds)
+                now = time.time()
+                if now - self._last_log_time > 5.0:
+                    log.info(f"Status: loops={self._loop_count}, frames={self._frames_acquired}, "
+                             f"bytes={self._bytes_acquired/1024/1024:.1f}MB")
+                    self._last_log_time = now
+
                 # Check for pause
                 self._mutex.lock()
                 while self._paused and self._running:
+                    log.debug("Thread paused, waiting...")
                     self._pause_condition.wait(self._mutex)
                 self._mutex.unlock()
 
                 if not self._running:
+                    log.info("Thread stopping (running=False after pause check)")
                     break
 
                 # Determine expected data size
@@ -97,50 +126,76 @@ class AcquisitionThread(QThread):
                 else:
                     expected_points = self._total_point_num * self._frame_num
 
+                log.debug(f"Loop {self._loop_count}: waiting for {expected_points} points")
+
                 # Wait for enough data in buffer
+                wait_start = time.perf_counter()
                 wait_count = 0
                 while self._running:
+                    query_start = time.perf_counter()
                     points_in_buffer = self.api.query_buffer_points()
+                    query_time = (time.perf_counter() - query_start) * 1000
 
-                    # Emit buffer status
-                    buffer_mb = points_in_buffer * self._channel_num * 2 // (1024 * 1024)
-                    self.buffer_status.emit(points_in_buffer, buffer_mb)
+                    if query_time > 50:
+                        log.warning(f"Slow query_buffer_points: {query_time:.1f}ms")
+
+                    # Emit buffer status (throttled)
+                    if wait_count % 100 == 0:
+                        buffer_mb = points_in_buffer * self._channel_num * 2 // (1024 * 1024)
+                        self.buffer_status.emit(points_in_buffer, buffer_mb)
 
                     if points_in_buffer >= expected_points:
+                        wait_time = (time.perf_counter() - wait_start) * 1000
+                        log.debug(f"Buffer ready: {points_in_buffer} points, waited {wait_time:.1f}ms ({wait_count} iterations)")
                         break
 
                     time.sleep(0.001)  # 1ms wait
                     wait_count += 1
 
                     if wait_count > 5000:  # 5 second timeout
+                        log.error(f"Timeout waiting for data! points_in_buffer={points_in_buffer}, expected={expected_points}")
                         self.error_occurred.emit("Timeout waiting for data")
                         break
 
                 if not self._running:
+                    log.info("Thread stopping (running=False after wait loop)")
                     break
 
                 # Read data
                 try:
+                    read_start = time.perf_counter()
                     if self._data_source == DataSource.PHASE:
                         self._read_phase_data()
                     else:
                         self._read_raw_data()
+                    read_time = (time.perf_counter() - read_start) * 1000
+                    log.debug(f"Data read completed in {read_time:.1f}ms")
+
                 except PCIe7821Error as e:
+                    log.error(f"Read error: {e}")
                     self.error_occurred.emit(str(e))
                     time.sleep(0.1)
                     continue
 
                 self._frames_acquired += self._frame_num
 
+                loop_time = (time.perf_counter() - loop_start) * 1000
+                if loop_time > 100:
+                    log.warning(f"Slow loop iteration: {loop_time:.1f}ms")
+
         except Exception as e:
+            log.exception(f"Unexpected acquisition error: {e}")
             self.error_occurred.emit(f"Acquisition error: {e}")
 
         finally:
+            log.info(f"=== Acquisition thread stopped === (loops={self._loop_count}, frames={self._frames_acquired})")
             self.acquisition_stopped.emit()
 
     def _read_raw_data(self):
         """Read raw IQ data"""
         points_per_ch = self._total_point_num * self._frame_num
+        log.debug(f"Reading raw data: {points_per_ch} points/ch, {self._channel_num} channels")
+
         data, points_returned = self.api.read_data(points_per_ch, self._channel_num)
 
         self._bytes_acquired += len(data) * 2  # short = 2 bytes
@@ -148,15 +203,16 @@ class AcquisitionThread(QThread):
         # Reshape data by channels
         if self._channel_num > 1:
             # Data is interleaved: ch0[0], ch1[0], ch0[1], ch1[1], ...
-            total_points = len(data)
-            points_per_frame = self._total_point_num * self._channel_num
             data = data.reshape(-1, self._channel_num)
 
+        log.debug(f"Emitting data_ready signal: shape={data.shape}, dtype={data.dtype}")
         self.data_ready.emit(data, self._data_source, self._channel_num)
 
     def _read_phase_data(self):
         """Read phase demodulated data"""
         points_per_ch = self._point_num_after_merge * self._frame_num
+        log.debug(f"Reading phase data: {points_per_ch} points/ch, {self._channel_num} channels")
+
         phase_data, points_returned = self.api.read_phase_data(points_per_ch, self._channel_num)
 
         self._bytes_acquired += len(phase_data) * 4  # int = 4 bytes
@@ -165,6 +221,7 @@ class AcquisitionThread(QThread):
         if self._channel_num > 1:
             phase_data = phase_data.reshape(-1, self._channel_num)
 
+        log.debug(f"Emitting phase_data_ready signal: shape={phase_data.shape}")
         self.phase_data_ready.emit(phase_data, self._channel_num)
 
         # Also read monitor data when in phase mode
@@ -172,12 +229,14 @@ class AcquisitionThread(QThread):
             monitor_data = self.api.read_monitor_data(
                 self._point_num_after_merge, self._channel_num
             )
+            log.debug(f"Emitting monitor_data_ready signal: shape={monitor_data.shape}")
             self.monitor_data_ready.emit(monitor_data, self._channel_num)
-        except PCIe7821Error:
-            pass  # Monitor data read failure is not critical
+        except PCIe7821Error as e:
+            log.warning(f"Monitor data read failed (non-critical): {e}")
 
     def stop(self):
         """Stop acquisition thread"""
+        log.info("Stop requested")
         self._running = False
 
         # Wake up if paused
@@ -188,16 +247,22 @@ class AcquisitionThread(QThread):
 
         # Wait for thread to finish
         if self.isRunning():
-            self.wait(3000)  # 3 second timeout
+            log.debug("Waiting for thread to finish...")
+            if not self.wait(3000):  # 3 second timeout
+                log.warning("Thread did not finish in 3 seconds!")
+            else:
+                log.debug("Thread finished")
 
     def pause(self):
         """Pause acquisition"""
+        log.info("Pause requested")
         self._mutex.lock()
         self._paused = True
         self._mutex.unlock()
 
     def resume(self):
         """Resume acquisition"""
+        log.info("Resume requested")
         self._mutex.lock()
         self._paused = False
         self._pause_condition.wakeAll()
@@ -241,25 +306,47 @@ class SimulatedAcquisitionThread(AcquisitionThread):
 
     def __init__(self, parent=None):
         """Initialize with dummy API"""
+        log.info("Creating SimulatedAcquisitionThread")
+
         # Create a mock API
-        self._mock_api = type('MockAPI', (), {
-            'query_buffer_points': lambda s: 100000,
-            'read_data': lambda s, n, c: (np.random.randint(-32768, 32767, n*c, dtype=np.int16), n),
-            'read_phase_data': lambda s, n, c: (np.random.randint(-100000, 100000, n*c, dtype=np.int32), n),
-            'read_monitor_data': lambda s, n, c: np.random.randint(0, 65535, n*c, dtype=np.uint32),
-        })()
+        class MockAPI:
+            def query_buffer_points(self):
+                return 100000
+
+            def read_data(self, n, c):
+                return np.random.randint(-32768, 32767, n*c, dtype=np.int16), n
+
+            def read_phase_data(self, n, c):
+                return np.random.randint(-100000, 100000, n*c, dtype=np.int32), n
+
+            def read_monitor_data(self, n, c):
+                return np.random.randint(0, 65535, n*c, dtype=np.uint32)
+
+        self._mock_api = MockAPI()
         super().__init__(self._mock_api, parent)
 
     def run(self):
         """Simulated acquisition loop"""
+        log.info("=== Simulated acquisition thread started ===")
         self._running = True
         self._frames_acquired = 0
         self._bytes_acquired = 0
+        self._loop_count = 0
+        self._last_log_time = time.time()
 
         self.acquisition_started.emit()
 
         try:
             while self._running:
+                self._loop_count += 1
+                loop_start = time.perf_counter()
+
+                # Periodic status log
+                now = time.time()
+                if now - self._last_log_time > 5.0:
+                    log.info(f"Simulation status: loops={self._loop_count}, frames={self._frames_acquired}")
+                    self._last_log_time = now
+
                 # Check for pause
                 self._mutex.lock()
                 while self._paused and self._running:
@@ -269,8 +356,10 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                 if not self._running:
                     break
 
-                # Simulate acquisition delay
-                time.sleep(self._frame_num / max(self._params.basic.scan_rate if self._params else 2000, 1))
+                # Simulate acquisition delay based on scan rate
+                scan_rate = self._params.basic.scan_rate if self._params else 2000
+                delay = self._frame_num / max(scan_rate, 1)
+                time.sleep(delay)
 
                 # Generate simulated data
                 if self._data_source == DataSource.PHASE:
@@ -301,8 +390,13 @@ class SimulatedAcquisitionThread(AcquisitionThread):
 
                 self._frames_acquired += self._frame_num
 
+                loop_time = (time.perf_counter() - loop_start) * 1000
+                log.debug(f"Simulation loop {self._loop_count}: {loop_time:.1f}ms")
+
         except Exception as e:
+            log.exception(f"Simulation error: {e}")
             self.error_occurred.emit(f"Simulation error: {e}")
 
         finally:
+            log.info(f"=== Simulated acquisition thread stopped === (loops={self._loop_count})")
             self.acquisition_stopped.emit()

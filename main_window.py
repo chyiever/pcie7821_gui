@@ -5,6 +5,7 @@ PyQt5-based GUI with real-time waveform display
 
 import sys
 import os
+import time
 import numpy as np
 from typing import Optional
 from PyQt5.QtWidgets import (
@@ -27,6 +28,10 @@ from pcie7821_api import PCIe7821API, PCIe7821Error
 from acquisition_thread import AcquisitionThread, SimulatedAcquisitionThread
 from data_saver import DataSaver
 from spectrum_analyzer import RealTimeSpectrumAnalyzer
+from logger import get_logger
+
+# Module logger
+log = get_logger("gui")
 
 
 class MainWindow(QMainWindow):
@@ -40,6 +45,7 @@ class MainWindow(QMainWindow):
             simulation_mode: If True, use simulated data without hardware
         """
         super().__init__()
+        log.info(f"MainWindow initializing (simulation_mode={simulation_mode})")
         self.simulation_mode = simulation_mode
 
         # Initialize components
@@ -56,10 +62,16 @@ class MainWindow(QMainWindow):
         self._raw_data_buffer = []
         self._current_monitor_data = None
 
+        # Performance tracking
+        self._last_data_time = 0
+        self._data_count = 0
+        self._gui_update_count = 0
+
         # Setup UI
         self.setWindowTitle("PCIe-7821 DAS Acquisition Software")
         self.setMinimumSize(1400, 900)
 
+        log.debug("Setting up UI...")
         self._setup_ui()
         self._setup_plots()
         self._connect_signals()
@@ -74,6 +86,8 @@ class MainWindow(QMainWindow):
             self._init_device()
         else:
             self._update_device_status(True)
+
+        log.info("MainWindow initialized")
 
     def _setup_ui(self):
         """Setup the user interface"""
@@ -423,19 +437,24 @@ class MainWindow(QMainWindow):
 
     def _init_device(self):
         """Initialize the PCIe-7821 device"""
+        log.info("Initializing device...")
         try:
             self.api = PCIe7821API()
             result = self.api.open()
             if result == 0:
                 self._update_device_status(True)
+                log.info("Device initialized successfully")
             else:
                 self._update_device_status(False)
+                log.error(f"Failed to open device: error code {result}")
                 QMessageBox.warning(self, "Warning", f"Failed to open device: error code {result}")
         except FileNotFoundError as e:
             self._update_device_status(False)
+            log.error(f"DLL not found: {e}")
             QMessageBox.warning(self, "Warning", f"DLL not found: {e}")
         except Exception as e:
             self._update_device_status(False)
+            log.exception(f"Failed to initialize device: {e}")
             QMessageBox.warning(self, "Warning", f"Failed to initialize device: {e}")
 
     def _update_device_status(self, connected: bool):
@@ -507,6 +526,7 @@ class MainWindow(QMainWindow):
         if self.api is None:
             return False
 
+        log.info("Configuring device...")
         try:
             self.api.set_clk_src(params.basic.clk_src)
             self.api.set_trig_dir(params.basic.trig_dir)
@@ -540,23 +560,31 @@ class MainWindow(QMainWindow):
                 params.upload.data_source == DataSource.PHASE
             )
 
+            log.info("Device configured successfully")
             return True
 
         except PCIe7821Error as e:
+            log.error(f"Failed to configure device: {e}")
             QMessageBox.critical(self, "Error", f"Failed to configure device: {e}")
             return False
 
     @pyqtSlot()
     def _on_start(self):
         """Handle start button click"""
+        log.info("=== START button clicked ===")
+
         # Collect and validate parameters
         params = self._collect_params()
         valid, msg = self._validate_params(params)
         if not valid:
+            log.warning(f"Invalid parameters: {msg}")
             QMessageBox.warning(self, "Invalid Parameters", msg)
             return
 
         self.params = params
+        log.info(f"Parameters: scan_rate={params.basic.scan_rate}, points={params.basic.point_num_per_scan}, "
+                 f"channels={params.upload.channel_num}, data_source={params.upload.data_source}, "
+                 f"frames={params.display.frame_num}")
 
         # Configure device (if not simulation mode)
         if not self.simulation_mode:
@@ -564,27 +592,39 @@ class MainWindow(QMainWindow):
                 return
 
             # Start device
+            log.info("Starting device acquisition...")
             try:
                 self.api.start()
             except PCIe7821Error as e:
+                log.error(f"Failed to start acquisition: {e}")
                 QMessageBox.critical(self, "Error", f"Failed to start acquisition: {e}")
                 return
 
         # Start data saver if enabled
         if params.save.enable:
+            log.info(f"Starting data saver to {params.save.path}")
             self.data_saver = DataSaver(params.save.path)
             filename = self.data_saver.start()
             self.save_status_label.setText(f"Save: {filename}")
         else:
             self.save_status_label.setText("Save: Off")
 
+        # Reset counters
+        self._data_count = 0
+        self._gui_update_count = 0
+        self._last_data_time = time.time()
+
         # Create and start acquisition thread
+        log.info("Creating acquisition thread...")
         if self.simulation_mode:
             self.acq_thread = SimulatedAcquisitionThread(self)
         else:
             self.acq_thread = AcquisitionThread(self.api, self)
 
         self.acq_thread.configure(params)
+
+        # Connect signals with logging
+        log.debug("Connecting acquisition thread signals...")
         self.acq_thread.phase_data_ready.connect(self._on_phase_data)
         self.acq_thread.data_ready.connect(self._on_raw_data)
         self.acq_thread.monitor_data_ready.connect(self._on_monitor_data)
@@ -592,6 +632,7 @@ class MainWindow(QMainWindow):
         self.acq_thread.error_occurred.connect(self._on_error)
         self.acq_thread.acquisition_stopped.connect(self._on_acquisition_stopped)
 
+        log.info("Starting acquisition thread...")
         self.acq_thread.start()
 
         # Update UI state
@@ -602,27 +643,36 @@ class MainWindow(QMainWindow):
         # Reset spectrum analyzer
         self.spectrum_analyzer.reset()
 
+        log.info("Acquisition started successfully")
+
     @pyqtSlot()
     def _on_stop(self):
         """Handle stop button click"""
+        log.info("=== STOP button clicked ===")
+
         if self.acq_thread is not None:
+            log.debug("Stopping acquisition thread...")
             self.acq_thread.stop()
 
         if not self.simulation_mode and self.api is not None:
+            log.debug("Stopping device...")
             try:
                 self.api.stop()
-            except PCIe7821Error:
-                pass
+            except PCIe7821Error as e:
+                log.warning(f"Error stopping device: {e}")
 
         if self.data_saver is not None:
+            log.debug("Stopping data saver...")
             self.data_saver.stop()
             self.data_saver = None
 
         self.save_status_label.setText("Save: Off")
+        log.info(f"Stopped. Total data callbacks: {self._data_count}, GUI updates: {self._gui_update_count}")
 
     @pyqtSlot()
     def _on_acquisition_stopped(self):
         """Handle acquisition stopped signal"""
+        log.info("Acquisition stopped signal received")
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._set_params_enabled(True)
@@ -641,28 +691,59 @@ class MainWindow(QMainWindow):
     @pyqtSlot(np.ndarray, int)
     def _on_phase_data(self, data: np.ndarray, channel_num: int):
         """Handle phase data from acquisition thread"""
+        self._data_count += 1
+        start_time = time.perf_counter()
+
+        if self._data_count % 10 == 0:
+            log.debug(f"Phase data received #{self._data_count}: shape={data.shape}, channels={channel_num}")
+
         # Save data if enabled
         if self.data_saver is not None and self.data_saver.is_running:
             self.data_saver.save(data)
 
         # Update display
-        self._update_phase_display(data, channel_num)
+        try:
+            self._update_phase_display(data, channel_num)
+            self._gui_update_count += 1
+        except Exception as e:
+            log.exception(f"Error in _update_phase_display: {e}")
+
+        elapsed = (time.perf_counter() - start_time) * 1000
+        if elapsed > 50:
+            log.warning(f"Slow _on_phase_data: {elapsed:.1f}ms")
 
     @pyqtSlot(np.ndarray, int, int)
     def _on_raw_data(self, data: np.ndarray, data_type: int, channel_num: int):
         """Handle raw data from acquisition thread"""
+        self._data_count += 1
+        start_time = time.perf_counter()
+
+        if self._data_count % 10 == 0:
+            log.debug(f"Raw data received #{self._data_count}: shape={data.shape}, type={data_type}, channels={channel_num}")
+
         # Save data if enabled
         if self.data_saver is not None and self.data_saver.is_running:
             self.data_saver.save(data)
 
         # Update display
-        self._update_raw_display(data, channel_num)
+        try:
+            self._update_raw_display(data, channel_num)
+            self._gui_update_count += 1
+        except Exception as e:
+            log.exception(f"Error in _update_raw_display: {e}")
+
+        elapsed = (time.perf_counter() - start_time) * 1000
+        if elapsed > 50:
+            log.warning(f"Slow _on_raw_data: {elapsed:.1f}ms")
 
     @pyqtSlot(np.ndarray, int)
     def _on_monitor_data(self, data: np.ndarray, channel_num: int):
         """Handle monitor data from acquisition thread"""
         self._current_monitor_data = data
-        self._update_monitor_display(data, channel_num)
+        try:
+            self._update_monitor_display(data, channel_num)
+        except Exception as e:
+            log.exception(f"Error in _update_monitor_display: {e}")
 
     @pyqtSlot(int, int)
     def _on_buffer_status(self, points: int, mb: int):
@@ -672,6 +753,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def _on_error(self, message: str):
         """Handle error from acquisition thread"""
+        log.error(f"Acquisition error: {message}")
         self.statusBar.showMessage(f"Error: {message}", 5000)
 
     def _update_phase_display(self, data: np.ndarray, channel_num: int):
@@ -805,7 +887,7 @@ class MainWindow(QMainWindow):
             else:
                 self.plot_widget_2.setLabel('left', 'Power', units='dBm')
         except Exception as e:
-            print(f"Spectrum error: {e}")
+            log.warning(f"Spectrum update error: {e}")
 
     def _update_status(self):
         """Periodic status update"""
@@ -854,20 +936,26 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Handle window close"""
+        log.info("Window closing...")
+
         # Stop acquisition
         if self.acq_thread is not None and self.acq_thread.isRunning():
+            log.debug("Stopping acquisition thread...")
             self.acq_thread.stop()
             self.acq_thread.wait(2000)
 
         # Stop data saver
         if self.data_saver is not None:
+            log.debug("Stopping data saver...")
             self.data_saver.stop()
 
         # Close device
         if self.api is not None:
+            log.debug("Closing device...")
             try:
                 self.api.close()
-            except:
-                pass
+            except Exception as e:
+                log.warning(f"Error closing device: {e}")
 
+        log.info("Window closed")
         event.accept()
