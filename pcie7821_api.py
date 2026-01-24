@@ -112,18 +112,19 @@ class PCIe7821API:
         # Get the directory containing this script
         script_dir = Path(__file__).parent
 
-        # Search paths
+        # Search paths (prioritize pcie7821_gui directory)
         search_paths = [
-            script_dir.parent / "windows_issue" / "dll" / "x64" / "pcie7821_api.dll",
-            script_dir / "pcie7821_api.dll",
-            Path("pcie7821_api.dll"),
+            script_dir / "pcie7821_api.dll",  # Primary: same folder as this script
+            Path("pcie7821_api.dll"),         # Current working directory
         ]
 
         for path in search_paths:
             if path.exists():
                 return str(path)
 
-        raise FileNotFoundError("pcie7821_api.dll not found in default locations")
+        raise FileNotFoundError(
+            f"pcie7821_api.dll not found. Please copy it to: {script_dir}"
+        )
 
     def _setup_prototypes(self):
         """Setup ctypes function prototypes"""
