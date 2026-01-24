@@ -37,9 +37,9 @@ class BasicParams:
     clk_src: int = ClockSource.INTERNAL
     trig_dir: int = TriggerDirection.OUTPUT
     scan_rate: int = 2000  # Hz
-    pulse_width_ns: int = 120  # ns
+    pulse_width_ns: int = 100  # ns
     point_num_per_scan: int = 20480
-    bypass_point_num: int = 0
+    bypass_point_num: int = 60
     center_freq_mhz: int = 200  # MHz
 
 
@@ -55,8 +55,8 @@ class UploadParams:
 class PhaseDemodParams:
     """Phase demodulation parameters"""
     rate2phase: int = 4  # 1, 2, 4, 8, 16, 32
-    space_avg_order: int = 8
-    merge_point_num: int = 4
+    space_avg_order: int = 25
+    merge_point_num: int = 25
     diff_order: int = 1
     detrend_bw: float = 0.5  # Hz
     polarization_diversity: bool = False
@@ -67,7 +67,7 @@ class DisplayParams:
     """Display control parameters"""
     mode: int = DisplayMode.TIME
     region_index: int = 0
-    frame_num: int = 20
+    frame_num: int = 1024
     spectrum_enable: bool = True
     psd_enable: bool = False
 
@@ -106,19 +106,21 @@ DATA_SOURCE_OPTIONS: List[Tuple[str, int]] = [
 ]
 
 DATA_RATE_OPTIONS: List[Tuple[str, int]] = [
-    ("1 ns", 1),
-    ("2 ns", 2),
-    ("4 ns", 4),
-    ("8 ns", 8),
+    ("1ns (1GHz)", 1),
+    ("2ns (500MHz)", 2),
+    ("4ns (250MHz)", 4),
+    ("8ns (125MHz)", 8),
 ]
 
+# Rate2Phase: 基础采样率1GHz / Rate2Phase = 实际数据率
+# 例如: Rate2Phase=4 → 1GHz/4 = 250MHz
 RATE2PHASE_OPTIONS: List[Tuple[str, int]] = [
-    ("1", 1),
-    ("2", 2),
-    ("4", 4),
-    ("8", 8),
-    ("16", 16),
-    ("32", 32),
+    ("1G", 1),
+    ("500M", 2),
+    ("250M", 4),
+    ("125M", 8),
+    ("62.5M", 16),
+    ("31.25M", 32),
 ]
 
 # Constraints

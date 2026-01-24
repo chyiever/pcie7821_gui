@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QMessageBox, QStatusBar, QSplitter, QFrame, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot
-from PyQt5.QtGui import QFont, QColor, QPalette
+from PyQt5.QtGui import QFont, QColor, QPalette, QPixmap, QFontDatabase
 import pyqtgraph as pg
 
 from config import (
@@ -26,7 +26,7 @@ from config import (
 )
 from pcie7821_api import PCIe7821API, PCIe7821Error
 from acquisition_thread import AcquisitionThread, SimulatedAcquisitionThread
-from data_saver import DataSaver
+from data_saver import TimedFileSaver
 from spectrum_analyzer import RealTimeSpectrumAnalyzer
 from logger import get_logger
 
@@ -51,7 +51,7 @@ class MainWindow(QMainWindow):
         # Initialize components
         self.api: Optional[PCIe7821API] = None
         self.acq_thread: Optional[AcquisitionThread] = None
-        self.data_saver: Optional[DataSaver] = None
+        self.data_saver: Optional[TimedFileSaver] = None
         self.spectrum_analyzer = RealTimeSpectrumAnalyzer()
 
         # Parameters
@@ -94,23 +94,32 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
-        main_layout = QHBoxLayout(central_widget)
+        # Main vertical layout
+        main_vertical_layout = QVBoxLayout(central_widget)
+        main_vertical_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Header with logo and title
+        header_widget = self._create_header()
+        main_vertical_layout.addWidget(header_widget)
+
+        # Content area (horizontal splitter)
+        content_layout = QHBoxLayout()
 
         # Left panel - Parameters
         left_panel = self._create_parameter_panel()
-        left_panel.setMaximumWidth(320)
-        left_panel.setMinimumWidth(280)
+        left_panel.setMaximumWidth(350)
+        left_panel.setMinimumWidth(320)
 
         # Right panel - Plots and controls
         right_panel = self._create_plot_panel()
 
-        # Add to main layout
+        # Add to splitter
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        splitter.setSizes([300, 1100])
+        splitter.setSizes([320, 1100])
 
-        main_layout.addWidget(splitter)
+        main_vertical_layout.addWidget(splitter)
 
         # Status bar
         self.statusBar = QStatusBar()
@@ -122,6 +131,40 @@ class MainWindow(QMainWindow):
         self.statusBar.addWidget(self._data_rate_label)
         self.statusBar.addWidget(self._fiber_length_label)
 
+    def _create_header(self) -> QWidget:
+        """Create header with logo and title"""
+        header = QFrame()
+        header.setFrameStyle(QFrame.StyledPanel)
+        header.setFixedHeight(70)
+
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(10, 5, 10, 5)
+
+        # Logo
+        logo_label = QLabel()
+        logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
+        if os.path.exists(logo_path):
+            pixmap = QPixmap(logo_path)
+            # Scale logo to fit header height
+            scaled_pixmap = pixmap.scaledToHeight(55, Qt.SmoothTransformation)
+            logo_label.setPixmap(scaled_pixmap)
+        else:
+            logo_label.setText("[LOGO]")
+            log.warning(f"Logo file not found: {logo_path}")
+
+        layout.addWidget(logo_label)
+
+        # Title - 黑体加粗36号字
+        title_label = QLabel("分布式光纤传感系统（eDAS）")
+        title_font = QFont("SimHei", 36, QFont.Bold)  # 黑体
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+
+        layout.addWidget(title_label, 1)  # stretch factor 1 to center
+        layout.addStretch()
+
+        return header
+
     def _create_parameter_panel(self) -> QWidget:
         """Create the parameter configuration panel"""
         panel = QWidget()
@@ -129,11 +172,37 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
 
         # Minimum height for input widgets to ensure usability at lower resolutions
-        INPUT_MIN_HEIGHT = 26
+        INPUT_MIN_HEIGHT = 28
+
+        # Apply stylesheet for fonts - Times New Roman for English text, SimHei for Chinese
+        panel.setStyleSheet("""
+            QGroupBox {
+                font-family: 'SimHei', 'Microsoft YaHei';
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QLabel {
+                font-family: 'Times New Roman', 'SimHei';
+                font-size: 12px;
+            }
+            QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit {
+                font-family: 'Times New Roman';
+                font-size: 12px;
+            }
+            QRadioButton, QCheckBox {
+                font-family: 'Times New Roman', 'SimHei';
+                font-size: 11px;
+            }
+            QPushButton {
+                font-family: 'Times New Roman', 'SimHei';
+                font-size: 13px;
+            }
+        """)
 
         # Basic Parameters Group
         basic_group = QGroupBox("Basic Parameters")
         basic_layout = QGridLayout(basic_group)
+        basic_layout.setSpacing(6)
 
         # Clock Source
         basic_layout.addWidget(QLabel("Clock Source:"), 0, 0)
@@ -173,7 +242,7 @@ class MainWindow(QMainWindow):
         basic_layout.addWidget(QLabel("Pulse Width (ns):"), 3, 0)
         self.pulse_width_spin = QSpinBox()
         self.pulse_width_spin.setRange(10, 1000)
-        self.pulse_width_spin.setValue(120)
+        self.pulse_width_spin.setValue(100)
         self.pulse_width_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         basic_layout.addWidget(self.pulse_width_spin, 3, 1)
 
@@ -190,7 +259,7 @@ class MainWindow(QMainWindow):
         basic_layout.addWidget(QLabel("Bypass Points:"), 5, 0)
         self.bypass_spin = QSpinBox()
         self.bypass_spin.setRange(0, 65535)
-        self.bypass_spin.setValue(0)
+        self.bypass_spin.setValue(60)
         self.bypass_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         basic_layout.addWidget(self.bypass_spin, 5, 1)
 
@@ -252,15 +321,15 @@ class MainWindow(QMainWindow):
         phase_layout.addWidget(QLabel("Space Avg:"), 1, 0)
         self.space_avg_spin = QSpinBox()
         self.space_avg_spin.setRange(1, 64)
-        self.space_avg_spin.setValue(8)
+        self.space_avg_spin.setValue(25)
         self.space_avg_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.space_avg_spin, 1, 1)
 
         # Merge Points
         phase_layout.addWidget(QLabel("Merge Points:"), 2, 0)
         self.merge_points_spin = QSpinBox()
-        self.merge_points_spin.setRange(1, 16)
-        self.merge_points_spin.setValue(4)
+        self.merge_points_spin.setRange(1, 64)
+        self.merge_points_spin.setValue(25)
         self.merge_points_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.merge_points_spin, 2, 1)
 
@@ -315,8 +384,8 @@ class MainWindow(QMainWindow):
         # Frame Number
         display_layout.addWidget(QLabel("Frames:"), 2, 0)
         self.frame_num_spin = QSpinBox()
-        self.frame_num_spin.setRange(1, 1000)
-        self.frame_num_spin.setValue(20)
+        self.frame_num_spin.setRange(1, 10000)
+        self.frame_num_spin.setValue(1024)
         self.frame_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         display_layout.addWidget(self.frame_num_spin, 2, 1)
 
@@ -356,13 +425,17 @@ class MainWindow(QMainWindow):
 
         # Control Buttons
         control_layout = QHBoxLayout()
+
+        # START button - green when ready, gray when running
         self.start_btn = QPushButton("START")
-        self.start_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
-        self.start_btn.setMinimumHeight(40)
+        self.start_btn.setMinimumHeight(45)
+        self._set_start_btn_ready()
+
+        # STOP button - gray when disabled, red when enabled
         self.stop_btn = QPushButton("STOP")
-        self.stop_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
-        self.stop_btn.setMinimumHeight(40)
-        self.stop_btn.setEnabled(False)
+        self.stop_btn.setMinimumHeight(45)
+        self._set_stop_btn_disabled()
+
         control_layout.addWidget(self.start_btn)
         control_layout.addWidget(self.stop_btn)
         layout.addLayout(control_layout)
@@ -370,6 +443,74 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         return panel
+
+    def _set_start_btn_ready(self):
+        """Set START button to ready state (green)"""
+        self.start_btn.setEnabled(True)
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:pressed {
+                background-color: #3d8b40;
+            }
+        """)
+
+    def _set_start_btn_running(self):
+        """Set START button to running state (gray, disabled)"""
+        self.start_btn.setEnabled(False)
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #9E9E9E;
+                color: #666666;
+                font-weight: bold;
+                font-size: 14px;
+                border: none;
+                border-radius: 5px;
+            }
+        """)
+
+    def _set_stop_btn_disabled(self):
+        """Set STOP button to disabled state (gray)"""
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #BDBDBD;
+                color: #757575;
+                font-weight: bold;
+                font-size: 14px;
+                border: none;
+                border-radius: 5px;
+            }
+        """)
+
+    def _set_stop_btn_enabled(self):
+        """Set STOP button to enabled state (red)"""
+        self.stop_btn.setEnabled(True)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #da190b;
+            }
+            QPushButton:pressed {
+                background-color: #c41508;
+            }
+        """)
 
     def _create_plot_panel(self) -> QWidget:
         """Create the plot display panel"""
@@ -384,11 +525,16 @@ class MainWindow(QMainWindow):
         self.plot_widget_2 = pg.PlotWidget(title="FFT Spectrum")
         self.plot_widget_3 = pg.PlotWidget(title="Monitor (Fiber End Detection)")
 
-        # Configure plot styles
+        # Configure plot styles - white background
         for pw in [self.plot_widget_1, self.plot_widget_2, self.plot_widget_3]:
-            pw.setBackground('k')
+            pw.setBackground('w')  # White background
             pw.showGrid(x=True, y=True, alpha=0.3)
             pw.setMinimumHeight(200)
+            # Set axis and title colors for white background
+            pw.getAxis('left').setPen('k')
+            pw.getAxis('bottom').setPen('k')
+            pw.getAxis('left').setTextPen('k')
+            pw.getAxis('bottom').setTextPen('k')
 
         # Plot 1 - Time domain
         self.plot_widget_1.setLabel('left', 'Amplitude')
@@ -398,7 +544,7 @@ class MainWindow(QMainWindow):
         # Plot 2 - Spectrum
         self.plot_widget_2.setLabel('left', 'Power', units='dBm')
         self.plot_widget_2.setLabel('bottom', 'Frequency', units='Hz')
-        self.spectrum_curve = self.plot_widget_2.plot(pen=pg.mkPen('y', width=1))
+        self.spectrum_curve = self.plot_widget_2.plot(pen=pg.mkPen('#9467bd', width=1.5))  # Purple
 
         # Plot 3 - Monitor
         self.plot_widget_3.setLabel('left', 'Amplitude')
@@ -430,16 +576,17 @@ class MainWindow(QMainWindow):
 
     def _setup_plots(self):
         """Initialize plot curves"""
-        colors = ['g', 'c', 'r', 'b']
+        # Colors suitable for white background
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']  # Blue, Orange, Green, Red
 
         # Time domain curves (up to 4 frames)
         for i in range(4):
-            curve = self.plot_widget_1.plot(pen=pg.mkPen(colors[i], width=1))
+            curve = self.plot_widget_1.plot(pen=pg.mkPen(colors[i], width=1.5))
             self.plot_curve_1.append(curve)
 
         # Monitor curves (up to 2 channels)
         for i in range(2):
-            curve = self.plot_widget_3.plot(pen=pg.mkPen(colors[i], width=1))
+            curve = self.plot_widget_3.plot(pen=pg.mkPen(colors[i], width=1.5))
             self.monitor_curves.append(curve)
 
     def _connect_signals(self):
@@ -620,11 +767,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to start acquisition: {e}")
                 return
 
-        # Start data saver if enabled
+        # Start data saver if enabled (1 second per file)
         if params.save.enable:
             log.info(f"Starting data saver to {params.save.path}")
-            self.data_saver = DataSaver(params.save.path)
-            filename = self.data_saver.start()
+            self.data_saver = TimedFileSaver(params.save.path, file_duration_s=1.0)
+            filename = self.data_saver.start(scan_rate=params.basic.scan_rate)
             self.save_status_label.setText(f"Save: {filename}")
         else:
             self.save_status_label.setText("Save: Off")
@@ -655,9 +802,9 @@ class MainWindow(QMainWindow):
         log.info("Starting acquisition thread...")
         self.acq_thread.start()
 
-        # Update UI state
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
+        # Update UI state - button colors change
+        self._set_start_btn_running()
+        self._set_stop_btn_enabled()
         self._set_params_enabled(False)
 
         # Reset spectrum analyzer
@@ -693,8 +840,9 @@ class MainWindow(QMainWindow):
     def _on_acquisition_stopped(self):
         """Handle acquisition stopped signal"""
         log.info("Acquisition stopped signal received")
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        # Restore button colors
+        self._set_start_btn_ready()
+        self._set_stop_btn_disabled()
         self._set_params_enabled(True)
 
     def _set_params_enabled(self, enabled: bool):
@@ -720,6 +868,9 @@ class MainWindow(QMainWindow):
         # Save data if enabled
         if self.data_saver is not None and self.data_saver.is_running:
             self.data_saver.save(data)
+            # Update save status periodically
+            if self._data_count % 20 == 0:
+                self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {self.data_saver.current_filename}")
 
         # Update display
         try:
@@ -744,6 +895,9 @@ class MainWindow(QMainWindow):
         # Save data if enabled
         if self.data_saver is not None and self.data_saver.is_running:
             self.data_saver.save(data)
+            # Update save status periodically
+            if self._data_count % 20 == 0:
+                self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {self.data_saver.current_filename}")
 
         # Update display
         try:
