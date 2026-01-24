@@ -128,6 +128,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setSpacing(8)
 
+        # Minimum height for input widgets to ensure usability at lower resolutions
+        INPUT_MIN_HEIGHT = 26
+
         # Basic Parameters Group
         basic_group = QGroupBox("Basic Parameters")
         basic_layout = QGridLayout(basic_group)
@@ -163,6 +166,7 @@ class MainWindow(QMainWindow):
         self.scan_rate_spin = QSpinBox()
         self.scan_rate_spin.setRange(1, 100000)
         self.scan_rate_spin.setValue(2000)
+        self.scan_rate_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         basic_layout.addWidget(self.scan_rate_spin, 2, 1)
 
         # Pulse Width
@@ -170,6 +174,7 @@ class MainWindow(QMainWindow):
         self.pulse_width_spin = QSpinBox()
         self.pulse_width_spin.setRange(10, 1000)
         self.pulse_width_spin.setValue(120)
+        self.pulse_width_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         basic_layout.addWidget(self.pulse_width_spin, 3, 1)
 
         # Points per Scan
@@ -178,6 +183,7 @@ class MainWindow(QMainWindow):
         self.point_num_spin.setRange(512, 262144)
         self.point_num_spin.setValue(20480)
         self.point_num_spin.setSingleStep(512)
+        self.point_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         basic_layout.addWidget(self.point_num_spin, 4, 1)
 
         # Bypass Points
@@ -185,6 +191,7 @@ class MainWindow(QMainWindow):
         self.bypass_spin = QSpinBox()
         self.bypass_spin.setRange(0, 65535)
         self.bypass_spin.setValue(0)
+        self.bypass_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         basic_layout.addWidget(self.bypass_spin, 5, 1)
 
         # Center Frequency
@@ -192,6 +199,7 @@ class MainWindow(QMainWindow):
         self.center_freq_spin = QSpinBox()
         self.center_freq_spin.setRange(50, 500)
         self.center_freq_spin.setValue(200)
+        self.center_freq_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         basic_layout.addWidget(self.center_freq_spin, 6, 1)
 
         layout.addWidget(basic_group)
@@ -205,6 +213,7 @@ class MainWindow(QMainWindow):
         self.channel_combo = QComboBox()
         for label, value in CHANNEL_NUM_OPTIONS:
             self.channel_combo.addItem(label, value)
+        self.channel_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
         upload_layout.addWidget(self.channel_combo, 0, 1)
 
         # Data Source
@@ -213,6 +222,7 @@ class MainWindow(QMainWindow):
         for label, value in DATA_SOURCE_OPTIONS:
             self.data_source_combo.addItem(label, value)
         self.data_source_combo.setCurrentIndex(4)  # Default to Phase
+        self.data_source_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
         upload_layout.addWidget(self.data_source_combo, 1, 1)
 
         # Data Rate
@@ -220,6 +230,7 @@ class MainWindow(QMainWindow):
         self.data_rate_combo = QComboBox()
         for label, value in DATA_RATE_OPTIONS:
             self.data_rate_combo.addItem(label, value)
+        self.data_rate_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
         upload_layout.addWidget(self.data_rate_combo, 2, 1)
 
         layout.addWidget(upload_group)
@@ -234,6 +245,7 @@ class MainWindow(QMainWindow):
         for label, value in RATE2PHASE_OPTIONS:
             self.rate2phase_combo.addItem(label, value)
         self.rate2phase_combo.setCurrentIndex(2)  # Default 4
+        self.rate2phase_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.rate2phase_combo, 0, 1)
 
         # Space Average
@@ -241,6 +253,7 @@ class MainWindow(QMainWindow):
         self.space_avg_spin = QSpinBox()
         self.space_avg_spin.setRange(1, 64)
         self.space_avg_spin.setValue(8)
+        self.space_avg_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.space_avg_spin, 1, 1)
 
         # Merge Points
@@ -248,6 +261,7 @@ class MainWindow(QMainWindow):
         self.merge_points_spin = QSpinBox()
         self.merge_points_spin.setRange(1, 16)
         self.merge_points_spin.setValue(4)
+        self.merge_points_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.merge_points_spin, 2, 1)
 
         # Diff Order
@@ -255,6 +269,7 @@ class MainWindow(QMainWindow):
         self.diff_order_spin = QSpinBox()
         self.diff_order_spin.setRange(0, 4)
         self.diff_order_spin.setValue(1)
+        self.diff_order_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.diff_order_spin, 3, 1)
 
         # Detrend BW
@@ -263,6 +278,7 @@ class MainWindow(QMainWindow):
         self.detrend_bw_spin.setRange(0.0, 100.0)
         self.detrend_bw_spin.setValue(0.5)
         self.detrend_bw_spin.setSingleStep(0.1)
+        self.detrend_bw_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.detrend_bw_spin, 4, 1)
 
         # Polarization Diversity
@@ -293,6 +309,7 @@ class MainWindow(QMainWindow):
         self.region_index_spin = QSpinBox()
         self.region_index_spin.setRange(0, 65535)
         self.region_index_spin.setValue(0)
+        self.region_index_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         display_layout.addWidget(self.region_index_spin, 1, 1)
 
         # Frame Number
@@ -300,6 +317,7 @@ class MainWindow(QMainWindow):
         self.frame_num_spin = QSpinBox()
         self.frame_num_spin.setRange(1, 1000)
         self.frame_num_spin.setValue(20)
+        self.frame_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         display_layout.addWidget(self.frame_num_spin, 2, 1)
 
         # Spectrum Enable
@@ -325,8 +343,10 @@ class MainWindow(QMainWindow):
         save_layout.addWidget(QLabel("Path:"), 1, 0)
         path_layout = QHBoxLayout()
         self.save_path_edit = QLineEdit("save_data")
+        self.save_path_edit.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.browse_btn = QPushButton("...")
         self.browse_btn.setMaximumWidth(30)
+        self.browse_btn.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.browse_btn.clicked.connect(self._browse_save_path)
         path_layout.addWidget(self.save_path_edit)
         path_layout.addWidget(self.browse_btn)
