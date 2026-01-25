@@ -33,6 +33,9 @@ from logger import get_logger
 # Module logger
 log = get_logger("gui")
 
+# Maximum points to display per curve (for performance)
+MAX_DISPLAY_POINTS = 10000
+
 
 class MainWindow(QMainWindow):
     """Main application window"""
@@ -949,6 +952,27 @@ class MainWindow(QMainWindow):
         log.error(f"Acquisition error: {message}")
         self.statusBar.showMessage(f"Error: {message}", 5000)
 
+    def _decimate_for_display(self, data: np.ndarray, max_points: int = MAX_DISPLAY_POINTS) -> np.ndarray:
+        """
+        Decimate data for display to prevent GUI freeze.
+
+        Args:
+            data: Input data array
+            max_points: Maximum points to display
+
+        Returns:
+            Decimated data array
+        """
+        if len(data) <= max_points:
+            return data
+
+        factor = len(data) // max_points
+        if factor <= 1:
+            return data
+
+        # Use simple strided decimation for speed
+        return data[::factor]
+
     def _update_phase_display(self, data: np.ndarray, channel_num: int):
         """Update display for phase data"""
         frame_num = self.params.display.frame_num
@@ -967,7 +991,8 @@ class MainWindow(QMainWindow):
                         space_data.append(data[idx])
 
                 space_data = np.array(space_data)
-                self.plot_curve_1[0].setData(space_data)
+                display_data = self._decimate_for_display(space_data)
+                self.plot_curve_1[0].setData(display_data)
 
                 # Clear other curves
                 for i in range(1, 4):
@@ -988,7 +1013,8 @@ class MainWindow(QMainWindow):
                         idx = region_idx + point_num * i
                         if idx < len(data):
                             space_data.append(data[idx, ch])
-                    self.plot_curve_1[ch].setData(np.array(space_data))
+                    display_data = self._decimate_for_display(np.array(space_data))
+                    self.plot_curve_1[ch].setData(display_data)
 
                 for i in range(channel_num, 4):
                     self.plot_curve_1[i].setData([])
@@ -1000,7 +1026,8 @@ class MainWindow(QMainWindow):
                     start = i * point_num
                     end = start + point_num
                     if end <= len(data):
-                        self.plot_curve_1[i].setData(data[start:end])
+                        frame_data = self._decimate_for_display(data[start:end])
+                        self.plot_curve_1[i].setData(frame_data)
                     else:
                         self.plot_curve_1[i].setData([])
 
@@ -1015,7 +1042,8 @@ class MainWindow(QMainWindow):
                 # Show first frame of each channel
                 for ch in range(min(channel_num, 4)):
                     if point_num <= len(data):
-                        self.plot_curve_1[ch].setData(data[:point_num, ch])
+                        frame_data = self._decimate_for_display(data[:point_num, ch])
+                        self.plot_curve_1[ch].setData(frame_data)
 
         # Update frame counter
         if self.acq_thread is not None:
@@ -1032,7 +1060,8 @@ class MainWindow(QMainWindow):
                 start = i * point_num
                 end = start + point_num
                 if end <= len(data):
-                    self.plot_curve_1[i].setData(data[start:end])
+                    frame_data = self._decimate_for_display(data[start:end])
+                    self.plot_curve_1[i].setData(frame_data)
                 else:
                     self.plot_curve_1[i].setData([])
 
@@ -1047,7 +1076,8 @@ class MainWindow(QMainWindow):
 
             for ch in range(min(channel_num, 4)):
                 if point_num <= len(data):
-                    self.plot_curve_1[ch].setData(data[:point_num, ch])
+                    frame_data = self._decimate_for_display(data[:point_num, ch])
+                    self.plot_curve_1[ch].setData(frame_data)
 
         if self.acq_thread is not None:
             self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
@@ -1057,14 +1087,16 @@ class MainWindow(QMainWindow):
         point_num = self.params.basic.point_num_per_scan // self.params.phase_demod.merge_point_num
 
         if channel_num == 1:
-            self.monitor_curves[0].setData(data[:point_num])
+            monitor_data = self._decimate_for_display(data[:point_num])
+            self.monitor_curves[0].setData(monitor_data)
             self.monitor_curves[1].setData([])
         else:
             if len(data.shape) == 1:
                 data = data.reshape(-1, channel_num)
 
             for ch in range(min(channel_num, 2)):
-                self.monitor_curves[ch].setData(data[:point_num, ch])
+                monitor_data = self._decimate_for_display(data[:point_num, ch])
+                self.monitor_curves[ch].setData(monitor_data)
 
     def _update_spectrum(self, data: np.ndarray, sample_rate: float, psd_mode: bool, data_type: str):
         """Update spectrum plot"""
