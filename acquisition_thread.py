@@ -21,6 +21,10 @@ MIN_GUI_UPDATE_INTERVAL_MS = 50  # 20 FPS max
 # Maximum points to send to GUI (decimate before emitting signal)
 MAX_DISPLAY_POINTS = 10000
 
+# Maximum frames to read per loop iteration (to prevent buffer overflow)
+# For display at 20 FPS, we only need a few frames per read
+MAX_FRAMES_PER_READ = 10
+
 
 class AcquisitionThread(QThread):
     """
@@ -134,13 +138,14 @@ class AcquisitionThread(QThread):
                     log.info("Thread stopping (running=False after pause check)")
                     break
 
-                # Determine expected data size
+                # Determine expected data size (limit frames to prevent buffer overflow)
+                read_frame_num = min(self._frame_num, MAX_FRAMES_PER_READ)
                 if self._data_source == DataSource.PHASE:
-                    expected_points = self._point_num_after_merge * self._frame_num
+                    expected_points = self._point_num_after_merge * read_frame_num
                 else:
-                    expected_points = self._total_point_num * self._frame_num
+                    expected_points = self._total_point_num * read_frame_num
 
-                log.debug(f"Loop {self._loop_count}: waiting for {expected_points} points")
+                log.debug(f"Loop {self._loop_count}: waiting for {expected_points} points (frames={read_frame_num})")
 
                 # Wait for enough data in buffer
                 wait_start = time.perf_counter()
@@ -179,9 +184,9 @@ class AcquisitionThread(QThread):
                 try:
                     read_start = time.perf_counter()
                     if self._data_source == DataSource.PHASE:
-                        self._read_phase_data()
+                        self._read_phase_data(read_frame_num)
                     else:
-                        self._read_raw_data()
+                        self._read_raw_data(read_frame_num)
                     read_time = (time.perf_counter() - read_start) * 1000
                     log.debug(f"Data read completed in {read_time:.1f}ms")
 
@@ -191,7 +196,7 @@ class AcquisitionThread(QThread):
                     time.sleep(0.1)
                     continue
 
-                self._frames_acquired += self._frame_num
+                self._frames_acquired += read_frame_num
 
                 loop_time = (time.perf_counter() - loop_start) * 1000
                 if loop_time > 100:
@@ -205,9 +210,9 @@ class AcquisitionThread(QThread):
             log.info(f"=== Acquisition thread stopped === (loops={self._loop_count}, frames={self._frames_acquired})")
             self.acquisition_stopped.emit()
 
-    def _read_raw_data(self):
+    def _read_raw_data(self, read_frame_num: int):
         """Read raw IQ data"""
-        points_per_ch = self._total_point_num * self._frame_num
+        points_per_ch = self._total_point_num * read_frame_num
         log.debug(f"Reading raw data: {points_per_ch} points/ch, {self._channel_num} channels")
 
         data, points_returned = self.api.read_data(points_per_ch, self._channel_num)
@@ -223,9 +228,9 @@ class AcquisitionThread(QThread):
         self._pending_raw_data = (data, self._data_source, self._channel_num)
         self._emit_if_ready()
 
-    def _read_phase_data(self):
+    def _read_phase_data(self, read_frame_num: int):
         """Read phase demodulated data"""
-        points_per_ch = self._point_num_after_merge * self._frame_num
+        points_per_ch = self._point_num_after_merge * read_frame_num
         log.debug(f"Reading phase data: {points_per_ch} points/ch, {self._channel_num} channels")
 
         phase_data, points_returned = self.api.read_phase_data(points_per_ch, self._channel_num)
@@ -436,14 +441,17 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                 if not self._running:
                     break
 
+                # Limit frames per read to prevent generating too much data
+                read_frame_num = min(self._frame_num, MAX_FRAMES_PER_READ)
+
                 # Simulate acquisition delay based on scan rate
                 scan_rate = self._params.basic.scan_rate if self._params else 2000
-                delay = self._frame_num / max(scan_rate, 1)
+                delay = read_frame_num / max(scan_rate, 1)
                 time.sleep(delay)
 
                 # Generate simulated data
                 if self._data_source == DataSource.PHASE:
-                    points = self._point_num_after_merge * self._frame_num
+                    points = self._point_num_after_merge * read_frame_num
                     phase_data = np.random.randint(-100000, 100000, points * self._channel_num, dtype=np.int32)
 
                     if self._channel_num > 1:
@@ -457,7 +465,7 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                     monitor_data = np.random.randint(0, 65535, self._point_num_after_merge * self._channel_num, dtype=np.uint32)
                     self._pending_monitor_data = (monitor_data, self._channel_num)
                 else:
-                    points = self._total_point_num * self._frame_num
+                    points = self._total_point_num * read_frame_num
                     data = np.random.randint(-32768, 32767, points * self._channel_num, dtype=np.int16)
 
                     if self._channel_num > 1:
@@ -474,7 +482,7 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                 if self._loop_count % 10 == 0:
                     self.buffer_status.emit(100000, 10)
 
-                self._frames_acquired += self._frame_num
+                self._frames_acquired += read_frame_num
 
                 loop_time = (time.perf_counter() - loop_start) * 1000
                 log.debug(f"Simulation loop {self._loop_count}: {loop_time:.1f}ms")
