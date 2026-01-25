@@ -74,8 +74,7 @@ class AcquisitionThread(QThread):
         self._loop_count = 0
         self._last_log_time = 0
 
-        # GUI update throttling
-        self._last_gui_update_time = 0
+        # Pending data for GUI updates
         self._pending_phase_data = None
         self._pending_raw_data = None
         self._pending_monitor_data = None
@@ -202,6 +201,10 @@ class AcquisitionThread(QThread):
                 if loop_time > 100:
                     log.warning(f"Slow loop iteration: {loop_time:.1f}ms")
 
+                # Wait for next GUI update interval to prevent overwhelming the GUI
+                # This ensures we only read/emit at ~20 FPS rate
+                time.sleep(MIN_GUI_UPDATE_INTERVAL_MS / 1000.0)
+
         except Exception as e:
             log.exception(f"Unexpected acquisition error: {e}")
             self.error_occurred.emit(f"Acquisition error: {e}")
@@ -226,7 +229,7 @@ class AcquisitionThread(QThread):
 
         # Throttle GUI updates to prevent signal queue backup
         self._pending_raw_data = (data, self._data_source, self._channel_num)
-        self._emit_if_ready()
+        self._emit_pending_signals()
 
     def _read_phase_data(self, read_frame_num: int):
         """Read phase demodulated data"""
@@ -254,7 +257,7 @@ class AcquisitionThread(QThread):
             log.warning(f"Monitor data read failed (non-critical): {e}")
 
         # Emit all pending data if enough time has passed
-        self._emit_if_ready()
+        self._emit_pending_signals()
 
     def _decimate_for_signal(self, data: np.ndarray) -> np.ndarray:
         """Decimate data before emitting signal to reduce cross-thread data transfer"""
@@ -263,20 +266,16 @@ class AcquisitionThread(QThread):
         factor = len(data) // MAX_DISPLAY_POINTS
         return data[::factor].copy()  # copy() to ensure contiguous memory
 
-    def _emit_if_ready(self):
-        """Emit pending data signals if enough time has passed since last update"""
+    def _emit_pending_signals(self):
+        """
+        Emit all pending data signals immediately (with decimation).
+        Rate limiting is done by sleep in the main loop, not here.
+        """
         # Don't emit signals if stopping
         if self._stopping:
             self._pending_phase_data = None
             self._pending_raw_data = None
             self._pending_monitor_data = None
-            return
-
-        current_time = time.perf_counter() * 1000  # ms
-        elapsed = current_time - self._last_gui_update_time
-
-        if elapsed < MIN_GUI_UPDATE_INTERVAL_MS:
-            # Not enough time passed, skip this update (keep latest data pending)
             return
 
         # Emit all pending signals (with decimation)
@@ -307,8 +306,7 @@ class AcquisitionThread(QThread):
             signals_emitted += 1
 
         if signals_emitted > 0:
-            self._last_gui_update_time = current_time
-            log.debug(f"GUI update: emitted {signals_emitted} signals, elapsed={elapsed:.1f}ms")
+            log.debug(f"GUI update: emitted {signals_emitted} signals")
 
     def stop(self):
         """Stop acquisition thread"""
@@ -444,11 +442,6 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                 # Limit frames per read to prevent generating too much data
                 read_frame_num = min(self._frame_num, MAX_FRAMES_PER_READ)
 
-                # Simulate acquisition delay based on scan rate
-                scan_rate = self._params.basic.scan_rate if self._params else 2000
-                delay = read_frame_num / max(scan_rate, 1)
-                time.sleep(delay)
-
                 # Generate simulated data
                 if self._data_source == DataSource.PHASE:
                     points = self._point_num_after_merge * read_frame_num
@@ -476,7 +469,7 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                     self._bytes_acquired += len(data.flatten()) * 2
 
                 # Emit pending signals if enough time has passed
-                self._emit_if_ready()
+                self._emit_pending_signals()
 
                 # Emit buffer status (throttle this too - only every 10 loops)
                 if self._loop_count % 10 == 0:
@@ -486,6 +479,9 @@ class SimulatedAcquisitionThread(AcquisitionThread):
 
                 loop_time = (time.perf_counter() - loop_start) * 1000
                 log.debug(f"Simulation loop {self._loop_count}: {loop_time:.1f}ms")
+
+                # Wait for next GUI update interval (same as real acquisition)
+                time.sleep(MIN_GUI_UPDATE_INTERVAL_MS / 1000.0)
 
         except Exception as e:
             log.exception(f"Simulation error: {e}")
