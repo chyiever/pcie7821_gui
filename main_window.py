@@ -554,7 +554,21 @@ class MainWindow(QMainWindow):
         # Configure plot styles - white background
         for pw in [self.plot_widget_1, self.plot_widget_2, self.plot_widget_3]:
             pw.setBackground('w')  # White background
-            pw.showGrid(x=True, y=True, alpha=0.3)
+
+            # 设置更密集的网格线
+            pw.showGrid(x=True, y=True, alpha=0.6)  # 主要网格线，增加透明度使其更明显
+
+            # 启用更密集的刻度显示
+            x_axis = pw.getAxis('bottom')
+            y_axis = pw.getAxis('left')
+
+            # 设置刻度样式以显示更多刻度
+            x_axis.setStyle(showValues=True, tickLength=5)
+            y_axis.setStyle(showValues=True, tickLength=5)
+
+            # 设置网格线样式
+            pw.getPlotItem().getViewBox().setBackgroundColor('w')
+
             pw.setMinimumHeight(200)
             # Set axis and title colors for white background
             pw.getAxis('left').setPen('k')
@@ -577,8 +591,8 @@ class MainWindow(QMainWindow):
         # Plot 2 - Spectrum
         self.plot_widget_2.setLabel('left', 'Power', units='dB', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         self.plot_widget_2.setLabel('bottom', 'Frequency', units='Hz', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        # Enable log mode for x-axis when in PSD mode
-        self.plot_widget_2.setLogMode(x=False, y=False)  # Initially linear
+        # 使用线性坐标
+        self.plot_widget_2.setLogMode(x=False, y=False)  # 线性坐标
         self.spectrum_curve = self.plot_widget_2.plot(pen=pg.mkPen('#9467bd', width=1.5))  # Purple
 
         # Plot 3 - Monitor
@@ -1130,76 +1144,62 @@ class MainWindow(QMainWindow):
                 data, sample_rate, psd_mode, data_type
             )
 
-            # 设置为对数坐标（功率谱和PSD都使用对数坐标）
-            self.plot_widget_2.setLogMode(x=True, y=False)  # X轴对数，Y轴线性
+            # 所有频谱图都使用线性坐标
+            self.plot_widget_2.setLogMode(x=False, y=False)  # X轴和Y轴都是线性
 
-            # 过滤掉零频率和奈奎斯特频率以上的数据
+            # 过滤频率范围
             nyquist = sample_rate / 2
-            valid_indices = (freq > 0.1) & (freq <= nyquist)
+            if data_type == 'int':  # 相位数据
+                # 相位数据：X轴范围[1, fs/2]，排除0Hz和DC成分
+                valid_indices = (freq >= 1.0) & (freq <= nyquist)
+            else:  # 原始数据
+                # 原始数据：从0Hz开始
+                valid_indices = (freq >= 0) & (freq <= nyquist)
+
             freq_filtered = freq[valid_indices]
             spectrum_filtered = spectrum[valid_indices]
 
             if len(freq_filtered) > 0:
-                # 根据数据类型确定频率单位和标签
+                # 根据数据类型处理频率显示
                 if data_type == 'int':  # 相位数据
-                    # 相位数据：采样率通常为几百Hz到几千Hz，单位用Hz
+                    # 相位数据：直接使用Hz，不转换
                     freq_display = freq_filtered
-                    freq_unit = 'Hz'
-                    freq_label = 'Frequency'
-                    y_unit_suffix = '/Hz' if psd_mode else ''
                 else:  # raw数据 (data_type == 'short')
-                    # 原始数据：采样率通常为几百MHz到1GHz，单位用MHz
-                    freq_display = freq_filtered / 1e6  # 转换为MHz
-                    freq_unit = 'MHz'
-                    freq_label = 'Frequency'
-                    y_unit_suffix = '/MHz' if psd_mode else ''
+                    # 原始数据：转换为MHz显示
+                    freq_display = freq_filtered / 1e6
 
                 self.spectrum_curve.setData(freq_display, spectrum_filtered)
 
-                # 设置X轴范围（自动范围，不固定）
-                self.plot_widget_2.enableAutoRange(axis='x')
+                # 设置X轴范围
+                if data_type == 'int':  # 相位数据
+                    # 相位数据：显式设置X轴范围[1, fs/2]
+                    nyquist_display = nyquist  # 保持Hz单位
+                    self.plot_widget_2.setXRange(1.0, nyquist_display, padding=0.02)
+                else:  # 原始数据
+                    # 原始数据：自动范围
+                    self.plot_widget_2.enableAutoRange(axis='x')
 
-                # 自定义X轴刻度标签
-                self._setup_log_ticks(freq_display)
+                # 更新X轴标签 - 直接在标签中指定单位，避免pyqtgraph自动转换
+                if data_type == 'int':  # 相位数据
+                    self.plot_widget_2.setLabel('bottom', 'Frequency (Hz)',
+                                              **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                else:  # raw数据
+                    self.plot_widget_2.setLabel('bottom', 'Frequency (MHz)',
+                                              **{'font-family': 'Times New Roman', 'font-size': '12pt'})
 
-                # 更新X轴标签
-                self.plot_widget_2.setLabel('bottom', freq_label, units=freq_unit,
-                                          **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-
-            # 更新Y轴标签
+            # 更新Y轴标签 - 也直接在标签中指定单位
             if psd_mode:
-                self.plot_widget_2.setLabel('left', 'PSD', units=f'dB{y_unit_suffix}',
-                                          **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                if data_type == 'int':  # 相位数据
+                    self.plot_widget_2.setLabel('left', 'PSD (dB/Hz)',
+                                              **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                else:  # raw数据
+                    self.plot_widget_2.setLabel('left', 'PSD (dB/MHz)',
+                                              **{'font-family': 'Times New Roman', 'font-size': '12pt'})
             else:
-                self.plot_widget_2.setLabel('left', 'Power', units='dB',
+                self.plot_widget_2.setLabel('left', 'Power (dB)',
                                           **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         except Exception as e:
             log.warning(f"Spectrum update error: {e}")
-
-    def _setup_log_ticks(self, freq_data):
-        """设置对数坐标的主要刻度"""
-        if len(freq_data) == 0:
-            return
-
-        min_freq = np.min(freq_data)
-        max_freq = np.max(freq_data)
-
-        # 生成主要刻度：0.1, 1, 10, 100, 1000, etc.
-        log_min = int(np.floor(np.log10(min_freq)))
-        log_max = int(np.ceil(np.log10(max_freq)))
-
-        major_ticks = []
-        for i in range(log_min, log_max + 1):
-            tick = 10**i
-            if min_freq <= tick <= max_freq:
-                major_ticks.append(tick)
-
-        # 设置主要刻度
-        if major_ticks:
-            axis = self.plot_widget_2.getAxis('bottom')
-            # 创建刻度字典
-            ticks = [(np.log10(tick), f'{tick:g}') for tick in major_ticks]
-            axis.setTicks([ticks])
 
     def _update_status(self):
         """Periodic status update"""
