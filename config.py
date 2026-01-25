@@ -76,8 +76,9 @@ class DisplayParams:
 class SaveParams:
     """Data save parameters"""
     enable: bool = False
-    path: str = "save_data"
+    path: str = "D:/eDAS_DATA"  # Changed default path
     file_prefix: str = ""
+    frames_per_file: int = 10   # New: frames per file control
 
 
 @dataclass
@@ -182,3 +183,27 @@ def calculate_fiber_length(point_num: int, data_rate: int, data_source: int, rat
 def calculate_data_rate_mbps(scan_rate: int, point_num: int, channel_num: int) -> float:
     """Calculate data rate in MB/s"""
     return scan_rate * point_num * 2 * channel_num / 1024.0 / 1024.0
+
+
+# Enhanced buffer configuration
+OPTIMIZED_BUFFER_SIZES = {
+    'hardware_buffer_frames': 50,      # FPGA + DMA buffer
+    'signal_queue_frames': 20,          # Qt signal queue
+    'storage_queue_frames': 200,        # Async file writing (increased)
+    'display_buffer_frames': 30         # GUI display history
+}
+
+# Dynamic polling configuration
+POLLING_CONFIG = {
+    'high_freq_interval_ms': 1,         # High frequency polling: 1ms
+    'low_freq_interval_ms': 10,         # Low frequency polling: 10ms
+    'buffer_threshold_high': 0.8,       # Switch to high freq when buffer > 80%
+    'buffer_threshold_low': 0.3          # Switch to low freq when buffer < 30%
+}
+
+# System monitoring update intervals
+MONITOR_UPDATE_INTERVALS = {
+    'buffer_status_ms': 500,            # Buffer status update: 500ms
+    'system_status_s': 10,              # CPU/Disk space update: 10s
+    'performance_log_s': 30             # Performance logging: 30s
+}

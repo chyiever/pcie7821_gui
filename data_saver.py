@@ -233,10 +233,181 @@ class DataSaver:
         self.stop()
 
 
+class FrameBasedFileSaver(DataSaver):
+    """
+    Frame-based file saver that creates new files after N frames.
+    Each frame is treated as one data package.
+
+    Filename format: 序号-eDAS-采样率Hz-每帧点数pt-时间戳.毫秒.bin
+    Example: 00001-eDAS-1000Hz-0162pt-20260126T014051.256.bin
+    """
+
+    def __init__(self, save_path: str = "D:/eDAS_DATA",
+                 frames_per_file: int = 10,
+                 buffer_size: int = 200):
+        """
+        Initialize frame-based file saver.
+
+        Args:
+            save_path: Directory to save files (default D:/eDAS_DATA)
+            frames_per_file: Number of frames per file (default 10)
+            buffer_size: Maximum number of data blocks in queue (increased to 200)
+        """
+        super().__init__(save_path, buffer_size)
+        self.frames_per_file = frames_per_file
+        self._frame_count = 0
+        self._total_bytes_all_files = 0
+        self._total_files_created = 0
+        self._scan_rate = 2000
+        self._points_per_frame = 0
+        self._frames_per_file = frames_per_file
+
+    def start(self, file_no: Optional[int] = None, scan_rate: int = 2000,
+              points_per_frame: int = 0) -> str:
+        """Start saving with frame-based splitting capability"""
+        if self._running:
+            return self._current_filename
+
+        # Ensure save directory exists
+        self.save_path.mkdir(parents=True, exist_ok=True)
+
+        # Set file number
+        if file_no is not None:
+            self._file_no = file_no
+        else:
+            self._file_no += 1
+
+        self._scan_rate = scan_rate
+        self._points_per_frame = points_per_frame
+        self._frame_count = 0
+        self._total_files_created = 1
+
+        # Create filename with new format
+        # Format: 序号-eDAS-采样率Hz-每帧点数pt-时间戳.毫秒.bin
+        self._current_filename = self._generate_filename()
+
+        # Open file
+        filepath = self.save_path / self._current_filename
+        self._file_handle = open(filepath, 'wb')
+
+        log.info(f"Started frame-based saving to {filepath}")
+
+        # Reset statistics
+        self._bytes_written = 0
+        self._blocks_written = 0
+        self._dropped_blocks = 0
+
+        # Clear queue
+        while not self._data_queue.empty():
+            try:
+                self._data_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        # Start save thread
+        self._running = True
+        self._save_thread = threading.Thread(target=self._save_loop, daemon=True)
+        self._save_thread.start()
+
+        return self._current_filename
+
+    def save_frame(self, frame_data: np.ndarray) -> bool:
+        """
+        Save one frame of data and check for file splitting.
+
+        Args:
+            frame_data: Frame data array
+
+        Returns:
+            True if frame was saved successfully
+        """
+        if not self._running:
+            return False
+
+        # Save the frame
+        success = self.save(frame_data)
+
+        if success:
+            self._frame_count += 1
+            log.debug(f"Saved frame {self._frame_count}/{self.frames_per_file}")
+
+            # Check if need to create new file
+            if self._frame_count >= self.frames_per_file:
+                self._split_file()
+
+        return success
+
+    def _generate_filename(self) -> str:
+        """Generate filename with new format"""
+        now = datetime.now()
+        timestamp_str = now.strftime("%Y%m%dT%H%M%S")
+        milliseconds = int((now.timestamp() % 1) * 1000)
+
+        filename = (f"{self._file_no:05d}-eDAS-{self._scan_rate:04d}Hz-"
+                   f"{self._points_per_frame:04d}pt-{timestamp_str}.{milliseconds:03d}.bin")
+
+        return filename
+
+    def _split_file(self):
+        """Close current file and open new one"""
+        # Update total bytes
+        self._total_bytes_all_files += self._bytes_written
+
+        # Close current file
+        if self._file_handle is not None:
+            self._file_handle.flush()
+            self._file_handle.close()
+
+        # Increment file number and create new file
+        self._file_no += 1
+        self._current_filename = self._generate_filename()
+
+        filepath = self.save_path / self._current_filename
+        self._file_handle = open(filepath, 'wb')
+        self._bytes_written = 0
+        self._frame_count = 0
+        self._total_files_created += 1
+
+        log.info(f"Split to new file: {self._current_filename} (File #{self._total_files_created})")
+
+    def stop(self):
+        """Stop and update total statistics"""
+        self._total_bytes_all_files += self._bytes_written
+        super().stop()
+        log.info(f"Total files created: {self._total_files_created}, "
+                 f"Total frames saved: {(self._total_files_created - 1) * self.frames_per_file + self._frame_count}, "
+                 f"Total bytes: {self._total_bytes_all_files}")
+
+    @property
+    def total_bytes_all_files(self) -> int:
+        """Get total bytes written across all files"""
+        return self._total_bytes_all_files + self._bytes_written
+
+    @property
+    def total_files_created(self) -> int:
+        """Get total number of files created"""
+        return self._total_files_created
+
+    @property
+    def frame_count(self) -> int:
+        """Get current frame count in active file"""
+        return self._frame_count
+
+    @property
+    def frames_per_file(self) -> int:
+        """Get frames per file setting"""
+        return self._frames_per_file
+
+    @frames_per_file.setter
+    def frames_per_file(self, value: int):
+        """Set frames per file"""
+        self._frames_per_file = value
+
+
 class TimedFileSaver(DataSaver):
     """
-    Data saver that creates new files every N seconds.
-    Default: 1 second per file.
+    Legacy data saver that creates new files every N seconds.
+    Kept for backward compatibility.
 
     Filename format: 序号-时-分-秒-采样率.bin
     Example: 1-12-30-45-2000.bin, 2-12-30-46-2000.bin, ...

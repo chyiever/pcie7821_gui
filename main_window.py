@@ -7,12 +7,14 @@ import sys
 import os
 import time
 import numpy as np
+import psutil  # For CPU and disk monitoring
+import shutil  # For disk space monitoring
 from typing import Optional
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QPushButton, QCheckBox,
     QRadioButton, QButtonGroup, QSpinBox, QDoubleSpinBox, QFileDialog,
-    QMessageBox, QStatusBar, QSplitter, QFrame, QSizePolicy
+    QMessageBox, QStatusBar, QSplitter, QFrame, QSizePolicy, QProgressBar
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot
 from PyQt5.QtGui import QFont, QColor, QPalette, QPixmap, QFontDatabase
@@ -22,11 +24,12 @@ from config import (
     AllParams, BasicParams, UploadParams, PhaseDemodParams, DisplayParams, SaveParams,
     ClockSource, TriggerDirection, DataSource, DisplayMode,
     CHANNEL_NUM_OPTIONS, DATA_SOURCE_OPTIONS, DATA_RATE_OPTIONS, RATE2PHASE_OPTIONS,
-    validate_point_num, calculate_fiber_length, calculate_data_rate_mbps
+    validate_point_num, calculate_fiber_length, calculate_data_rate_mbps,
+    OPTIMIZED_BUFFER_SIZES, MONITOR_UPDATE_INTERVALS
 )
 from pcie7821_api import PCIe7821API, PCIe7821Error
 from acquisition_thread import AcquisitionThread, SimulatedAcquisitionThread
-from data_saver import TimedFileSaver
+from data_saver import FrameBasedFileSaver
 from spectrum_analyzer import RealTimeSpectrumAnalyzer
 from logger import get_logger
 
@@ -51,7 +54,7 @@ class MainWindow(QMainWindow):
         # Initialize components
         self.api: Optional[PCIe7821API] = None
         self.acq_thread: Optional[AcquisitionThread] = None
-        self.data_saver: Optional[TimedFileSaver] = None
+        self.data_saver: Optional[FrameBasedFileSaver] = None
         self.spectrum_analyzer = RealTimeSpectrumAnalyzer()
 
         # Parameters
@@ -69,6 +72,11 @@ class MainWindow(QMainWindow):
         self._raw_data_count = 0  # 专门用于raw数据计数
         self._last_raw_display_time = 0  # 上次raw显示更新时间
 
+        # System monitoring
+        self._last_system_update = 0
+        self._cpu_percent = 0.0
+        self._disk_free_gb = 0.0
+
         # Setup UI
         self.setWindowTitle("eDAS-gh26.1.24")
         self.setMinimumSize(1400, 900)
@@ -78,10 +86,23 @@ class MainWindow(QMainWindow):
         self._setup_plots()
         self._connect_signals()
 
-        # Status timer
+        # Status timers
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._update_status)
-        self._status_timer.start(500)
+        self._status_timer.start(MONITOR_UPDATE_INTERVALS['buffer_status_ms'])
+
+        # System monitoring timer (slower update)
+        self._system_timer = QTimer(self)
+        self._system_timer.timeout.connect(self._update_system_status)
+        self._system_timer.start(MONITOR_UPDATE_INTERVALS['system_status_s'] * 1000)
+
+        # Initialize system monitoring
+        self._last_system_update = 0
+        self._cpu_percent = 0.0
+        self._disk_free_gb = 0.0
+
+        # Initialize file estimates
+        self._update_file_estimates()
 
         # Initialize device
         if not simulation_mode:
@@ -437,7 +458,7 @@ class MainWindow(QMainWindow):
         save_layout.addWidget(QLabel("Path:"), 0, 1)
         path_layout = QHBoxLayout()
         path_layout.setSpacing(2)
-        self.save_path_edit = QLineEdit("save_data")
+        self.save_path_edit = QLineEdit(self.params.save.path)  # Use default path from config
         self.save_path_edit.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.browse_btn = QPushButton("...")
         self.browse_btn.setMaximumWidth(25)
@@ -446,6 +467,21 @@ class MainWindow(QMainWindow):
         path_layout.addWidget(self.save_path_edit)
         path_layout.addWidget(self.browse_btn)
         save_layout.addLayout(path_layout, 0, 2, 1, 2)
+
+        # Row 1: Frames per File | File Size Estimate
+        save_layout.addWidget(QLabel("Frames/File:"), 1, 0)
+        self.frames_per_file_spin = QSpinBox()
+        self.frames_per_file_spin.setRange(1, 100)
+        self.frames_per_file_spin.setValue(self.params.save.frames_per_file)
+        self.frames_per_file_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.frames_per_file_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        self.frames_per_file_spin.valueChanged.connect(self._update_file_estimates)
+        save_layout.addWidget(self.frames_per_file_spin, 1, 1)
+
+        save_layout.addWidget(QLabel("Est. Size:"), 1, 2)
+        self.file_size_label = QLabel("~26MB/file")
+        self.file_size_label.setStyleSheet("font-weight: normal; color: #666666;")
+        save_layout.addWidget(self.file_size_label, 1, 3)
 
         layout.addWidget(save_group)
 
@@ -605,6 +641,59 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.plot_widget_2, stretch=2)
         layout.addWidget(self.plot_widget_3, stretch=1)
 
+        # System Monitoring Panel
+        monitor_frame = QFrame()
+        monitor_frame.setFrameStyle(QFrame.StyledPanel)
+        monitor_frame.setMaximumHeight(120)
+        monitor_layout = QVBoxLayout(monitor_frame)
+
+        # Buffer Status Row
+        buffer_layout = QHBoxLayout()
+        buffer_layout.addWidget(QLabel("Buffer Status:"))
+
+        # Hardware Buffer
+        self.hw_buffer_bar = QProgressBar()
+        self.hw_buffer_bar.setMaximumWidth(120)
+        self.hw_buffer_bar.setMaximumHeight(20)
+        self.hw_buffer_label = QLabel("HW: 0/50")
+        buffer_layout.addWidget(self.hw_buffer_label)
+        buffer_layout.addWidget(self.hw_buffer_bar)
+
+        # Signal Queue
+        self.signal_queue_bar = QProgressBar()
+        self.signal_queue_bar.setMaximumWidth(120)
+        self.signal_queue_bar.setMaximumHeight(20)
+        self.signal_queue_label = QLabel("SIG: 0/20")
+        buffer_layout.addWidget(self.signal_queue_label)
+        buffer_layout.addWidget(self.signal_queue_bar)
+
+        # Storage Queue
+        self.storage_queue_bar = QProgressBar()
+        self.storage_queue_bar.setMaximumWidth(120)
+        self.storage_queue_bar.setMaximumHeight(20)
+        self.storage_queue_label = QLabel("STO: 0/200")
+        buffer_layout.addWidget(self.storage_queue_label)
+        buffer_layout.addWidget(self.storage_queue_bar)
+
+        buffer_layout.addStretch()
+        monitor_layout.addLayout(buffer_layout)
+
+        # System Status Row
+        system_layout = QHBoxLayout()
+        system_layout.addWidget(QLabel("System:"))
+
+        self.cpu_label = QLabel("CPU: 0%")
+        self.disk_label = QLabel("Disk: 0GB free")
+        self.polling_label = QLabel("Poll: 1ms")
+
+        system_layout.addWidget(self.cpu_label)
+        system_layout.addWidget(self.disk_label)
+        system_layout.addWidget(self.polling_label)
+        system_layout.addStretch()
+        monitor_layout.addLayout(system_layout)
+
+        layout.addWidget(monitor_frame)
+
         # Status panel
         status_frame = QFrame()
         status_frame.setFrameStyle(QFrame.StyledPanel)
@@ -649,6 +738,7 @@ class MainWindow(QMainWindow):
         self.scan_rate_spin.valueChanged.connect(self._update_calculated_values)
         self.merge_points_spin.valueChanged.connect(self._update_calculated_values)
         self.rate2phase_combo.currentIndexChanged.connect(self._update_calculated_values)
+        self.frames_per_file_spin.valueChanged.connect(self._update_file_estimates)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
 
     def _init_device(self):
@@ -719,6 +809,7 @@ class MainWindow(QMainWindow):
         # Save params
         params.save.enable = self.save_enable_check.isChecked()
         params.save.path = self.save_path_edit.text()
+        params.save.frames_per_file = self.frames_per_file_spin.value()
 
         return params
 
@@ -817,11 +908,20 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to start acquisition: {e}")
                 return
 
-        # Start data saver if enabled (1 second per file)
+        # Start data saver if enabled (frame-based)
         if params.save.enable:
-            log.info(f"Starting data saver to {params.save.path}")
-            self.data_saver = TimedFileSaver(params.save.path, file_duration_s=1.0)
-            filename = self.data_saver.start(scan_rate=params.basic.scan_rate)
+            log.info(f"Starting frame-based data saver to {params.save.path}")
+            self.data_saver = FrameBasedFileSaver(
+                params.save.path,
+                frames_per_file=params.save.frames_per_file,
+                buffer_size=OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
+            )
+            # Calculate points per frame for filename
+            points_per_frame = params.basic.point_num_per_scan // params.phase_demod.merge_point_num
+            filename = self.data_saver.start(
+                scan_rate=params.basic.scan_rate,
+                points_per_frame=points_per_frame
+            )
             self.save_status_label.setText(f"Save: {filename}")
         else:
             self.save_status_label.setText("Save: Off")
@@ -935,12 +1035,20 @@ class MainWindow(QMainWindow):
             # Convert to radians: data = data / 32767 * π
             processed_data = data.astype(np.float64) / 32767.0 * 3.141592654
 
-        # Save data if enabled (use processed data)
+        # Save data if enabled (use frame-based saving)
         if self.data_saver is not None and self.data_saver.is_running:
-            self.data_saver.save(processed_data)
+            self.data_saver.save_frame(processed_data)
             # Update save status periodically
             if self._data_count % 20 == 0:
-                self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {self.data_saver.current_filename}")
+                frame_info = f"{self.data_saver.frame_count}/{self.data_saver.frames_per_file}"
+                self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {frame_info} frames")
+
+                # Update storage queue status
+                queue_size = getattr(self.data_saver, '_data_queue', None)
+                if queue_size:
+                    storage_count = queue_size.qsize()
+                    storage_max = OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
+                    self._update_buffer_status(storage_count=storage_count, storage_max=storage_max)
 
         # Update display (use processed data)
         try:
@@ -963,12 +1071,13 @@ class MainWindow(QMainWindow):
         if self._data_count % 10 == 0:
             log.debug(f"Raw data received #{self._data_count}: shape={data.shape}, type={data_type}, channels={channel_num}")
 
-        # Save data if enabled (总是保存原始数据)
+        # Save data if enabled (frame-based saving for raw data)
         if self.data_saver is not None and self.data_saver.is_running:
-            self.data_saver.save(data)
+            self.data_saver.save_frame(data)
             # Update save status periodically
             if self._data_count % 20 == 0:
-                self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {self.data_saver.current_filename}")
+                frame_info = f"{self.data_saver.frame_count}/{self.data_saver.frames_per_file}"
+                self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {frame_info} frames")
 
         # 控制raw数据显示更新频率：每秒更新一次
         current_time = time.time()
@@ -1205,6 +1314,26 @@ class MainWindow(QMainWindow):
         """Periodic status update"""
         self._update_calculated_values()
 
+        # Update acquisition status
+        if self.acq_thread is not None and self.acq_thread.is_running:
+            frames = self.acq_thread.frames_acquired
+            self.frames_label.setText(f"Frames: {frames}")
+
+            # Update buffer status with estimated values
+            if hasattr(self.acq_thread, '_current_polling_interval'):
+                polling_ms = self.acq_thread._current_polling_interval * 1000
+                self.polling_label.setText(f"Poll: {polling_ms:.1f}ms")
+
+            # Update buffer status displays (with estimated values)
+            self._update_buffer_status()
+        else:
+            self.frames_label.setText("Frames: 0")
+            if hasattr(self, 'polling_label'):
+                self.polling_label.setText("Poll: --ms")
+
+        # Update file size estimates
+        self._update_file_estimates()
+
     def _update_calculated_values(self):
         """Update calculated display values"""
         point_num = self.point_num_spin.value()
@@ -1278,3 +1407,89 @@ class MainWindow(QMainWindow):
 
         log.info("Window closed")
         event.accept()
+
+    def _update_file_estimates(self):
+        """Update file size and duration estimates"""
+        try:
+            frames_per_file = self.frames_per_file_spin.value()
+            scan_rate = self.scan_rate_spin.value()
+            point_num = self.point_num_spin.value()
+            merge_points = self.merge_points_spin.value()
+            channel_num = self.channel_combo.currentData()
+
+            # Calculate points per frame after merging
+            points_per_frame = point_num // merge_points
+
+            # Estimate frame size (int32 = 4 bytes per point)
+            frame_size_mb = points_per_frame * channel_num * 4 / (1024 * 1024)
+            file_size_mb = frame_size_mb * frames_per_file
+
+            # Update label
+            self.file_size_label.setText(f"~{file_size_mb:.1f}MB/file")
+
+        except Exception as e:
+            log.warning(f"Error updating file estimates: {e}")
+            self.file_size_label.setText("~?MB/file")
+
+    def _update_system_status(self):
+        """Update system monitoring information (CPU, disk, etc.)"""
+        try:
+            current_time = time.time()
+            if current_time - self._last_system_update < MONITOR_UPDATE_INTERVALS['system_status_s']:
+                return
+
+            self._last_system_update = current_time
+
+            # Update CPU usage
+            self._cpu_percent = psutil.cpu_percent(interval=0.1)
+            self.cpu_label.setText(f"CPU: {self._cpu_percent:.1f}%")
+
+            # Update disk space for save path
+            if self.data_saver and self.data_saver.is_running:
+                save_path = self.save_path_edit.text()
+                if os.path.exists(save_path):
+                    _, _, free_bytes = shutil.disk_usage(save_path)
+                    self._disk_free_gb = free_bytes / (1024**3)
+                    self.disk_label.setText(f"Disk: {self._disk_free_gb:.1f}GB free")
+
+            # Update polling interval display (if acquisition is running)
+            if self.acq_thread and self.acq_thread.is_running:
+                polling_ms = getattr(self.acq_thread, '_current_polling_interval', 0.001) * 1000
+                self.polling_label.setText(f"Poll: {polling_ms:.1f}ms")
+
+        except Exception as e:
+            log.warning(f"Error updating system status: {e}")
+
+    def _update_buffer_status(self, hw_count=0, hw_max=50, signal_count=0, signal_max=20,
+                            storage_count=0, storage_max=200, display_count=0, display_max=30):
+        """Update buffer status displays"""
+        try:
+            # Update hardware buffer
+            hw_percent = min(100, int(hw_count / hw_max * 100)) if hw_max > 0 else 0
+            self.hw_buffer_bar.setValue(hw_percent)
+            self.hw_buffer_label.setText(f"HW: {hw_count}/{hw_max}")
+            self._set_progress_bar_color(self.hw_buffer_bar, hw_percent)
+
+            # Update signal queue
+            signal_percent = min(100, int(signal_count / signal_max * 100)) if signal_max > 0 else 0
+            self.signal_queue_bar.setValue(signal_percent)
+            self.signal_queue_label.setText(f"SIG: {signal_count}/{signal_max}")
+            self._set_progress_bar_color(self.signal_queue_bar, signal_percent)
+
+            # Update storage queue
+            storage_percent = min(100, int(storage_count / storage_max * 100)) if storage_max > 0 else 0
+            self.storage_queue_bar.setValue(storage_percent)
+            self.storage_queue_label.setText(f"STO: {storage_count}/{storage_max}")
+            self._set_progress_bar_color(self.storage_queue_bar, storage_percent)
+
+        except Exception as e:
+            log.warning(f"Error updating buffer status: {e}")
+
+    def _set_progress_bar_color(self, progress_bar: QProgressBar, percentage: int):
+        """Set progress bar color based on usage percentage"""
+        if percentage >= 90:
+            progress_bar.setStyleSheet("QProgressBar::chunk { background-color: red; }")
+        elif percentage >= 70:
+            progress_bar.setStyleSheet("QProgressBar::chunk { background-color: orange; }")
+        else:
+            progress_bar.setStyleSheet("QProgressBar::chunk { background-color: green; }")

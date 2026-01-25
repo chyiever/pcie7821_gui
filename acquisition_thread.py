@@ -9,7 +9,7 @@ from typing import Optional
 from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition, Qt
 
 from pcie7821_api import PCIe7821API, PCIe7821Error
-from config import DataSource, AllParams
+from config import DataSource, AllParams, POLLING_CONFIG, OPTIMIZED_BUFFER_SIZES
 from logger import get_logger
 
 # Module logger
@@ -73,7 +73,14 @@ class AcquisitionThread(QThread):
         self._pending_raw_data = None
         self._pending_monitor_data = None
 
-        log.info("AcquisitionThread initialized")
+        # Dynamic polling configuration
+        self._current_polling_interval = POLLING_CONFIG['low_freq_interval_ms'] / 1000.0
+        self._high_freq_interval = POLLING_CONFIG['high_freq_interval_ms'] / 1000.0
+        self._low_freq_interval = POLLING_CONFIG['low_freq_interval_ms'] / 1000.0
+        self._buffer_threshold_high = POLLING_CONFIG['buffer_threshold_high']
+        self._buffer_threshold_low = POLLING_CONFIG['buffer_threshold_low']
+
+        log.info("AcquisitionThread initialized with dynamic polling")
 
     def configure(self, params: AllParams):
         """
@@ -137,7 +144,7 @@ class AcquisitionThread(QThread):
 
                 log.debug(f"Loop {self._loop_count}: waiting for {expected_points} points")
 
-                # Wait for enough data in buffer
+                # Wait for enough data in buffer with dynamic polling
                 wait_start = time.perf_counter()
                 wait_count = 0
                 while self._running:
@@ -159,7 +166,9 @@ class AcquisitionThread(QThread):
                             log.debug(f"Buffer ready: {points_in_buffer} points, waited {wait_time:.1f}ms ({wait_count} iterations)")
                             break
 
-                        time.sleep(0.001)  # 1ms wait
+                        # Dynamic polling interval adjustment
+                        self._adjust_polling_interval(points_in_buffer, expected_points)
+                        time.sleep(self._current_polling_interval)
                         wait_count += 1
 
                         if wait_count > 5000:  # 5 second timeout
@@ -172,7 +181,7 @@ class AcquisitionThread(QThread):
                         if not self._running:
                             log.info("Thread stopping due to stop request during buffer query")
                             break
-                        time.sleep(0.001)
+                        time.sleep(self._current_polling_interval)
                         wait_count += 1
 
                 if not self._running:
@@ -310,6 +319,25 @@ class AcquisitionThread(QThread):
         if signals_emitted > 0:
             self._last_gui_update_time = current_time
             log.debug(f"GUI update: emitted {signals_emitted} signals, elapsed={elapsed:.1f}ms")
+
+    def _adjust_polling_interval(self, points_in_buffer: int, expected_points: int):
+        """Adjust polling interval based on buffer usage"""
+        if expected_points == 0:
+            return
+
+        buffer_usage_ratio = points_in_buffer / expected_points
+
+        if buffer_usage_ratio >= self._buffer_threshold_high:
+            # High buffer usage - use high frequency polling
+            self._current_polling_interval = self._high_freq_interval
+        elif buffer_usage_ratio <= self._buffer_threshold_low:
+            # Low buffer usage - use low frequency polling
+            self._current_polling_interval = self._low_freq_interval
+        # else: keep current interval (hysteresis)
+
+        # Log interval changes (throttled)
+        if self._loop_count % 100 == 0:
+            log.debug(f"Buffer usage: {buffer_usage_ratio:.1%}, polling interval: {self._current_polling_interval*1000:.1f}ms")
 
     def stop(self):
         """Stop acquisition thread"""
