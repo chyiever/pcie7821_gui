@@ -18,13 +18,6 @@ log = get_logger("acq_thread")
 # Minimum interval between GUI updates (ms)
 MIN_GUI_UPDATE_INTERVAL_MS = 50  # 20 FPS max
 
-# Maximum points to send to GUI (decimate before emitting signal)
-MAX_DISPLAY_POINTS = 10000
-
-# Maximum frames to read per loop iteration (to prevent buffer overflow)
-# For display at 20 FPS, we only need a few frames per read
-MAX_FRAMES_PER_READ = 10
-
 
 class AcquisitionThread(QThread):
     """
@@ -74,11 +67,11 @@ class AcquisitionThread(QThread):
         self._loop_count = 0
         self._last_log_time = 0
 
-        # Pending data for GUI updates
+        # GUI update throttling
+        self._last_gui_update_time = 0
         self._pending_phase_data = None
         self._pending_raw_data = None
         self._pending_monitor_data = None
-        self._stopping = False  # Flag to prevent emitting signals during stop
 
         log.info("AcquisitionThread initialized")
 
@@ -105,7 +98,6 @@ class AcquisitionThread(QThread):
         """Thread main loop"""
         log.info("=== Acquisition thread started ===")
         self._running = True
-        self._stopping = False  # Reset stopping flag
         self._frames_acquired = 0
         self._bytes_acquired = 0
         self._loop_count = 0
@@ -137,14 +129,13 @@ class AcquisitionThread(QThread):
                     log.info("Thread stopping (running=False after pause check)")
                     break
 
-                # Determine expected data size (limit frames to prevent buffer overflow)
-                read_frame_num = min(self._frame_num, MAX_FRAMES_PER_READ)
+                # Determine expected data size
                 if self._data_source == DataSource.PHASE:
-                    expected_points = self._point_num_after_merge * read_frame_num
+                    expected_points = self._point_num_after_merge * self._frame_num
                 else:
-                    expected_points = self._total_point_num * read_frame_num
+                    expected_points = self._total_point_num * self._frame_num
 
-                log.debug(f"Loop {self._loop_count}: waiting for {expected_points} points (frames={read_frame_num})")
+                log.debug(f"Loop {self._loop_count}: waiting for {expected_points} points")
 
                 # Wait for enough data in buffer
                 wait_start = time.perf_counter()
@@ -183,9 +174,9 @@ class AcquisitionThread(QThread):
                 try:
                     read_start = time.perf_counter()
                     if self._data_source == DataSource.PHASE:
-                        self._read_phase_data(read_frame_num)
+                        self._read_phase_data()
                     else:
-                        self._read_raw_data(read_frame_num)
+                        self._read_raw_data()
                     read_time = (time.perf_counter() - read_start) * 1000
                     log.debug(f"Data read completed in {read_time:.1f}ms")
 
@@ -195,15 +186,11 @@ class AcquisitionThread(QThread):
                     time.sleep(0.1)
                     continue
 
-                self._frames_acquired += read_frame_num
+                self._frames_acquired += self._frame_num
 
                 loop_time = (time.perf_counter() - loop_start) * 1000
                 if loop_time > 100:
                     log.warning(f"Slow loop iteration: {loop_time:.1f}ms")
-
-                # Wait for next GUI update interval to prevent overwhelming the GUI
-                # This ensures we only read/emit at ~20 FPS rate
-                time.sleep(MIN_GUI_UPDATE_INTERVAL_MS / 1000.0)
 
         except Exception as e:
             log.exception(f"Unexpected acquisition error: {e}")
@@ -213,9 +200,9 @@ class AcquisitionThread(QThread):
             log.info(f"=== Acquisition thread stopped === (loops={self._loop_count}, frames={self._frames_acquired})")
             self.acquisition_stopped.emit()
 
-    def _read_raw_data(self, read_frame_num: int):
+    def _read_raw_data(self):
         """Read raw IQ data"""
-        points_per_ch = self._total_point_num * read_frame_num
+        points_per_ch = self._total_point_num * self._frame_num
         log.debug(f"Reading raw data: {points_per_ch} points/ch, {self._channel_num} channels")
 
         data, points_returned = self.api.read_data(points_per_ch, self._channel_num)
@@ -229,11 +216,11 @@ class AcquisitionThread(QThread):
 
         # Throttle GUI updates to prevent signal queue backup
         self._pending_raw_data = (data, self._data_source, self._channel_num)
-        self._emit_pending_signals()
+        self._emit_if_ready()
 
-    def _read_phase_data(self, read_frame_num: int):
+    def _read_phase_data(self):
         """Read phase demodulated data"""
-        points_per_ch = self._point_num_after_merge * read_frame_num
+        points_per_ch = self._point_num_after_merge * self._frame_num
         log.debug(f"Reading phase data: {points_per_ch} points/ch, {self._channel_num} channels")
 
         phase_data, points_returned = self.api.read_phase_data(points_per_ch, self._channel_num)
@@ -257,69 +244,49 @@ class AcquisitionThread(QThread):
             log.warning(f"Monitor data read failed (non-critical): {e}")
 
         # Emit all pending data if enough time has passed
-        self._emit_pending_signals()
+        self._emit_if_ready()
 
-    def _decimate_for_signal(self, data: np.ndarray) -> np.ndarray:
-        """Decimate data before emitting signal to reduce cross-thread data transfer"""
-        if len(data) <= MAX_DISPLAY_POINTS:
-            return data
-        factor = len(data) // MAX_DISPLAY_POINTS
-        return data[::factor].copy()  # copy() to ensure contiguous memory
+    def _emit_if_ready(self):
+        """Emit pending data signals if enough time has passed since last update"""
+        current_time = time.perf_counter() * 1000  # ms
+        elapsed = current_time - self._last_gui_update_time
 
-    def _emit_pending_signals(self):
-        """
-        Emit all pending data signals immediately (with decimation).
-        Rate limiting is done by sleep in the main loop, not here.
-        """
-        # Don't emit signals if stopping
-        if self._stopping:
-            self._pending_phase_data = None
-            self._pending_raw_data = None
-            self._pending_monitor_data = None
+        if elapsed < MIN_GUI_UPDATE_INTERVAL_MS:
+            # Not enough time passed, skip this update (keep latest data pending)
             return
 
-        # Emit all pending signals (with decimation)
+        # Emit all pending signals
         signals_emitted = 0
 
         if self._pending_phase_data is not None:
             phase_data, channel_num = self._pending_phase_data
-            decimated = self._decimate_for_signal(phase_data.flatten() if channel_num > 1 else phase_data)
-            log.debug(f"Emitting phase_data_ready signal: orig={phase_data.shape}, decimated={len(decimated)}")
-            self.phase_data_ready.emit(decimated, channel_num)
+            log.debug(f"Emitting phase_data_ready signal: shape={phase_data.shape}")
+            self.phase_data_ready.emit(phase_data, channel_num)
             self._pending_phase_data = None
             signals_emitted += 1
 
         if self._pending_raw_data is not None:
             data, data_source, channel_num = self._pending_raw_data
-            decimated = self._decimate_for_signal(data.flatten() if channel_num > 1 else data)
-            log.debug(f"Emitting data_ready signal: orig={data.shape}, decimated={len(decimated)}")
-            self.data_ready.emit(decimated, data_source, channel_num)
+            log.debug(f"Emitting data_ready signal: shape={data.shape}, dtype={data.dtype}")
+            self.data_ready.emit(data, data_source, channel_num)
             self._pending_raw_data = None
             signals_emitted += 1
 
         if self._pending_monitor_data is not None:
             monitor_data, channel_num = self._pending_monitor_data
-            decimated = self._decimate_for_signal(monitor_data.flatten() if channel_num > 1 else monitor_data)
-            log.debug(f"Emitting monitor_data_ready signal: orig={monitor_data.shape}, decimated={len(decimated)}")
-            self.monitor_data_ready.emit(decimated, channel_num)
+            log.debug(f"Emitting monitor_data_ready signal: shape={monitor_data.shape}")
+            self.monitor_data_ready.emit(monitor_data, channel_num)
             self._pending_monitor_data = None
             signals_emitted += 1
 
         if signals_emitted > 0:
-            log.debug(f"GUI update: emitted {signals_emitted} signals")
+            self._last_gui_update_time = current_time
+            log.debug(f"GUI update: emitted {signals_emitted} signals, elapsed={elapsed:.1f}ms")
 
     def stop(self):
         """Stop acquisition thread"""
         log.info("Stop requested")
-
-        # Set stopping flag first to prevent more signal emissions
-        self._stopping = True
         self._running = False
-
-        # Clear pending data immediately
-        self._pending_phase_data = None
-        self._pending_raw_data = None
-        self._pending_monitor_data = None
 
         # Wake up if paused
         self._mutex.lock()
@@ -411,7 +378,6 @@ class SimulatedAcquisitionThread(AcquisitionThread):
         """Simulated acquisition loop"""
         log.info("=== Simulated acquisition thread started ===")
         self._running = True
-        self._stopping = False  # Reset stopping flag
         self._frames_acquired = 0
         self._bytes_acquired = 0
         self._loop_count = 0
@@ -439,12 +405,14 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                 if not self._running:
                     break
 
-                # Limit frames per read to prevent generating too much data
-                read_frame_num = min(self._frame_num, MAX_FRAMES_PER_READ)
+                # Simulate acquisition delay based on scan rate
+                scan_rate = self._params.basic.scan_rate if self._params else 2000
+                delay = self._frame_num / max(scan_rate, 1)
+                time.sleep(delay)
 
                 # Generate simulated data
                 if self._data_source == DataSource.PHASE:
-                    points = self._point_num_after_merge * read_frame_num
+                    points = self._point_num_after_merge * self._frame_num
                     phase_data = np.random.randint(-100000, 100000, points * self._channel_num, dtype=np.int32)
 
                     if self._channel_num > 1:
@@ -458,7 +426,7 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                     monitor_data = np.random.randint(0, 65535, self._point_num_after_merge * self._channel_num, dtype=np.uint32)
                     self._pending_monitor_data = (monitor_data, self._channel_num)
                 else:
-                    points = self._total_point_num * read_frame_num
+                    points = self._total_point_num * self._frame_num
                     data = np.random.randint(-32768, 32767, points * self._channel_num, dtype=np.int16)
 
                     if self._channel_num > 1:
@@ -469,19 +437,16 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                     self._bytes_acquired += len(data.flatten()) * 2
 
                 # Emit pending signals if enough time has passed
-                self._emit_pending_signals()
+                self._emit_if_ready()
 
                 # Emit buffer status (throttle this too - only every 10 loops)
                 if self._loop_count % 10 == 0:
                     self.buffer_status.emit(100000, 10)
 
-                self._frames_acquired += read_frame_num
+                self._frames_acquired += self._frame_num
 
                 loop_time = (time.perf_counter() - loop_start) * 1000
                 log.debug(f"Simulation loop {self._loop_count}: {loop_time:.1f}ms")
-
-                # Wait for next GUI update interval (same as real acquisition)
-                time.sleep(MIN_GUI_UPDATE_INTERVAL_MS / 1000.0)
 
         except Exception as e:
             log.exception(f"Simulation error: {e}")
