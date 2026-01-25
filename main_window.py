@@ -66,6 +66,8 @@ class MainWindow(QMainWindow):
         self._last_data_time = 0
         self._data_count = 0
         self._gui_update_count = 0
+        self._raw_data_count = 0  # 专门用于raw数据计数
+        self._last_raw_display_time = 0  # 上次raw显示更新时间
 
         # Setup UI
         self.setWindowTitle("eDAS-gh26.1.24")
@@ -74,6 +76,7 @@ class MainWindow(QMainWindow):
         log.debug("Setting up UI...")
         self._setup_ui()
         self._setup_plots()
+        self._setup_plot_interactions()  # 添加交互功能设置
         self._connect_signals()
 
         # Status timer
@@ -567,6 +570,25 @@ class MainWindow(QMainWindow):
             pw.getAxis('left').setStyle(tickTextOffset=10)
             pw.getAxis('bottom').setStyle(tickTextOffset=10)
 
+            # Enable interactive features
+            pw.setMenuEnabled(True)  # 右键菜单
+            pw.enableAutoRange()     # 自动范围
+
+            # Enable mouse wheel zoom
+            pw.getViewBox().setMouseEnabled(x=True, y=True)  # 启用鼠标交互
+            pw.getViewBox().enableAutoRange(axis='x', enable=False)  # 禁用X轴自动范围（允许用户缩放）
+            pw.getViewBox().enableAutoRange(axis='y', enable=False)  # 禁用Y轴自动范围（允许用户缩放）
+
+            # Add crosshair cursor
+            vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('r', width=1, style=Qt.DashLine))
+            hLine = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('r', width=1, style=Qt.DashLine))
+            pw.addItem(vLine, ignoreBounds=True)
+            pw.addItem(hLine, ignoreBounds=True)
+
+            # Store references for mouse tracking
+            pw.vLine = vLine
+            pw.hLine = hLine
+
         # Plot 1 - Time domain
         self.plot_widget_1.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         self.plot_widget_1.setLabel('bottom', 'Sample', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
@@ -598,9 +620,26 @@ class MainWindow(QMainWindow):
         self.frames_label = QLabel("Frames: 0")
         self.save_status_label = QLabel("Save: Off")
 
+        # Add coordinate display labels
+        self.coord_label_1 = QLabel("Time: X=-, Y=-")
+        self.coord_label_2 = QLabel("Spectrum: X=-, Y=-")
+        self.coord_label_3 = QLabel("Monitor: X=-, Y=-")
+
+        # Style coordinate labels
+        coord_style = "color: blue; font-family: 'Courier New'; font-size: 10px;"
+        self.coord_label_1.setStyleSheet(coord_style)
+        self.coord_label_2.setStyleSheet(coord_style)
+        self.coord_label_3.setStyleSheet(coord_style)
+
         status_layout.addWidget(self.buffer_label)
         status_layout.addWidget(self.frames_label)
         status_layout.addWidget(self.save_status_label)
+        status_layout.addWidget(QLabel("|"))  # Separator
+        status_layout.addWidget(self.coord_label_1)
+        status_layout.addWidget(QLabel("|"))  # Separator
+        status_layout.addWidget(self.coord_label_2)
+        status_layout.addWidget(QLabel("|"))  # Separator
+        status_layout.addWidget(self.coord_label_3)
         status_layout.addStretch()
 
         layout.addWidget(status_frame)
@@ -634,6 +673,17 @@ class MainWindow(QMainWindow):
         self.merge_points_spin.valueChanged.connect(self._update_calculated_values)
         self.rate2phase_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
+
+        # Connect mouse move events for coordinate display
+        self.plot_widget_1.scene().sigMouseMoved.connect(
+            lambda pos: self._update_crosshair(self.plot_widget_1, pos, self.coord_label_1, "Time")
+        )
+        self.plot_widget_2.scene().sigMouseMoved.connect(
+            lambda pos: self._update_crosshair(self.plot_widget_2, pos, self.coord_label_2, "Spectrum")
+        )
+        self.plot_widget_3.scene().sigMouseMoved.connect(
+            lambda pos: self._update_crosshair(self.plot_widget_3, pos, self.coord_label_3, "Monitor")
+        )
 
     def _init_device(self):
         """Initialize the PCIe-7821 device"""
@@ -813,7 +863,9 @@ class MainWindow(QMainWindow):
         # Reset counters
         self._data_count = 0
         self._gui_update_count = 0
+        self._raw_data_count = 0
         self._last_data_time = time.time()
+        self._last_raw_display_time = 0  # 强制第一次立即更新
 
         # Create and start acquisition thread
         log.info("Creating acquisition thread...")
@@ -939,24 +991,30 @@ class MainWindow(QMainWindow):
     def _on_raw_data(self, data: np.ndarray, data_type: int, channel_num: int):
         """Handle raw data from acquisition thread"""
         self._data_count += 1
+        self._raw_data_count += 1
         start_time = time.perf_counter()
 
         if self._data_count % 10 == 0:
             log.debug(f"Raw data received #{self._data_count}: shape={data.shape}, type={data_type}, channels={channel_num}")
 
-        # Save data if enabled
+        # Save data if enabled (总是保存原始数据)
         if self.data_saver is not None and self.data_saver.is_running:
             self.data_saver.save(data)
             # Update save status periodically
             if self._data_count % 20 == 0:
                 self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {self.data_saver.current_filename}")
 
-        # Update display
-        try:
-            self._update_raw_display(data, channel_num)
-            self._gui_update_count += 1
-        except Exception as e:
-            log.exception(f"Error in _update_raw_display: {e}")
+        # 控制raw数据显示更新频率：每秒更新一次
+        current_time = time.time()
+        if (current_time - self._last_raw_display_time) >= 1.0:  # 1秒间隔
+            # Update display
+            try:
+                self._update_raw_display(data, channel_num)
+                self._gui_update_count += 1
+                log.debug(f"Raw display updated #{self._raw_data_count}: interval={current_time - self._last_raw_display_time:.1f}s")
+                self._last_raw_display_time = current_time  # 更新时间放在log之后
+            except Exception as e:
+                log.exception(f"Error in _update_raw_display: {e}")
 
         elapsed = (time.perf_counter() - start_time) * 1000
         if elapsed > 50:
@@ -1060,18 +1118,22 @@ class MainWindow(QMainWindow):
         frame_num = self.params.display.frame_num
 
         if channel_num == 1:
-            # Show multiple frames
+            # Show multiple frames with downsampling for display
             for i in range(min(4, frame_num)):
                 start = i * point_num
                 end = start + point_num
                 if end <= len(data):
-                    self.plot_curve_1[i].setData(data[start:end])
+                    # 时域显示：10倍降采样
+                    raw_frame_data = data[start:end]
+                    downsampled_data = raw_frame_data[::10]  # 每10个点取1个
+                    self.plot_curve_1[i].setData(downsampled_data)
                 else:
                     self.plot_curve_1[i].setData([])
 
-            # Spectrum
+            # 频域计算：使用原始数据（无降采样），每秒更新一次
             if self.params.display.spectrum_enable and point_num <= len(data):
                 sample_rate = 1e9 / self.params.upload.data_rate
+                # 使用原始数据计算频谱
                 self._update_spectrum(data[:point_num], sample_rate,
                                      self.params.display.psd_enable, 'short')
         else:
@@ -1080,7 +1142,17 @@ class MainWindow(QMainWindow):
 
             for ch in range(min(channel_num, 4)):
                 if point_num <= len(data):
-                    self.plot_curve_1[ch].setData(data[:point_num, ch])
+                    # 多通道时域显示：10倍降采样
+                    raw_channel_data = data[:point_num, ch]
+                    downsampled_data = raw_channel_data[::10]  # 每10个点取1个
+                    self.plot_curve_1[ch].setData(downsampled_data)
+
+            # 频域计算：使用原始数据（无降采样）
+            if self.params.display.spectrum_enable and point_num <= len(data):
+                sample_rate = 1e9 / self.params.upload.data_rate
+                # 使用第一个通道的原始数据计算频谱
+                self._update_spectrum(data[:point_num, 0], sample_rate,
+                                     self.params.display.psd_enable, 'short')
 
         if self.acq_thread is not None:
             self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
@@ -1106,30 +1178,76 @@ class MainWindow(QMainWindow):
                 data, sample_rate, psd_mode, data_type
             )
 
-            # For PSD mode, use log scale and limit frequency range to [1, sample_rate/2]
-            if psd_mode:
-                self.plot_widget_2.setLogMode(x=True, y=False)  # Log scale for frequency
-                # Filter frequency range: [1 Hz, sample_rate/2]
-                nyquist = sample_rate / 2
-                valid_indices = (freq >= 1.0) & (freq <= nyquist)
-                freq_filtered = freq[valid_indices]
-                spectrum_filtered = spectrum[valid_indices]
+            # 设置为对数坐标（功率谱和PSD都使用对数坐标）
+            self.plot_widget_2.setLogMode(x=True, y=False)  # X轴对数，Y轴线性
 
-                if len(freq_filtered) > 0:
-                    self.spectrum_curve.setData(freq_filtered, spectrum_filtered)
-                    # Set x-axis range
-                    self.plot_widget_2.setXRange(np.log10(1.0), np.log10(nyquist))
-            else:
-                self.plot_widget_2.setLogMode(x=False, y=False)  # Linear scale for normal spectrum
-                self.spectrum_curve.setData(freq, spectrum)
+            # 过滤掉零频率和奈奎斯特频率以上的数据
+            nyquist = sample_rate / 2
+            valid_indices = (freq > 0.1) & (freq <= nyquist)
+            freq_filtered = freq[valid_indices]
+            spectrum_filtered = spectrum[valid_indices]
 
-            # Update axis label
+            if len(freq_filtered) > 0:
+                # 根据数据类型确定频率单位和标签
+                if data_type == 'int':  # 相位数据
+                    # 相位数据：采样率通常为几百Hz到几千Hz，单位用Hz
+                    freq_display = freq_filtered
+                    freq_unit = 'Hz'
+                    freq_label = 'Frequency'
+                    y_unit_suffix = '/Hz' if psd_mode else ''
+                else:  # raw数据 (data_type == 'short')
+                    # 原始数据：采样率通常为几百MHz到1GHz，单位用MHz
+                    freq_display = freq_filtered / 1e6  # 转换为MHz
+                    freq_unit = 'MHz'
+                    freq_label = 'Frequency'
+                    y_unit_suffix = '/MHz' if psd_mode else ''
+
+                self.spectrum_curve.setData(freq_display, spectrum_filtered)
+
+                # 设置X轴范围（自动范围，不固定）
+                self.plot_widget_2.enableAutoRange(axis='x')
+
+                # 自定义X轴刻度标签
+                self._setup_log_ticks(freq_display)
+
+                # 更新X轴标签
+                self.plot_widget_2.setLabel('bottom', freq_label, units=freq_unit,
+                                          **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+
+            # 更新Y轴标签
             if psd_mode:
-                self.plot_widget_2.setLabel('left', 'PSD', units='dB/Hz', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                self.plot_widget_2.setLabel('left', 'PSD', units=f'dB{y_unit_suffix}',
+                                          **{'font-family': 'Times New Roman', 'font-size': '12pt'})
             else:
-                self.plot_widget_2.setLabel('left', 'Power', units='dB', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                self.plot_widget_2.setLabel('left', 'Power', units='dB',
+                                          **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         except Exception as e:
             log.warning(f"Spectrum update error: {e}")
+
+    def _setup_log_ticks(self, freq_data):
+        """设置对数坐标的主要刻度"""
+        if len(freq_data) == 0:
+            return
+
+        min_freq = np.min(freq_data)
+        max_freq = np.max(freq_data)
+
+        # 生成主要刻度：0.1, 1, 10, 100, 1000, etc.
+        log_min = int(np.floor(np.log10(min_freq)))
+        log_max = int(np.ceil(np.log10(max_freq)))
+
+        major_ticks = []
+        for i in range(log_min, log_max + 1):
+            tick = 10**i
+            if min_freq <= tick <= max_freq:
+                major_ticks.append(tick)
+
+        # 设置主要刻度
+        if major_ticks:
+            axis = self.plot_widget_2.getAxis('bottom')
+            # 创建刻度字典
+            ticks = [(np.log10(tick), f'{tick:g}') for tick in major_ticks]
+            axis.setTicks([ticks])
 
     def _update_status(self):
         """Periodic status update"""
@@ -1170,7 +1288,134 @@ class MainWindow(QMainWindow):
         """Handle channel count change"""
         self._update_calculated_values()
 
+    def _update_crosshair(self, plot_widget, pos, coord_label, plot_name):
+        """Update crosshair and coordinate display"""
+        try:
+            # Check if mouse is within the plot area
+            if plot_widget.sceneBoundingRect().contains(pos):
+                # Convert scene coordinates to data coordinates
+                mouse_point = plot_widget.getViewBox().mapSceneToView(pos)
+                x, y = mouse_point.x(), mouse_point.y()
+
+                # Update crosshair position
+                plot_widget.vLine.setPos(x)
+                plot_widget.hLine.setPos(y)
+
+                # Format coordinates based on plot type
+                if plot_name == "Spectrum":
+                    # Handle potential log scale
+                    if hasattr(plot_widget.getViewBox(), 'state') and plot_widget.getViewBox().state.get('logScale', [False, False])[0]:
+                        # X-axis is in log scale, display actual frequency
+                        actual_x = 10 ** x if x > -10 else 0  # Avoid very small numbers
+                        x_str = f"{actual_x:.2f}"
+                    else:
+                        x_str = f"{x:.3f}"
+                    y_str = f"{y:.1f}"
+                else:
+                    # Time domain or monitor plots
+                    x_str = f"{x:.0f}" if abs(x) > 1 else f"{x:.3f}"
+                    y_str = f"{y:.0f}" if abs(y) > 1 else f"{y:.3f}"
+
+                coord_label.setText(f"{plot_name}: X={x_str}, Y={y_str}")
+            else:
+                # Mouse outside plot area
+                coord_label.setText(f"{plot_name}: X=-, Y=-")
+                # Hide crosshair when outside
+                plot_widget.vLine.setPos(-1e6)
+                plot_widget.hLine.setPos(-1e6)
+        except Exception as e:
+            # Handle any coordinate conversion errors silently
+            coord_label.setText(f"{plot_name}: X=-, Y=-")
+
+    def _setup_plot_interactions(self):
+        """Setup additional plot interaction features"""
+        # Configure mouse interaction modes for all plots
+        plots_info = [
+            (self.plot_widget_1, "Time Domain"),
+            (self.plot_widget_2, "Spectrum"),
+            (self.plot_widget_3, "Monitor")
+        ]
+
+        for plot_widget, title in plots_info:
+            # Enable box zoom (default with left mouse drag)
+            plot_widget.getViewBox().setMouseMode(pg.ViewBox.RectMode)
+
+            # Add context menu items
+            plot_widget.getViewBox().menu = self._create_plot_context_menu(plot_widget, title)
+
+    def _create_plot_context_menu(self, plot_widget, title):
+        """Create context menu for plot interactions"""
+        menu = QMenu()
+
+        # Auto Range action
+        auto_range_action = menu.addAction("Auto Range")
+        auto_range_action.triggered.connect(lambda: plot_widget.autoRange())
+
+        # Reset Zoom action
+        reset_zoom_action = menu.addAction("Reset Zoom")
+        reset_zoom_action.triggered.connect(lambda: plot_widget.getViewBox().autoRange())
+
+        menu.addSeparator()
+
+        # Mouse mode toggle
+        box_zoom_action = menu.addAction("Box Zoom Mode")
+        box_zoom_action.triggered.connect(
+            lambda: plot_widget.getViewBox().setMouseMode(pg.ViewBox.RectMode)
+        )
+
+        pan_mode_action = menu.addAction("Pan Mode")
+        pan_mode_action.triggered.connect(
+            lambda: plot_widget.getViewBox().setMouseMode(pg.ViewBox.PanMode)
+        )
+
+        menu.addSeparator()
+
+        # Grid toggle
+        grid_action = menu.addAction("Toggle Grid")
+        grid_action.triggered.connect(
+            lambda: self._toggle_grid(plot_widget)
+        )
+
+        # Export action
+        export_action = menu.addAction(f"Export {title}...")
+        export_action.triggered.connect(
+            lambda: self._export_plot(plot_widget, title)
+        )
+
+        return menu
+
+    def _toggle_grid(self, plot_widget):
+        """Toggle grid display for a plot"""
+        try:
+            # Get current grid state (this is a simplified approach)
+            current_alpha = 0.3  # Default alpha
+            new_alpha = 0.0 if hasattr(plot_widget, '_grid_visible') and plot_widget._grid_visible else 0.3
+            plot_widget.showGrid(x=True, y=True, alpha=new_alpha)
+            plot_widget._grid_visible = (new_alpha > 0)
+        except Exception as e:
+            log.warning(f"Error toggling grid: {e}")
+
+    def _export_plot(self, plot_widget, title):
+        """Export plot to image file"""
+        try:
+            from PyQt5.QtWidgets import QFileDialog
+            filename, _ = QFileDialog.getSaveFileName(
+                self, f"Export {title}", f"{title.lower().replace(' ', '_')}.png",
+                "PNG Files (*.png);;SVG Files (*.svg);;All Files (*)"
+            )
+            if filename:
+                exporter = pg.exporters.ImageExporter(plot_widget.plotItem)
+                exporter.export(filename)
+                self.statusBar.showMessage(f"Plot exported to {filename}", 3000)
+        except Exception as e:
+            log.error(f"Error exporting plot: {e}")
+            self.statusBar.showMessage(f"Export failed: {e}", 5000)
+
     def _browse_save_path(self):
+        """Open file dialog to select save path"""
+        path = QFileDialog.getExistingDirectory(self, "Select Save Directory", self.save_path_edit.text())
+        if path:
+            self.save_path_edit.setText(path)
         """Open file dialog to select save path"""
         path = QFileDialog.getExistingDirectory(self, "Select Save Directory", self.save_path_edit.text())
         if path:
