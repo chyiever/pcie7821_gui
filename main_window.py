@@ -415,6 +415,11 @@ class MainWindow(QMainWindow):
         self.psd_check = QCheckBox("PSD")
         display_layout.addWidget(self.psd_check, 1, 3)
 
+        # Row 2: rad checkbox
+        self.rad_check = QCheckBox("rad")
+        self.rad_check.setToolTip("Convert phase data to radians: data = data / 32767 * π")
+        display_layout.addWidget(self.rad_check, 2, 0, 1, 2)
+
         layout.addWidget(display_group)
 
         # Save Control Group
@@ -555,19 +560,28 @@ class MainWindow(QMainWindow):
             pw.getAxis('left').setTextPen('k')
             pw.getAxis('bottom').setTextPen('k')
 
+            # Set font for axis labels and numbers - Times New Roman, larger size
+            font = QFont("Times New Roman", 12)  # 12pt font
+            pw.getAxis('left').setTickFont(font)
+            pw.getAxis('bottom').setTickFont(font)
+            pw.getAxis('left').setStyle(tickTextOffset=10)
+            pw.getAxis('bottom').setStyle(tickTextOffset=10)
+
         # Plot 1 - Time domain
-        self.plot_widget_1.setLabel('left', 'Amplitude')
-        self.plot_widget_1.setLabel('bottom', 'Sample')
+        self.plot_widget_1.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        self.plot_widget_1.setLabel('bottom', 'Sample', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         self.plot_curve_1 = []
 
         # Plot 2 - Spectrum
-        self.plot_widget_2.setLabel('left', 'Power', units='dB')
-        self.plot_widget_2.setLabel('bottom', 'Frequency', units='Hz')
+        self.plot_widget_2.setLabel('left', 'Power', units='dB', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        self.plot_widget_2.setLabel('bottom', 'Frequency', units='Hz', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        # Enable log mode for x-axis when in PSD mode
+        self.plot_widget_2.setLogMode(x=False, y=False)  # Initially linear
         self.spectrum_curve = self.plot_widget_2.plot(pen=pg.mkPen('#9467bd', width=1.5))  # Purple
 
         # Plot 3 - Monitor
-        self.plot_widget_3.setLabel('left', 'Amplitude')
-        self.plot_widget_3.setLabel('bottom', 'Position')
+        self.plot_widget_3.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        self.plot_widget_3.setLabel('bottom', 'Position', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         self.monitor_curves = []
 
         # Add plots to layout
@@ -684,6 +698,7 @@ class MainWindow(QMainWindow):
         params.display.frame_num = self.frame_num_spin.value()
         params.display.spectrum_enable = self.spectrum_enable_check.isChecked()
         params.display.psd_enable = self.psd_check.isChecked()
+        params.display.rad_enable = self.rad_check.isChecked()
 
         # Save params
         params.save.enable = self.save_enable_check.isChecked()
@@ -896,16 +911,22 @@ class MainWindow(QMainWindow):
         if self._data_count % 10 == 0:
             log.debug(f"Phase data received #{self._data_count}: shape={data.shape}, channels={channel_num}")
 
-        # Save data if enabled
+        # Apply rad conversion if enabled
+        processed_data = data
+        if self.params.display.rad_enable:
+            # Convert to radians: data = data / 32767 * π
+            processed_data = data.astype(np.float64) / 32767.0 * 3.141592654
+
+        # Save data if enabled (use processed data)
         if self.data_saver is not None and self.data_saver.is_running:
-            self.data_saver.save(data)
+            self.data_saver.save(processed_data)
             # Update save status periodically
             if self._data_count % 20 == 0:
                 self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {self.data_saver.current_filename}")
 
-        # Update display
+        # Update display (use processed data)
         try:
-            self._update_phase_display(data, channel_num)
+            self._update_phase_display(processed_data, channel_num)
             self._gui_update_count += 1
         except Exception as e:
             log.exception(f"Error in _update_phase_display: {e}")
@@ -1084,13 +1105,29 @@ class MainWindow(QMainWindow):
             freq, spectrum, df = self.spectrum_analyzer.update(
                 data, sample_rate, psd_mode, data_type
             )
-            self.spectrum_curve.setData(freq, spectrum)
+
+            # For PSD mode, use log scale and limit frequency range to [1, sample_rate/2]
+            if psd_mode:
+                self.plot_widget_2.setLogMode(x=True, y=False)  # Log scale for frequency
+                # Filter frequency range: [1 Hz, sample_rate/2]
+                nyquist = sample_rate / 2
+                valid_indices = (freq >= 1.0) & (freq <= nyquist)
+                freq_filtered = freq[valid_indices]
+                spectrum_filtered = spectrum[valid_indices]
+
+                if len(freq_filtered) > 0:
+                    self.spectrum_curve.setData(freq_filtered, spectrum_filtered)
+                    # Set x-axis range
+                    self.plot_widget_2.setXRange(np.log10(1.0), np.log10(nyquist))
+            else:
+                self.plot_widget_2.setLogMode(x=False, y=False)  # Linear scale for normal spectrum
+                self.spectrum_curve.setData(freq, spectrum)
 
             # Update axis label
             if psd_mode:
-                self.plot_widget_2.setLabel('left', 'PSD', units='dB/Hz')
+                self.plot_widget_2.setLabel('left', 'PSD', units='dB/Hz', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
             else:
-                self.plot_widget_2.setLabel('left', 'Power', units='dB')
+                self.plot_widget_2.setLabel('left', 'Power', units='dB', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         except Exception as e:
             log.warning(f"Spectrum update error: {e}")
 

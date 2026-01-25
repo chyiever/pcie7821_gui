@@ -69,6 +69,7 @@ class DisplayParams:
     frame_num: int = 1024
     spectrum_enable: bool = True
     psd_enable: bool = False
+    rad_enable: bool = False  # Convert phase data to radians
 
 
 @dataclass
