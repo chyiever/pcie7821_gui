@@ -836,6 +836,10 @@ class MainWindow(QMainWindow):
         """Handle stop button click"""
         log.info("=== STOP button clicked ===")
 
+        # Disable stop button immediately to prevent double-clicks
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setText("Stopping...")
+
         if self.acq_thread is not None:
             log.debug("Stopping acquisition thread...")
             self.acq_thread.stop()
@@ -846,14 +850,22 @@ class MainWindow(QMainWindow):
                 self.api.stop()
             except PCIe7821Error as e:
                 log.warning(f"Error stopping device: {e}")
+            except Exception as e:
+                log.warning(f"Unexpected error stopping device: {e}")
 
         if self.data_saver is not None:
             log.debug("Stopping data saver...")
-            self.data_saver.stop()
+            try:
+                self.data_saver.stop()
+            except Exception as e:
+                log.warning(f"Error stopping data saver: {e}")
             self.data_saver = None
 
         self.save_status_label.setText("Save: Off")
         log.info(f"Stopped. Total data callbacks: {self._data_count}, GUI updates: {self._gui_update_count}")
+
+        # Reset stop button text (color will be set by _on_acquisition_stopped)
+        self.stop_btn.setText("STOP")
 
     @pyqtSlot()
     def _on_acquisition_stopped(self):
@@ -1135,12 +1147,19 @@ class MainWindow(QMainWindow):
         if self.acq_thread is not None and self.acq_thread.isRunning():
             log.debug("Stopping acquisition thread...")
             self.acq_thread.stop()
-            self.acq_thread.wait(2000)
+            # Give it a reasonable amount of time to stop, then force close
+            if not self.acq_thread.wait(2000):
+                log.warning("Acquisition thread did not stop gracefully, terminating...")
+                self.acq_thread.terminate()
+                self.acq_thread.wait(1000)
 
         # Stop data saver
         if self.data_saver is not None:
             log.debug("Stopping data saver...")
-            self.data_saver.stop()
+            try:
+                self.data_saver.stop()
+            except Exception as e:
+                log.warning(f"Error stopping data saver: {e}")
 
         # Close device
         if self.api is not None:

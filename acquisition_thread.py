@@ -142,29 +142,38 @@ class AcquisitionThread(QThread):
                 wait_count = 0
                 while self._running:
                     query_start = time.perf_counter()
-                    points_in_buffer = self.api.query_buffer_points()
-                    query_time = (time.perf_counter() - query_start) * 1000
+                    try:
+                        points_in_buffer = self.api.query_buffer_points()
+                        query_time = (time.perf_counter() - query_start) * 1000
 
-                    if query_time > 50:
-                        log.warning(f"Slow query_buffer_points: {query_time:.1f}ms")
+                        if query_time > 50:
+                            log.warning(f"Slow query_buffer_points: {query_time:.1f}ms")
 
-                    # Emit buffer status (throttled)
-                    if wait_count % 100 == 0:
-                        buffer_mb = points_in_buffer * self._channel_num * 2 // (1024 * 1024)
-                        self.buffer_status.emit(points_in_buffer, buffer_mb)
+                        # Emit buffer status (throttled)
+                        if wait_count % 100 == 0:
+                            buffer_mb = points_in_buffer * self._channel_num * 2 // (1024 * 1024)
+                            self.buffer_status.emit(points_in_buffer, buffer_mb)
 
-                    if points_in_buffer >= expected_points:
-                        wait_time = (time.perf_counter() - wait_start) * 1000
-                        log.debug(f"Buffer ready: {points_in_buffer} points, waited {wait_time:.1f}ms ({wait_count} iterations)")
-                        break
+                        if points_in_buffer >= expected_points:
+                            wait_time = (time.perf_counter() - wait_start) * 1000
+                            log.debug(f"Buffer ready: {points_in_buffer} points, waited {wait_time:.1f}ms ({wait_count} iterations)")
+                            break
 
-                    time.sleep(0.001)  # 1ms wait
-                    wait_count += 1
+                        time.sleep(0.001)  # 1ms wait
+                        wait_count += 1
 
-                    if wait_count > 5000:  # 5 second timeout
-                        log.error(f"Timeout waiting for data! points_in_buffer={points_in_buffer}, expected={expected_points}")
-                        self.error_occurred.emit("Timeout waiting for data")
-                        break
+                        if wait_count > 5000:  # 5 second timeout
+                            log.error(f"Timeout waiting for data! points_in_buffer={points_in_buffer}, expected={expected_points}")
+                            self.error_occurred.emit("Timeout waiting for data")
+                            break
+                    except Exception as e:
+                        log.warning(f"Error querying buffer: {e}")
+                        # Check if we should stop
+                        if not self._running:
+                            log.info("Thread stopping due to stop request during buffer query")
+                            break
+                        time.sleep(0.001)
+                        wait_count += 1
 
                 if not self._running:
                     log.info("Thread stopping (running=False after wait loop)")
@@ -183,6 +192,15 @@ class AcquisitionThread(QThread):
                 except PCIe7821Error as e:
                     log.error(f"Read error: {e}")
                     self.error_occurred.emit(str(e))
+                    time.sleep(0.1)
+                    continue
+                except Exception as e:
+                    log.error(f"Unexpected read error: {e}")
+                    # Check if we should stop
+                    if not self._running:
+                        log.info("Thread stopping due to stop request during read error")
+                        break
+                    self.error_occurred.emit(f"Read error: {e}")
                     time.sleep(0.1)
                     continue
 
@@ -205,7 +223,11 @@ class AcquisitionThread(QThread):
         points_per_ch = self._total_point_num * self._frame_num
         log.debug(f"Reading raw data: {points_per_ch} points/ch, {self._channel_num} channels")
 
-        data, points_returned = self.api.read_data(points_per_ch, self._channel_num)
+        try:
+            data, points_returned = self.api.read_data(points_per_ch, self._channel_num)
+        except Exception as e:
+            log.error(f"Failed to read raw data: {e}")
+            raise
 
         self._bytes_acquired += len(data) * 2  # short = 2 bytes
 
@@ -223,7 +245,11 @@ class AcquisitionThread(QThread):
         points_per_ch = self._point_num_after_merge * self._frame_num
         log.debug(f"Reading phase data: {points_per_ch} points/ch, {self._channel_num} channels")
 
-        phase_data, points_returned = self.api.read_phase_data(points_per_ch, self._channel_num)
+        try:
+            phase_data, points_returned = self.api.read_phase_data(points_per_ch, self._channel_num)
+        except Exception as e:
+            log.error(f"Failed to read phase data: {e}")
+            raise
 
         self._bytes_acquired += len(phase_data) * 4  # int = 4 bytes
 
@@ -241,6 +267,8 @@ class AcquisitionThread(QThread):
             )
             self._pending_monitor_data = (monitor_data, self._channel_num)
         except PCIe7821Error as e:
+            log.warning(f"Monitor data read failed (non-critical): {e}")
+        except Exception as e:
             log.warning(f"Monitor data read failed (non-critical): {e}")
 
         # Emit all pending data if enough time has passed
@@ -298,9 +326,15 @@ class AcquisitionThread(QThread):
         if self.isRunning():
             log.debug("Waiting for thread to finish...")
             if not self.wait(3000):  # 3 second timeout
-                log.warning("Thread did not finish in 3 seconds!")
+                log.warning("Thread did not finish in 3 seconds! Terminating forcefully...")
+                self.terminate()
+                # Wait a bit more for cleanup
+                if not self.wait(1000):
+                    log.error("Thread termination failed!")
+                else:
+                    log.info("Thread terminated successfully")
             else:
-                log.debug("Thread finished")
+                log.debug("Thread finished gracefully")
 
     def pause(self):
         """Pause acquisition"""
