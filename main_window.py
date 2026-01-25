@@ -974,129 +974,48 @@ class MainWindow(QMainWindow):
         return data[::factor]
 
     def _update_phase_display(self, data: np.ndarray, channel_num: int):
-        """Update display for phase data"""
-        frame_num = self.params.display.frame_num
-        point_num = self.params.basic.point_num_per_scan // self.params.phase_demod.merge_point_num
+        """Update display for phase data (data is already decimated from acquisition thread)"""
+        # Data is already decimated to max ~10000 points in acquisition thread
+        # Just display it directly on curve 0
+        self.plot_curve_1[0].setData(data)
 
-        if self.params.display.mode == DisplayMode.SPACE:
-            # Space mode: extract single region over time
-            region_idx = min(self.params.display.region_index, point_num - 1)
+        # Clear other curves
+        for i in range(1, 4):
+            self.plot_curve_1[i].setData([])
 
-            if channel_num == 1:
-                # Extract region data across frames
-                space_data = []
-                for i in range(frame_num):
-                    idx = region_idx + point_num * i
-                    if idx < len(data):
-                        space_data.append(data[idx])
-
-                space_data = np.array(space_data)
-                display_data = self._decimate_for_display(space_data)
-                self.plot_curve_1[0].setData(display_data)
-
-                # Clear other curves
-                for i in range(1, 4):
-                    self.plot_curve_1[i].setData([])
-
-                # Update spectrum
-                if self.params.display.spectrum_enable and len(space_data) > 0:
-                    self._update_spectrum(space_data, self.params.basic.scan_rate,
-                                         self.params.display.psd_enable, 'int')
-            else:
-                # Multi-channel space mode
-                if len(data.shape) == 1:
-                    data = data.reshape(-1, channel_num)
-
-                for ch in range(min(channel_num, 2)):
-                    space_data = []
-                    for i in range(frame_num):
-                        idx = region_idx + point_num * i
-                        if idx < len(data):
-                            space_data.append(data[idx, ch])
-                    display_data = self._decimate_for_display(np.array(space_data))
-                    self.plot_curve_1[ch].setData(display_data)
-
-                for i in range(channel_num, 4):
-                    self.plot_curve_1[i].setData([])
-
-        else:
-            # Time mode: show multiple frames overlay
-            if channel_num == 1:
-                for i in range(min(4, frame_num)):
-                    start = i * point_num
-                    end = start + point_num
-                    if end <= len(data):
-                        frame_data = self._decimate_for_display(data[start:end])
-                        self.plot_curve_1[i].setData(frame_data)
-                    else:
-                        self.plot_curve_1[i].setData([])
-
-                # Spectrum of first frame
-                if self.params.display.spectrum_enable and point_num <= len(data):
-                    self._update_spectrum(data[:point_num], self.params.basic.scan_rate,
-                                         self.params.display.psd_enable, 'int')
-            else:
-                if len(data.shape) == 1:
-                    data = data.reshape(-1, channel_num)
-
-                # Show first frame of each channel
-                for ch in range(min(channel_num, 4)):
-                    if point_num <= len(data):
-                        frame_data = self._decimate_for_display(data[:point_num, ch])
-                        self.plot_curve_1[ch].setData(frame_data)
+        # Spectrum (use decimated data)
+        if self.params.display.spectrum_enable and len(data) > 0:
+            self._update_spectrum(data, self.params.basic.scan_rate,
+                                 self.params.display.psd_enable, 'int')
 
         # Update frame counter
         if self.acq_thread is not None:
             self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
 
     def _update_raw_display(self, data: np.ndarray, channel_num: int):
-        """Update display for raw IQ data"""
-        point_num = self.params.basic.point_num_per_scan
-        frame_num = self.params.display.frame_num
+        """Update display for raw IQ data (data is already decimated from acquisition thread)"""
+        # Data is already decimated to max ~10000 points in acquisition thread
+        # Just display it directly on curve 0
+        self.plot_curve_1[0].setData(data)
 
-        if channel_num == 1:
-            # Show multiple frames
-            for i in range(min(4, frame_num)):
-                start = i * point_num
-                end = start + point_num
-                if end <= len(data):
-                    frame_data = self._decimate_for_display(data[start:end])
-                    self.plot_curve_1[i].setData(frame_data)
-                else:
-                    self.plot_curve_1[i].setData([])
+        # Clear other curves
+        for i in range(1, 4):
+            self.plot_curve_1[i].setData([])
 
-            # Spectrum
-            if self.params.display.spectrum_enable and point_num <= len(data):
-                sample_rate = 1e9 / self.params.upload.data_rate
-                self._update_spectrum(data[:point_num], sample_rate,
-                                     self.params.display.psd_enable, 'short')
-        else:
-            if len(data.shape) == 1:
-                data = data.reshape(-1, channel_num)
-
-            for ch in range(min(channel_num, 4)):
-                if point_num <= len(data):
-                    frame_data = self._decimate_for_display(data[:point_num, ch])
-                    self.plot_curve_1[ch].setData(frame_data)
+        # Spectrum (use decimated data)
+        if self.params.display.spectrum_enable and len(data) > 0:
+            sample_rate = 1e9 / self.params.upload.data_rate
+            # Effective sample rate after decimation
+            self._update_spectrum(data, sample_rate, self.params.display.psd_enable, 'short')
 
         if self.acq_thread is not None:
             self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
 
     def _update_monitor_display(self, data: np.ndarray, channel_num: int):
-        """Update monitor plot"""
-        point_num = self.params.basic.point_num_per_scan // self.params.phase_demod.merge_point_num
-
-        if channel_num == 1:
-            monitor_data = self._decimate_for_display(data[:point_num])
-            self.monitor_curves[0].setData(monitor_data)
-            self.monitor_curves[1].setData([])
-        else:
-            if len(data.shape) == 1:
-                data = data.reshape(-1, channel_num)
-
-            for ch in range(min(channel_num, 2)):
-                monitor_data = self._decimate_for_display(data[:point_num, ch])
-                self.monitor_curves[ch].setData(monitor_data)
+        """Update monitor plot (data is already decimated from acquisition thread)"""
+        # Data is already decimated, just display directly
+        self.monitor_curves[0].setData(data)
+        self.monitor_curves[1].setData([])
 
     def _update_spectrum(self, data: np.ndarray, sample_rate: float, psd_mode: bool, data_type: str):
         """Update spectrum plot"""

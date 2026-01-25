@@ -18,6 +18,9 @@ log = get_logger("acq_thread")
 # Minimum interval between GUI updates (ms)
 MIN_GUI_UPDATE_INTERVAL_MS = 50  # 20 FPS max
 
+# Maximum points to send to GUI (decimate before emitting signal)
+MAX_DISPLAY_POINTS = 10000
+
 
 class AcquisitionThread(QThread):
     """
@@ -72,6 +75,7 @@ class AcquisitionThread(QThread):
         self._pending_phase_data = None
         self._pending_raw_data = None
         self._pending_monitor_data = None
+        self._stopping = False  # Flag to prevent emitting signals during stop
 
         log.info("AcquisitionThread initialized")
 
@@ -98,6 +102,7 @@ class AcquisitionThread(QThread):
         """Thread main loop"""
         log.info("=== Acquisition thread started ===")
         self._running = True
+        self._stopping = False  # Reset stopping flag
         self._frames_acquired = 0
         self._bytes_acquired = 0
         self._loop_count = 0
@@ -246,8 +251,22 @@ class AcquisitionThread(QThread):
         # Emit all pending data if enough time has passed
         self._emit_if_ready()
 
+    def _decimate_for_signal(self, data: np.ndarray) -> np.ndarray:
+        """Decimate data before emitting signal to reduce cross-thread data transfer"""
+        if len(data) <= MAX_DISPLAY_POINTS:
+            return data
+        factor = len(data) // MAX_DISPLAY_POINTS
+        return data[::factor].copy()  # copy() to ensure contiguous memory
+
     def _emit_if_ready(self):
         """Emit pending data signals if enough time has passed since last update"""
+        # Don't emit signals if stopping
+        if self._stopping:
+            self._pending_phase_data = None
+            self._pending_raw_data = None
+            self._pending_monitor_data = None
+            return
+
         current_time = time.perf_counter() * 1000  # ms
         elapsed = current_time - self._last_gui_update_time
 
@@ -255,27 +274,30 @@ class AcquisitionThread(QThread):
             # Not enough time passed, skip this update (keep latest data pending)
             return
 
-        # Emit all pending signals
+        # Emit all pending signals (with decimation)
         signals_emitted = 0
 
         if self._pending_phase_data is not None:
             phase_data, channel_num = self._pending_phase_data
-            log.debug(f"Emitting phase_data_ready signal: shape={phase_data.shape}")
-            self.phase_data_ready.emit(phase_data, channel_num)
+            decimated = self._decimate_for_signal(phase_data.flatten() if channel_num > 1 else phase_data)
+            log.debug(f"Emitting phase_data_ready signal: orig={phase_data.shape}, decimated={len(decimated)}")
+            self.phase_data_ready.emit(decimated, channel_num)
             self._pending_phase_data = None
             signals_emitted += 1
 
         if self._pending_raw_data is not None:
             data, data_source, channel_num = self._pending_raw_data
-            log.debug(f"Emitting data_ready signal: shape={data.shape}, dtype={data.dtype}")
-            self.data_ready.emit(data, data_source, channel_num)
+            decimated = self._decimate_for_signal(data.flatten() if channel_num > 1 else data)
+            log.debug(f"Emitting data_ready signal: orig={data.shape}, decimated={len(decimated)}")
+            self.data_ready.emit(decimated, data_source, channel_num)
             self._pending_raw_data = None
             signals_emitted += 1
 
         if self._pending_monitor_data is not None:
             monitor_data, channel_num = self._pending_monitor_data
-            log.debug(f"Emitting monitor_data_ready signal: shape={monitor_data.shape}")
-            self.monitor_data_ready.emit(monitor_data, channel_num)
+            decimated = self._decimate_for_signal(monitor_data.flatten() if channel_num > 1 else monitor_data)
+            log.debug(f"Emitting monitor_data_ready signal: orig={monitor_data.shape}, decimated={len(decimated)}")
+            self.monitor_data_ready.emit(decimated, channel_num)
             self._pending_monitor_data = None
             signals_emitted += 1
 
@@ -286,7 +308,15 @@ class AcquisitionThread(QThread):
     def stop(self):
         """Stop acquisition thread"""
         log.info("Stop requested")
+
+        # Set stopping flag first to prevent more signal emissions
+        self._stopping = True
         self._running = False
+
+        # Clear pending data immediately
+        self._pending_phase_data = None
+        self._pending_raw_data = None
+        self._pending_monitor_data = None
 
         # Wake up if paused
         self._mutex.lock()
@@ -378,6 +408,7 @@ class SimulatedAcquisitionThread(AcquisitionThread):
         """Simulated acquisition loop"""
         log.info("=== Simulated acquisition thread started ===")
         self._running = True
+        self._stopping = False  # Reset stopping flag
         self._frames_acquired = 0
         self._bytes_acquired = 0
         self._loop_count = 0
