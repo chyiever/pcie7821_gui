@@ -302,7 +302,7 @@ class MainWindow(QMainWindow):
         self.data_source_combo = QComboBox()
         for label, value in DATA_SOURCE_OPTIONS:
             self.data_source_combo.addItem(label, value)
-        self.data_source_combo.setCurrentIndex(4)  # Default to Phase
+        self.data_source_combo.setCurrentIndex(3)  # Default to Phase
         self.data_source_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
         upload_layout.addWidget(self.data_source_combo, 0, 3)
 
@@ -327,7 +327,7 @@ class MainWindow(QMainWindow):
         self.rate2phase_combo = QComboBox()
         for label, value in RATE2PHASE_OPTIONS:
             self.rate2phase_combo.addItem(label, value)
-        self.rate2phase_combo.setCurrentIndex(2)  # Default 250M
+        self.rate2phase_combo.setCurrentIndex(0)  # Default 250M (index 0)
         self.rate2phase_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.rate2phase_combo, 0, 1)
 
@@ -359,7 +359,7 @@ class MainWindow(QMainWindow):
         # Row 2: Detrend BW | Polarization
         phase_layout.addWidget(QLabel("Detrend(Hz):"), 2, 0)
         self.detrend_bw_spin = QDoubleSpinBox()
-        self.detrend_bw_spin.setRange(0.0, 100.0)
+        self.detrend_bw_spin.setRange(0.0, 10000.0)
         self.detrend_bw_spin.setValue(0.5)
         self.detrend_bw_spin.setSingleStep(0.1)
         self.detrend_bw_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
@@ -561,7 +561,7 @@ class MainWindow(QMainWindow):
         self.plot_curve_1 = []
 
         # Plot 2 - Spectrum
-        self.plot_widget_2.setLabel('left', 'Power', units='dBm')
+        self.plot_widget_2.setLabel('left', 'Power', units='dB')
         self.plot_widget_2.setLabel('bottom', 'Frequency', units='Hz')
         self.spectrum_curve = self.plot_widget_2.plot(pen=pg.mkPen('#9467bd', width=1.5))  # Purple
 
@@ -702,7 +702,7 @@ class MainWindow(QMainWindow):
             return False, msg
 
         # Raw data source with 4 channels not supported
-        if params.upload.data_source < DataSource.PHASE and params.upload.channel_num == 4:
+        if params.upload.data_source != DataSource.PHASE and params.upload.channel_num == 4:
             return False, "Raw data source does not support 4 channels"
 
         return True, ""
@@ -1088,9 +1088,9 @@ class MainWindow(QMainWindow):
 
             # Update axis label
             if psd_mode:
-                self.plot_widget_2.setLabel('left', 'PSD', units='dBm/Hz')
+                self.plot_widget_2.setLabel('left', 'PSD', units='dB/Hz')
             else:
-                self.plot_widget_2.setLabel('left', 'Power', units='dBm')
+                self.plot_widget_2.setLabel('left', 'Power', units='dB')
         except Exception as e:
             log.warning(f"Spectrum update error: {e}")
 

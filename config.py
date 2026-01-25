@@ -19,11 +19,10 @@ class TriggerDirection(IntEnum):
 
 
 class DataSource(IntEnum):
-    RAW_I = 0
-    RAW_Q = 1
-    IQ_I = 2
-    IQ_Q = 3
-    PHASE = 4
+    raw = 0     # 原始散射光数据
+    I_Q = 2     # I/Q路数据
+    arc = 3     # IQ解调后的arctan(Q/I)
+    PHASE = 4   # 相位数据
 
 
 class DisplayMode(IntEnum):
@@ -54,7 +53,7 @@ class UploadParams:
 @dataclass
 class PhaseDemodParams:
     """Phase demodulation parameters"""
-    rate2phase: int = 4  # 1, 2, 4, 8, 16, 32
+    rate2phase: int = 1  # 1, 2, 3, 4, 5, 10 (默认250M)
     space_avg_order: int = 25
     merge_point_num: int = 25
     diff_order: int = 1
@@ -98,11 +97,10 @@ CHANNEL_NUM_OPTIONS: List[Tuple[str, int]] = [
 ]
 
 DATA_SOURCE_OPTIONS: List[Tuple[str, int]] = [
-    ("Raw I", DataSource.RAW_I),
-    ("Raw Q", DataSource.RAW_Q),
-    ("IQ I", DataSource.IQ_I),
-    ("IQ Q", DataSource.IQ_Q),
-    ("Phase", DataSource.PHASE),
+    ("RawBack", DataSource.raw),    # 原始散射光数据
+    ("I/Q", DataSource.I_Q),        # I/Q路数据
+    ("Arctan", DataSource.arc),     # IQ解调后的arctan(Q/I)
+    ("Phase", DataSource.PHASE),    # 相位解调数据
 ]
 
 DATA_RATE_OPTIONS: List[Tuple[str, int]] = [
@@ -112,15 +110,15 @@ DATA_RATE_OPTIONS: List[Tuple[str, int]] = [
     ("8ns (125MHz)", 8),
 ]
 
-# Rate2Phase: 基础采样率1GHz / Rate2Phase = 实际数据率
-# 例如: Rate2Phase=4 → 1GHz/4 = 250MHz
+# Rate2Phase: 原始采样率1GHz，经IQ解调后为250MHz，再经Rate2Phase分频得到实际相位数据率
+# 例如: Rate2Phase=1 → 250MHz/1 = 250MHz, Rate2Phase=10 → 250MHz/10 = 25MHz
 RATE2PHASE_OPTIONS: List[Tuple[str, int]] = [
-    ("1G", 1),
-    ("500M", 2),
-    ("250M", 4),
-    ("125M", 8),
-    ("62.5M", 16),
-    ("31.25M", 32),
+    ("250M", 1),
+    ("125M", 2),
+    ("83.33M", 3),
+    ("62.5M", 4),
+    ("50M", 5),
+    ("25M", 10),
 ]
 
 # Constraints

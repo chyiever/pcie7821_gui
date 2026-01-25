@@ -69,7 +69,7 @@ class SpectrumAnalyzer:
         Args:
             data: Input time-domain data (short/int16)
             sample_rate: Sample rate in Hz
-            psd_mode: If True, return PSD (dBm/Hz); if False, return power spectrum (dBm)
+            psd_mode: If True, return PSD (dB/Hz); if False, return power spectrum (dB)
 
         Returns:
             Tuple of (frequency_axis, spectrum_db, frequency_resolution)
@@ -86,7 +86,7 @@ class SpectrumAnalyzer:
         Args:
             data: Input time-domain data (int32)
             sample_rate: Sample rate in Hz
-            psd_mode: If True, return PSD (dBm/Hz); if False, return power spectrum (dBm)
+            psd_mode: If True, return PSD (dB/Hz); if False, return power spectrum (dB)
 
         Returns:
             Tuple of (frequency_axis, spectrum_db, frequency_resolution)
@@ -103,7 +103,7 @@ class SpectrumAnalyzer:
         Args:
             data: Input time-domain data (float64)
             sample_rate: Sample rate in Hz
-            psd_mode: If True, return PSD (dBm/Hz); if False, return power spectrum (dBm)
+            psd_mode: If True, return PSD (dB/Hz); if False, return power spectrum (dB)
 
         Returns:
             Tuple of (frequency_axis, spectrum_db, frequency_resolution)
@@ -140,21 +140,17 @@ class SpectrumAnalyzer:
         # Create frequency axis
         freq_axis = np.arange(n_half) * df
 
-        # Convert to dBm
-        # P(W) = V^2 / R
-        power_w = power_spectrum / self.IMPEDANCE
-
+        # Convert to dB (relative power)
+        # Direct conversion without impedance reference
         if psd_mode:
             # Power Spectral Density: divide by frequency resolution
             # Correct for noise bandwidth of window
-            power_w = power_w / (df * noise_bandwidth)
-            # Convert to mW/Hz, then to dBm/Hz
-            power_mw_hz = power_w * 1000.0
-            spectrum_db = 10.0 * np.log10(power_mw_hz + 1e-20)
+            power_density = power_spectrum / (df * noise_bandwidth)
+            # Convert to dB/Hz
+            spectrum_db = 10.0 * np.log10(power_density + 1e-20)
         else:
-            # Power spectrum: convert to mW, then to dBm
-            power_mw = power_w * 1000.0
-            spectrum_db = 10.0 * np.log10(power_mw + 1e-20)
+            # Power spectrum: convert to dB
+            spectrum_db = 10.0 * np.log10(power_spectrum + 1e-20)
 
         return freq_axis, spectrum_db, df
 
@@ -166,7 +162,7 @@ class SpectrumAnalyzer:
         Args:
             data: Input time-domain data
             sample_rate: Sample rate in Hz
-            psd_mode: If True, return PSD (dBm/Hz); if False, return power spectrum (dBm)
+            psd_mode: If True, return PSD (dB/Hz); if False, return power spectrum (dB)
             data_type: 'short' for raw data, 'int' for phase data
 
         Returns:
