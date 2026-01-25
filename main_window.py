@@ -68,7 +68,7 @@ class MainWindow(QMainWindow):
         self._gui_update_count = 0
 
         # Setup UI
-        self.setWindowTitle("PCIe-7821 DAS Acquisition Software")
+        self.setWindowTitle("eDAS-gh26.1.24")
         self.setMinimumSize(1400, 900)
 
         log.debug("Setting up UI...")
@@ -105,10 +105,10 @@ class MainWindow(QMainWindow):
         # Content area (horizontal splitter)
         content_layout = QHBoxLayout()
 
-        # Left panel - Parameters
+        # Left panel - Parameters (two-column layout needs more width)
         left_panel = self._create_parameter_panel()
-        left_panel.setMaximumWidth(350)
-        left_panel.setMinimumWidth(320)
+        left_panel.setMaximumWidth(380)
+        left_panel.setMinimumWidth(340)
 
         # Right panel - Plots and controls
         right_panel = self._create_plot_panel()
@@ -117,7 +117,7 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        splitter.setSizes([320, 1100])
+        splitter.setSizes([360, 1040])
 
         main_vertical_layout.addWidget(splitter)
 
@@ -135,10 +135,10 @@ class MainWindow(QMainWindow):
         """Create header with logo and title"""
         header = QFrame()
         header.setFrameStyle(QFrame.StyledPanel)
-        header.setFixedHeight(70)
+        header.setFixedHeight(50)
 
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setContentsMargins(10, 3, 10, 3)
 
         # Logo
         logo_label = QLabel()
@@ -146,7 +146,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(logo_path):
             pixmap = QPixmap(logo_path)
             # Scale logo to fit header height
-            scaled_pixmap = pixmap.scaledToHeight(55, Qt.SmoothTransformation)
+            scaled_pixmap = pixmap.scaledToHeight(40, Qt.SmoothTransformation)
             logo_label.setPixmap(scaled_pixmap)
         else:
             logo_label.setText("[LOGO]")
@@ -154,9 +154,9 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(logo_label)
 
-        # Title - 黑体加粗36号字
+        # Title - 黑体加粗28号字
         title_label = QLabel("分布式光纤传感系统（eDAS）")
-        title_font = QFont("SimHei", 36, QFont.Bold)  # 黑体
+        title_font = QFont("SimHei", 28, QFont.Bold)  # 黑体
         title_label.setFont(title_font)
         title_label.setAlignment(Qt.AlignCenter)
 
@@ -169,115 +169,128 @@ class MainWindow(QMainWindow):
         """Create the parameter configuration panel"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
+        layout.setContentsMargins(5, 5, 5, 5)
 
-        # Minimum height for input widgets to ensure usability at lower resolutions
-        INPUT_MIN_HEIGHT = 28
+        # Minimum height for input widgets
+        INPUT_MIN_HEIGHT = 22
+        INPUT_MAX_WIDTH = 80
 
         # Apply stylesheet for fonts - Times New Roman for English text, SimHei for Chinese
         panel.setStyleSheet("""
             QGroupBox {
                 font-family: 'SimHei', 'Microsoft YaHei';
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: bold;
             }
             QLabel {
                 font-family: 'Times New Roman', 'SimHei';
-                font-size: 12px;
+                font-size: 11px;
             }
             QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit {
                 font-family: 'Times New Roman';
-                font-size: 12px;
+                font-size: 11px;
+                max-height: 22px;
+            }
+            QComboBox {
+                max-width: 85px;
             }
             QRadioButton, QCheckBox {
                 font-family: 'Times New Roman', 'SimHei';
-                font-size: 11px;
+                font-size: 10px;
             }
             QPushButton {
                 font-family: 'Times New Roman', 'SimHei';
-                font-size: 13px;
+                font-size: 12px;
             }
         """)
 
-        # Basic Parameters Group
+        # Basic Parameters Group - Two columns layout
         basic_group = QGroupBox("Basic Parameters")
         basic_layout = QGridLayout(basic_group)
-        basic_layout.setSpacing(6)
+        basic_layout.setSpacing(4)
+        basic_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Clock Source
-        basic_layout.addWidget(QLabel("Clock Source:"), 0, 0)
-        self.clk_internal_radio = QRadioButton("Internal")
-        self.clk_external_radio = QRadioButton("External")
+        # Row 0: Clock Source (spans 2 cols) | Trigger Dir (spans 2 cols)
+        basic_layout.addWidget(QLabel("Clock:"), 0, 0)
+        self.clk_internal_radio = QRadioButton("Int")
+        self.clk_external_radio = QRadioButton("Ext")
         self.clk_internal_radio.setChecked(True)
         clk_group = QButtonGroup(self)
         clk_group.addButton(self.clk_internal_radio, 0)
         clk_group.addButton(self.clk_external_radio, 1)
         clk_layout = QHBoxLayout()
+        clk_layout.setSpacing(2)
         clk_layout.addWidget(self.clk_internal_radio)
         clk_layout.addWidget(self.clk_external_radio)
         basic_layout.addLayout(clk_layout, 0, 1)
 
-        # Trigger Direction
-        basic_layout.addWidget(QLabel("Trigger Dir:"), 1, 0)
-        self.trig_in_radio = QRadioButton("Input")
-        self.trig_out_radio = QRadioButton("Output")
+        basic_layout.addWidget(QLabel("Trig:"), 0, 2)
+        self.trig_in_radio = QRadioButton("In")
+        self.trig_out_radio = QRadioButton("Out")
         self.trig_out_radio.setChecked(True)
         trig_group = QButtonGroup(self)
         trig_group.addButton(self.trig_in_radio, 0)
         trig_group.addButton(self.trig_out_radio, 1)
         trig_layout = QHBoxLayout()
+        trig_layout.setSpacing(2)
         trig_layout.addWidget(self.trig_in_radio)
         trig_layout.addWidget(self.trig_out_radio)
-        basic_layout.addLayout(trig_layout, 1, 1)
+        basic_layout.addLayout(trig_layout, 0, 3)
 
-        # Scan Rate
-        basic_layout.addWidget(QLabel("Scan Rate (Hz):"), 2, 0)
+        # Row 1: Scan Rate | Pulse Width
+        basic_layout.addWidget(QLabel("Scan(Hz):"), 1, 0)
         self.scan_rate_spin = QSpinBox()
         self.scan_rate_spin.setRange(1, 100000)
         self.scan_rate_spin.setValue(2000)
         self.scan_rate_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        basic_layout.addWidget(self.scan_rate_spin, 2, 1)
+        self.scan_rate_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        basic_layout.addWidget(self.scan_rate_spin, 1, 1)
 
-        # Pulse Width
-        basic_layout.addWidget(QLabel("Pulse Width (ns):"), 3, 0)
+        basic_layout.addWidget(QLabel("Pulse(ns):"), 1, 2)
         self.pulse_width_spin = QSpinBox()
         self.pulse_width_spin.setRange(10, 1000)
         self.pulse_width_spin.setValue(100)
         self.pulse_width_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        basic_layout.addWidget(self.pulse_width_spin, 3, 1)
+        self.pulse_width_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        basic_layout.addWidget(self.pulse_width_spin, 1, 3)
 
-        # Points per Scan
-        basic_layout.addWidget(QLabel("Points/Scan:"), 4, 0)
+        # Row 2: Points/Scan | Bypass
+        basic_layout.addWidget(QLabel("Points:"), 2, 0)
         self.point_num_spin = QSpinBox()
         self.point_num_spin.setRange(512, 262144)
         self.point_num_spin.setValue(20480)
         self.point_num_spin.setSingleStep(512)
         self.point_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        basic_layout.addWidget(self.point_num_spin, 4, 1)
+        self.point_num_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        basic_layout.addWidget(self.point_num_spin, 2, 1)
 
-        # Bypass Points
-        basic_layout.addWidget(QLabel("Bypass Points:"), 5, 0)
+        basic_layout.addWidget(QLabel("Bypass:"), 2, 2)
         self.bypass_spin = QSpinBox()
         self.bypass_spin.setRange(0, 65535)
         self.bypass_spin.setValue(60)
         self.bypass_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        basic_layout.addWidget(self.bypass_spin, 5, 1)
+        self.bypass_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        basic_layout.addWidget(self.bypass_spin, 2, 3)
 
-        # Center Frequency
-        basic_layout.addWidget(QLabel("Center Freq (MHz):"), 6, 0)
+        # Row 3: Center Freq (spans full width for clarity)
+        basic_layout.addWidget(QLabel("CenterFreq(MHz):"), 3, 0, 1, 2)
         self.center_freq_spin = QSpinBox()
         self.center_freq_spin.setRange(50, 500)
         self.center_freq_spin.setValue(200)
         self.center_freq_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        basic_layout.addWidget(self.center_freq_spin, 6, 1)
+        self.center_freq_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        basic_layout.addWidget(self.center_freq_spin, 3, 2, 1, 2)
 
         layout.addWidget(basic_group)
 
-        # Upload Parameters Group
+        # Upload Parameters Group - Two columns layout
         upload_group = QGroupBox("Upload Parameters")
         upload_layout = QGridLayout(upload_group)
+        upload_layout.setSpacing(4)
+        upload_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Channel Number
+        # Row 0: Channels | Data Source
         upload_layout.addWidget(QLabel("Channels:"), 0, 0)
         self.channel_combo = QComboBox()
         for label, value in CHANNEL_NUM_OPTIONS:
@@ -285,82 +298,86 @@ class MainWindow(QMainWindow):
         self.channel_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
         upload_layout.addWidget(self.channel_combo, 0, 1)
 
-        # Data Source
-        upload_layout.addWidget(QLabel("Data Source:"), 1, 0)
+        upload_layout.addWidget(QLabel("Source:"), 0, 2)
         self.data_source_combo = QComboBox()
         for label, value in DATA_SOURCE_OPTIONS:
             self.data_source_combo.addItem(label, value)
         self.data_source_combo.setCurrentIndex(4)  # Default to Phase
         self.data_source_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
-        upload_layout.addWidget(self.data_source_combo, 1, 1)
+        upload_layout.addWidget(self.data_source_combo, 0, 3)
 
-        # Data Rate
-        upload_layout.addWidget(QLabel("Data Rate:"), 2, 0)
+        # Row 1: Data Rate
+        upload_layout.addWidget(QLabel("DataRate:"), 1, 0)
         self.data_rate_combo = QComboBox()
         for label, value in DATA_RATE_OPTIONS:
             self.data_rate_combo.addItem(label, value)
         self.data_rate_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
-        upload_layout.addWidget(self.data_rate_combo, 2, 1)
+        upload_layout.addWidget(self.data_rate_combo, 1, 1)
 
         layout.addWidget(upload_group)
 
-        # Phase Demodulation Parameters Group
+        # Phase Demodulation Parameters Group - Two columns layout
         phase_group = QGroupBox("Phase Demod Parameters")
         phase_layout = QGridLayout(phase_group)
+        phase_layout.setSpacing(4)
+        phase_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Rate2Phase
+        # Row 0: Rate2Phase | Space Avg
         phase_layout.addWidget(QLabel("Rate2Phase:"), 0, 0)
         self.rate2phase_combo = QComboBox()
         for label, value in RATE2PHASE_OPTIONS:
             self.rate2phase_combo.addItem(label, value)
-        self.rate2phase_combo.setCurrentIndex(2)  # Default 4
+        self.rate2phase_combo.setCurrentIndex(2)  # Default 250M
         self.rate2phase_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
         phase_layout.addWidget(self.rate2phase_combo, 0, 1)
 
-        # Space Average
-        phase_layout.addWidget(QLabel("Space Avg:"), 1, 0)
+        phase_layout.addWidget(QLabel("SpaceAvg:"), 0, 2)
         self.space_avg_spin = QSpinBox()
         self.space_avg_spin.setRange(1, 64)
         self.space_avg_spin.setValue(25)
         self.space_avg_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        phase_layout.addWidget(self.space_avg_spin, 1, 1)
+        self.space_avg_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        phase_layout.addWidget(self.space_avg_spin, 0, 3)
 
-        # Merge Points
-        phase_layout.addWidget(QLabel("Merge Points:"), 2, 0)
+        # Row 1: Merge Points | Diff Order
+        phase_layout.addWidget(QLabel("Merge:"), 1, 0)
         self.merge_points_spin = QSpinBox()
         self.merge_points_spin.setRange(1, 64)
         self.merge_points_spin.setValue(25)
         self.merge_points_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        phase_layout.addWidget(self.merge_points_spin, 2, 1)
+        self.merge_points_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        phase_layout.addWidget(self.merge_points_spin, 1, 1)
 
-        # Diff Order
-        phase_layout.addWidget(QLabel("Diff Order:"), 3, 0)
+        phase_layout.addWidget(QLabel("DiffOrder:"), 1, 2)
         self.diff_order_spin = QSpinBox()
         self.diff_order_spin.setRange(0, 4)
         self.diff_order_spin.setValue(1)
         self.diff_order_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        phase_layout.addWidget(self.diff_order_spin, 3, 1)
+        self.diff_order_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        phase_layout.addWidget(self.diff_order_spin, 1, 3)
 
-        # Detrend BW
-        phase_layout.addWidget(QLabel("Detrend BW (Hz):"), 4, 0)
+        # Row 2: Detrend BW | Polarization
+        phase_layout.addWidget(QLabel("Detrend(Hz):"), 2, 0)
         self.detrend_bw_spin = QDoubleSpinBox()
         self.detrend_bw_spin.setRange(0.0, 100.0)
         self.detrend_bw_spin.setValue(0.5)
         self.detrend_bw_spin.setSingleStep(0.1)
         self.detrend_bw_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        phase_layout.addWidget(self.detrend_bw_spin, 4, 1)
+        self.detrend_bw_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        phase_layout.addWidget(self.detrend_bw_spin, 2, 1)
 
-        # Polarization Diversity
-        self.polar_div_check = QCheckBox("Polarization Diversity")
-        phase_layout.addWidget(self.polar_div_check, 5, 0, 1, 2)
+        self.polar_div_check = QCheckBox("PolarDiv")
+        phase_layout.addWidget(self.polar_div_check, 2, 2, 1, 2)
 
         layout.addWidget(phase_group)
 
-        # Display Control Group
+        # Display Control Group - Two columns layout
         display_group = QGroupBox("Display Control")
         display_layout = QGridLayout(display_group)
+        display_layout.setSpacing(4)
+        display_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Display Mode
+        # Row 0: Mode | Region Index
         display_layout.addWidget(QLabel("Mode:"), 0, 0)
         self.mode_time_radio = QRadioButton("Time")
         self.mode_space_radio = QRadioButton("Space")
@@ -369,57 +386,59 @@ class MainWindow(QMainWindow):
         mode_group.addButton(self.mode_time_radio, 0)
         mode_group.addButton(self.mode_space_radio, 1)
         mode_layout = QHBoxLayout()
+        mode_layout.setSpacing(2)
         mode_layout.addWidget(self.mode_time_radio)
         mode_layout.addWidget(self.mode_space_radio)
         display_layout.addLayout(mode_layout, 0, 1)
 
-        # Region Index
-        display_layout.addWidget(QLabel("Region Index:"), 1, 0)
+        display_layout.addWidget(QLabel("Region:"), 0, 2)
         self.region_index_spin = QSpinBox()
         self.region_index_spin.setRange(0, 65535)
         self.region_index_spin.setValue(0)
         self.region_index_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        display_layout.addWidget(self.region_index_spin, 1, 1)
+        self.region_index_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        display_layout.addWidget(self.region_index_spin, 0, 3)
 
-        # Frame Number
-        display_layout.addWidget(QLabel("Frames:"), 2, 0)
+        # Row 1: Frames | Spectrum/PSD
+        display_layout.addWidget(QLabel("Frames:"), 1, 0)
         self.frame_num_spin = QSpinBox()
         self.frame_num_spin.setRange(1, 10000)
         self.frame_num_spin.setValue(1024)
         self.frame_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        display_layout.addWidget(self.frame_num_spin, 2, 1)
+        self.frame_num_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        display_layout.addWidget(self.frame_num_spin, 1, 1)
 
-        # Spectrum Enable
-        self.spectrum_enable_check = QCheckBox("Spectrum Enable")
+        self.spectrum_enable_check = QCheckBox("Spectrum")
         self.spectrum_enable_check.setChecked(True)
-        display_layout.addWidget(self.spectrum_enable_check, 3, 0)
+        display_layout.addWidget(self.spectrum_enable_check, 1, 2)
 
-        # PSD Mode
-        self.psd_check = QCheckBox("PSD Mode")
-        display_layout.addWidget(self.psd_check, 3, 1)
+        self.psd_check = QCheckBox("PSD")
+        display_layout.addWidget(self.psd_check, 1, 3)
 
         layout.addWidget(display_group)
 
         # Save Control Group
         save_group = QGroupBox("Data Save")
         save_layout = QGridLayout(save_group)
+        save_layout.setSpacing(4)
+        save_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Save Enable
-        self.save_enable_check = QCheckBox("Enable Save")
+        # Row 0: Enable | Path
+        self.save_enable_check = QCheckBox("Enable")
         save_layout.addWidget(self.save_enable_check, 0, 0)
 
-        # Save Path
-        save_layout.addWidget(QLabel("Path:"), 1, 0)
+        save_layout.addWidget(QLabel("Path:"), 0, 1)
         path_layout = QHBoxLayout()
+        path_layout.setSpacing(2)
         self.save_path_edit = QLineEdit("save_data")
         self.save_path_edit.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.browse_btn = QPushButton("...")
-        self.browse_btn.setMaximumWidth(30)
+        self.browse_btn.setMaximumWidth(25)
         self.browse_btn.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.browse_btn.clicked.connect(self._browse_save_path)
         path_layout.addWidget(self.save_path_edit)
         path_layout.addWidget(self.browse_btn)
-        save_layout.addLayout(path_layout, 1, 1)
+        save_layout.addLayout(path_layout, 0, 2, 1, 2)
 
         layout.addWidget(save_group)
 
@@ -428,12 +447,12 @@ class MainWindow(QMainWindow):
 
         # START button - green when ready, gray when running
         self.start_btn = QPushButton("START")
-        self.start_btn.setMinimumHeight(45)
+        self.start_btn.setMinimumHeight(38)
         self._set_start_btn_ready()
 
         # STOP button - gray when disabled, red when enabled
         self.stop_btn = QPushButton("STOP")
-        self.stop_btn.setMinimumHeight(45)
+        self.stop_btn.setMinimumHeight(38)
         self._set_stop_btn_disabled()
 
         control_layout.addWidget(self.start_btn)

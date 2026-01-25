@@ -78,8 +78,8 @@ def main():
 
     # Create application
     app = QApplication(sys.argv)
-    app.setApplicationName("PCIe-7821 DAS")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationName("eDAS-gh26.1.24")
+    app.setApplicationVersion("26.1.24")
 
     # Set application style
     app.setStyle('Fusion')
@@ -95,7 +95,7 @@ def main():
         window = MainWindow(simulation_mode=args.simulate)
 
         if args.simulate:
-            window.setWindowTitle("PCIe-7821 DAS Acquisition Software [SIMULATION MODE]")
+            window.setWindowTitle("eDAS-gh26.1.24 [SIMULATION MODE]")
 
         window.show()
         log.info("Main window shown")

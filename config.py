@@ -115,21 +115,12 @@ DATA_RATE_OPTIONS: List[Tuple[str, int]] = [
 # Rate2Phase: 基础采样率1GHz / Rate2Phase = 实际数据率
 # 例如: Rate2Phase=4 → 1GHz/4 = 250MHz
 RATE2PHASE_OPTIONS: List[Tuple[str, int]] = [
-<<<<<<< HEAD
     ("1G", 1),
     ("500M", 2),
     ("250M", 4),
     ("125M", 8),
     ("62.5M", 16),
     ("31.25M", 32),
-=======
-    ("1x", 1),
-    ("2x", 2),
-    ("4x", 4),
-    ("8x", 8),
-    ("16x", 16),
-    ("32x", 32),
->>>>>>> 6a26e535ed848e0881a770e06c6bdfb8baaff2e0
 ]
 
 # Constraints
