@@ -76,7 +76,6 @@ class MainWindow(QMainWindow):
         log.debug("Setting up UI...")
         self._setup_ui()
         self._setup_plots()
-        self._setup_plot_interactions()  # 添加交互功能设置
         self._connect_signals()
 
         # Status timer
@@ -570,25 +569,6 @@ class MainWindow(QMainWindow):
             pw.getAxis('left').setStyle(tickTextOffset=10)
             pw.getAxis('bottom').setStyle(tickTextOffset=10)
 
-            # Enable interactive features
-            pw.setMenuEnabled(True)  # 右键菜单
-            pw.enableAutoRange()     # 自动范围
-
-            # Enable mouse wheel zoom
-            pw.getViewBox().setMouseEnabled(x=True, y=True)  # 启用鼠标交互
-            pw.getViewBox().enableAutoRange(axis='x', enable=False)  # 禁用X轴自动范围（允许用户缩放）
-            pw.getViewBox().enableAutoRange(axis='y', enable=False)  # 禁用Y轴自动范围（允许用户缩放）
-
-            # Add crosshair cursor
-            vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('r', width=1, style=Qt.DashLine))
-            hLine = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('r', width=1, style=Qt.DashLine))
-            pw.addItem(vLine, ignoreBounds=True)
-            pw.addItem(hLine, ignoreBounds=True)
-
-            # Store references for mouse tracking
-            pw.vLine = vLine
-            pw.hLine = hLine
-
         # Plot 1 - Time domain
         self.plot_widget_1.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         self.plot_widget_1.setLabel('bottom', 'Sample', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
@@ -620,26 +600,9 @@ class MainWindow(QMainWindow):
         self.frames_label = QLabel("Frames: 0")
         self.save_status_label = QLabel("Save: Off")
 
-        # Add coordinate display labels
-        self.coord_label_1 = QLabel("Time: X=-, Y=-")
-        self.coord_label_2 = QLabel("Spectrum: X=-, Y=-")
-        self.coord_label_3 = QLabel("Monitor: X=-, Y=-")
-
-        # Style coordinate labels
-        coord_style = "color: blue; font-family: 'Courier New'; font-size: 10px;"
-        self.coord_label_1.setStyleSheet(coord_style)
-        self.coord_label_2.setStyleSheet(coord_style)
-        self.coord_label_3.setStyleSheet(coord_style)
-
         status_layout.addWidget(self.buffer_label)
         status_layout.addWidget(self.frames_label)
         status_layout.addWidget(self.save_status_label)
-        status_layout.addWidget(QLabel("|"))  # Separator
-        status_layout.addWidget(self.coord_label_1)
-        status_layout.addWidget(QLabel("|"))  # Separator
-        status_layout.addWidget(self.coord_label_2)
-        status_layout.addWidget(QLabel("|"))  # Separator
-        status_layout.addWidget(self.coord_label_3)
         status_layout.addStretch()
 
         layout.addWidget(status_frame)
@@ -673,17 +636,6 @@ class MainWindow(QMainWindow):
         self.merge_points_spin.valueChanged.connect(self._update_calculated_values)
         self.rate2phase_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
-
-        # Connect mouse move events for coordinate display
-        self.plot_widget_1.scene().sigMouseMoved.connect(
-            lambda pos: self._update_crosshair(self.plot_widget_1, pos, self.coord_label_1, "Time")
-        )
-        self.plot_widget_2.scene().sigMouseMoved.connect(
-            lambda pos: self._update_crosshair(self.plot_widget_2, pos, self.coord_label_2, "Spectrum")
-        )
-        self.plot_widget_3.scene().sigMouseMoved.connect(
-            lambda pos: self._update_crosshair(self.plot_widget_3, pos, self.coord_label_3, "Monitor")
-        )
 
     def _init_device(self):
         """Initialize the PCIe-7821 device"""
@@ -1288,134 +1240,7 @@ class MainWindow(QMainWindow):
         """Handle channel count change"""
         self._update_calculated_values()
 
-    def _update_crosshair(self, plot_widget, pos, coord_label, plot_name):
-        """Update crosshair and coordinate display"""
-        try:
-            # Check if mouse is within the plot area
-            if plot_widget.sceneBoundingRect().contains(pos):
-                # Convert scene coordinates to data coordinates
-                mouse_point = plot_widget.getViewBox().mapSceneToView(pos)
-                x, y = mouse_point.x(), mouse_point.y()
-
-                # Update crosshair position
-                plot_widget.vLine.setPos(x)
-                plot_widget.hLine.setPos(y)
-
-                # Format coordinates based on plot type
-                if plot_name == "Spectrum":
-                    # Handle potential log scale
-                    if hasattr(plot_widget.getViewBox(), 'state') and plot_widget.getViewBox().state.get('logScale', [False, False])[0]:
-                        # X-axis is in log scale, display actual frequency
-                        actual_x = 10 ** x if x > -10 else 0  # Avoid very small numbers
-                        x_str = f"{actual_x:.2f}"
-                    else:
-                        x_str = f"{x:.3f}"
-                    y_str = f"{y:.1f}"
-                else:
-                    # Time domain or monitor plots
-                    x_str = f"{x:.0f}" if abs(x) > 1 else f"{x:.3f}"
-                    y_str = f"{y:.0f}" if abs(y) > 1 else f"{y:.3f}"
-
-                coord_label.setText(f"{plot_name}: X={x_str}, Y={y_str}")
-            else:
-                # Mouse outside plot area
-                coord_label.setText(f"{plot_name}: X=-, Y=-")
-                # Hide crosshair when outside
-                plot_widget.vLine.setPos(-1e6)
-                plot_widget.hLine.setPos(-1e6)
-        except Exception as e:
-            # Handle any coordinate conversion errors silently
-            coord_label.setText(f"{plot_name}: X=-, Y=-")
-
-    def _setup_plot_interactions(self):
-        """Setup additional plot interaction features"""
-        # Configure mouse interaction modes for all plots
-        plots_info = [
-            (self.plot_widget_1, "Time Domain"),
-            (self.plot_widget_2, "Spectrum"),
-            (self.plot_widget_3, "Monitor")
-        ]
-
-        for plot_widget, title in plots_info:
-            # Enable box zoom (default with left mouse drag)
-            plot_widget.getViewBox().setMouseMode(pg.ViewBox.RectMode)
-
-            # Add context menu items
-            plot_widget.getViewBox().menu = self._create_plot_context_menu(plot_widget, title)
-
-    def _create_plot_context_menu(self, plot_widget, title):
-        """Create context menu for plot interactions"""
-        menu = QMenu()
-
-        # Auto Range action
-        auto_range_action = menu.addAction("Auto Range")
-        auto_range_action.triggered.connect(lambda: plot_widget.autoRange())
-
-        # Reset Zoom action
-        reset_zoom_action = menu.addAction("Reset Zoom")
-        reset_zoom_action.triggered.connect(lambda: plot_widget.getViewBox().autoRange())
-
-        menu.addSeparator()
-
-        # Mouse mode toggle
-        box_zoom_action = menu.addAction("Box Zoom Mode")
-        box_zoom_action.triggered.connect(
-            lambda: plot_widget.getViewBox().setMouseMode(pg.ViewBox.RectMode)
-        )
-
-        pan_mode_action = menu.addAction("Pan Mode")
-        pan_mode_action.triggered.connect(
-            lambda: plot_widget.getViewBox().setMouseMode(pg.ViewBox.PanMode)
-        )
-
-        menu.addSeparator()
-
-        # Grid toggle
-        grid_action = menu.addAction("Toggle Grid")
-        grid_action.triggered.connect(
-            lambda: self._toggle_grid(plot_widget)
-        )
-
-        # Export action
-        export_action = menu.addAction(f"Export {title}...")
-        export_action.triggered.connect(
-            lambda: self._export_plot(plot_widget, title)
-        )
-
-        return menu
-
-    def _toggle_grid(self, plot_widget):
-        """Toggle grid display for a plot"""
-        try:
-            # Get current grid state (this is a simplified approach)
-            current_alpha = 0.3  # Default alpha
-            new_alpha = 0.0 if hasattr(plot_widget, '_grid_visible') and plot_widget._grid_visible else 0.3
-            plot_widget.showGrid(x=True, y=True, alpha=new_alpha)
-            plot_widget._grid_visible = (new_alpha > 0)
-        except Exception as e:
-            log.warning(f"Error toggling grid: {e}")
-
-    def _export_plot(self, plot_widget, title):
-        """Export plot to image file"""
-        try:
-            from PyQt5.QtWidgets import QFileDialog
-            filename, _ = QFileDialog.getSaveFileName(
-                self, f"Export {title}", f"{title.lower().replace(' ', '_')}.png",
-                "PNG Files (*.png);;SVG Files (*.svg);;All Files (*)"
-            )
-            if filename:
-                exporter = pg.exporters.ImageExporter(plot_widget.plotItem)
-                exporter.export(filename)
-                self.statusBar.showMessage(f"Plot exported to {filename}", 3000)
-        except Exception as e:
-            log.error(f"Error exporting plot: {e}")
-            self.statusBar.showMessage(f"Export failed: {e}", 5000)
-
     def _browse_save_path(self):
-        """Open file dialog to select save path"""
-        path = QFileDialog.getExistingDirectory(self, "Select Save Directory", self.save_path_edit.text())
-        if path:
-            self.save_path_edit.setText(path)
         """Open file dialog to select save path"""
         path = QFileDialog.getExistingDirectory(self, "Select Save Directory", self.save_path_edit.text())
         if path:
