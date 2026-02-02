@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
 
         # Setup UI
         self.setWindowTitle("eDAS-gh26.1.24")
-        self.setMinimumSize(1400, 900)
+        self.setMinimumSize(1400, 950)  # Slightly increased height to accommodate all content
 
         log.debug("Setting up UI...")
         self._setup_ui()
@@ -578,8 +578,8 @@ class MainWindow(QMainWindow):
         """Create the plot display panel"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setSpacing(10)  # Increase spacing between plots to avoid overlap
-        layout.setContentsMargins(5, 5, 5, 5)  # Add margins
+        layout.setSpacing(15)  # Increased spacing between plots to prevent overlap
+        layout.setContentsMargins(5, 5, 5, 10)  # Add more bottom margin
 
         # Configure pyqtgraph
         pg.setConfigOptions(antialias=True)
@@ -635,83 +635,90 @@ class MainWindow(QMainWindow):
         self.plot_widget_3.setLabel('bottom', 'Position', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         self.monitor_curves = []
 
-        # Add plots to layout with minimum heights and proper spacing
-        self.plot_widget_1.setMinimumHeight(250)  # Ensure enough height for labels
-        self.plot_widget_2.setMinimumHeight(250)  # Ensure enough height for labels
-        self.plot_widget_3.setMinimumHeight(200)  # Monitor plot can be smaller but still readable
+        # Add plots to layout with balanced heights and proper scaling
+        # Set both minimum and maximum heights to prevent over-stretching in fullscreen
+        self.plot_widget_1.setMinimumHeight(250)
+        self.plot_widget_1.setMaximumHeight(400)  # Prevent excessive stretching
+        self.plot_widget_1.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        layout.addWidget(self.plot_widget_1, stretch=3)
-        layout.addWidget(self.plot_widget_2, stretch=3)
-        layout.addWidget(self.plot_widget_3, stretch=2)
+        self.plot_widget_2.setMinimumHeight(250)
+        self.plot_widget_2.setMaximumHeight(400)  # Prevent excessive stretching
+        self.plot_widget_2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        # System Monitoring Panel
+        self.plot_widget_3.setMinimumHeight(180)  # Slightly reduced for monitor plot
+        self.plot_widget_3.setMaximumHeight(280)  # Prevent excessive stretching
+        self.plot_widget_3.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        layout.addWidget(self.plot_widget_1)  # Remove stretch to prevent over-expansion
+        layout.addWidget(self.plot_widget_2)  # Remove stretch to prevent over-expansion
+        layout.addWidget(self.plot_widget_3)  # Remove stretch to prevent over-expansion
+
+        # Add a flexible spacer that will absorb extra space in fullscreen mode
+        layout.addStretch(1)
+
+        # System Monitoring Panel - Single row layout
         monitor_frame = QFrame()
         monitor_frame.setFrameStyle(QFrame.StyledPanel)
-        monitor_frame.setMaximumHeight(120)
-        monitor_layout = QVBoxLayout(monitor_frame)
+        monitor_frame.setMaximumHeight(40)  # Reduced height for single row
+        monitor_layout = QHBoxLayout(monitor_frame)  # Changed to horizontal layout
+        monitor_layout.setSpacing(15)  # Add spacing between sections
 
-        # Buffer Status Row
-        buffer_layout = QHBoxLayout()
-        buffer_layout.addWidget(QLabel("Buffer Status:"))
+        # Buffer Status section
+        monitor_layout.addWidget(QLabel("Status:"))
 
         # Hardware Buffer
-        self.hw_buffer_bar = QProgressBar()
-        self.hw_buffer_bar.setMaximumWidth(120)
-        self.hw_buffer_bar.setMaximumHeight(20)
         self.hw_buffer_label = QLabel("HW: 0/50")
-        buffer_layout.addWidget(self.hw_buffer_label)
-        buffer_layout.addWidget(self.hw_buffer_bar)
+        self.hw_buffer_bar = QProgressBar()
+        self.hw_buffer_bar.setMaximumWidth(80)  # Reduced width
+        self.hw_buffer_bar.setMaximumHeight(16)  # Reduced height
+        monitor_layout.addWidget(self.hw_buffer_label)
+        monitor_layout.addWidget(self.hw_buffer_bar)
 
         # Signal Queue
-        self.signal_queue_bar = QProgressBar()
-        self.signal_queue_bar.setMaximumWidth(120)
-        self.signal_queue_bar.setMaximumHeight(20)
         self.signal_queue_label = QLabel("SIG: 0/20")
-        buffer_layout.addWidget(self.signal_queue_label)
-        buffer_layout.addWidget(self.signal_queue_bar)
+        self.signal_queue_bar = QProgressBar()
+        self.signal_queue_bar.setMaximumWidth(80)
+        self.signal_queue_bar.setMaximumHeight(16)
+        monitor_layout.addWidget(self.signal_queue_label)
+        monitor_layout.addWidget(self.signal_queue_bar)
 
         # Storage Queue
-        self.storage_queue_bar = QProgressBar()
-        self.storage_queue_bar.setMaximumWidth(120)
-        self.storage_queue_bar.setMaximumHeight(20)
         self.storage_queue_label = QLabel("STO: 0/200")
-        buffer_layout.addWidget(self.storage_queue_label)
-        buffer_layout.addWidget(self.storage_queue_bar)
+        self.storage_queue_bar = QProgressBar()
+        self.storage_queue_bar.setMaximumWidth(80)
+        self.storage_queue_bar.setMaximumHeight(16)
+        monitor_layout.addWidget(self.storage_queue_label)
+        monitor_layout.addWidget(self.storage_queue_bar)
 
-        buffer_layout.addStretch()
-        monitor_layout.addLayout(buffer_layout)
+        # Add separator
+        separator = QLabel("|")
+        separator.setStyleSheet("color: gray;")
+        monitor_layout.addWidget(separator)
 
-        # System Status Row
-        system_layout = QHBoxLayout()
-        system_layout.addWidget(QLabel("System:"))
-
+        # System Status section
         self.cpu_label = QLabel("CPU: 0%")
         self.disk_label = QLabel("Disk: 0GB free")
         self.polling_label = QLabel("Poll: 1ms")
+        monitor_layout.addWidget(self.cpu_label)
+        monitor_layout.addWidget(self.disk_label)
+        monitor_layout.addWidget(self.polling_label)
 
-        system_layout.addWidget(self.cpu_label)
-        system_layout.addWidget(self.disk_label)
-        system_layout.addWidget(self.polling_label)
-        system_layout.addStretch()
-        monitor_layout.addLayout(system_layout)
+        # Add separator
+        separator2 = QLabel("|")
+        separator2.setStyleSheet("color: gray;")
+        monitor_layout.addWidget(separator2)
 
-        layout.addWidget(monitor_frame)
-
-        # Status panel
-        status_frame = QFrame()
-        status_frame.setFrameStyle(QFrame.StyledPanel)
-        status_layout = QHBoxLayout(status_frame)
-
+        # Additional status section
         self.buffer_label = QLabel("Buffer: 0 MB")
         self.frames_label = QLabel("Frames: 0")
         self.save_status_label = QLabel("Save: Off")
+        monitor_layout.addWidget(self.buffer_label)
+        monitor_layout.addWidget(self.frames_label)
+        monitor_layout.addWidget(self.save_status_label)
 
-        status_layout.addWidget(self.buffer_label)
-        status_layout.addWidget(self.frames_label)
-        status_layout.addWidget(self.save_status_label)
-        status_layout.addStretch()
+        monitor_layout.addStretch()  # Push everything to the left
 
-        layout.addWidget(status_frame)
+        layout.addWidget(monitor_frame)
 
         return panel
 
