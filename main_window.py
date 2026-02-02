@@ -637,16 +637,16 @@ class MainWindow(QMainWindow):
 
         # Add plots to layout with balanced heights and proper scaling
         # Set both minimum and maximum heights to prevent over-stretching in fullscreen
-        self.plot_widget_1.setMinimumHeight(250)
-        self.plot_widget_1.setMaximumHeight(400)  # Prevent excessive stretching
+        self.plot_widget_1.setMinimumHeight(150)  # Time Domain plot
+        self.plot_widget_1.setMaximumHeight(180)  # Tighter height control
         self.plot_widget_1.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        self.plot_widget_2.setMinimumHeight(250)
-        self.plot_widget_2.setMaximumHeight(400)  # Prevent excessive stretching
+        self.plot_widget_2.setMinimumHeight(150)  # FFT Spectrum plot
+        self.plot_widget_2.setMaximumHeight(180)  # Tighter height control
         self.plot_widget_2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        self.plot_widget_3.setMinimumHeight(180)  # Slightly reduced for monitor plot
-        self.plot_widget_3.setMaximumHeight(280)  # Prevent excessive stretching
+        self.plot_widget_3.setMinimumHeight(100)  # Monitor plot - more compact
+        self.plot_widget_3.setMaximumHeight(120)  # Tighter height control
         self.plot_widget_3.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         layout.addWidget(self.plot_widget_1)  # Remove stretch to prevent over-expansion
