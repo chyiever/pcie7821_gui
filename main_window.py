@@ -440,7 +440,7 @@ class MainWindow(QMainWindow):
 
         # Row 2: rad checkbox
         self.rad_check = QCheckBox("rad")
-        self.rad_check.setToolTip("Convert phase data to radians: data = data / 32767 * π")
+        self.rad_check.setToolTip("Convert phase data to radians for display only: display = data / 32767 * π\n(Storage always saves original int32 data)")
         display_layout.addWidget(self.rad_check, 2, 0, 1, 2)
 
         layout.addWidget(display_group)
@@ -578,6 +578,8 @@ class MainWindow(QMainWindow):
         """Create the plot display panel"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setSpacing(10)  # Increase spacing between plots to avoid overlap
+        layout.setContentsMargins(5, 5, 5, 5)  # Add margins
 
         # Configure pyqtgraph
         pg.setConfigOptions(antialias=True)
@@ -598,14 +600,13 @@ class MainWindow(QMainWindow):
             x_axis = pw.getAxis('bottom')
             y_axis = pw.getAxis('left')
 
-            # 设置刻度样式以显示更多刻度
-            x_axis.setStyle(showValues=True, tickLength=5)
-            y_axis.setStyle(showValues=True, tickLength=5)
+            # 设置刻度样式以显示更多刻度，增加底部标签偏移避免重叠
+            x_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=15)  # More offset for x-axis
+            y_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=8)
 
             # 设置网格线样式
             pw.getPlotItem().getViewBox().setBackgroundColor('w')
 
-            pw.setMinimumHeight(200)
             # Set axis and title colors for white background
             pw.getAxis('left').setPen('k')
             pw.getAxis('bottom').setPen('k')
@@ -616,8 +617,6 @@ class MainWindow(QMainWindow):
             font = QFont("Times New Roman", 12)  # 12pt font
             pw.getAxis('left').setTickFont(font)
             pw.getAxis('bottom').setTickFont(font)
-            pw.getAxis('left').setStyle(tickTextOffset=10)
-            pw.getAxis('bottom').setStyle(tickTextOffset=10)
 
         # Plot 1 - Time domain
         self.plot_widget_1.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
@@ -636,10 +635,14 @@ class MainWindow(QMainWindow):
         self.plot_widget_3.setLabel('bottom', 'Position', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         self.monitor_curves = []
 
-        # Add plots to layout
-        layout.addWidget(self.plot_widget_1, stretch=2)
-        layout.addWidget(self.plot_widget_2, stretch=2)
-        layout.addWidget(self.plot_widget_3, stretch=1)
+        # Add plots to layout with minimum heights and proper spacing
+        self.plot_widget_1.setMinimumHeight(250)  # Ensure enough height for labels
+        self.plot_widget_2.setMinimumHeight(250)  # Ensure enough height for labels
+        self.plot_widget_3.setMinimumHeight(200)  # Monitor plot can be smaller but still readable
+
+        layout.addWidget(self.plot_widget_1, stretch=3)
+        layout.addWidget(self.plot_widget_2, stretch=3)
+        layout.addWidget(self.plot_widget_3, stretch=2)
 
         # System Monitoring Panel
         monitor_frame = QFrame()
@@ -1029,15 +1032,9 @@ class MainWindow(QMainWindow):
         if self._data_count % 10 == 0:
             log.debug(f"Phase data received #{self._data_count}: shape={data.shape}, channels={channel_num}")
 
-        # Apply rad conversion if enabled
-        processed_data = data
-        if self.params.display.rad_enable:
-            # Convert to radians: data = data / 32767 * π
-            processed_data = data.astype(np.float64) / 32767.0 * 3.141592654
-
-        # Save data if enabled (use frame-based saving)
+        # Save original data if enabled (always save raw int32 data, regardless of rad option)
         if self.data_saver is not None and self.data_saver.is_running:
-            self.data_saver.save_frame(processed_data)
+            self.data_saver.save_frame(data)
             # Update save status periodically
             if self._data_count % 20 == 0:
                 frame_info = f"{self.data_saver.frame_count}/{self.data_saver.frames_per_file}"
@@ -1049,6 +1046,12 @@ class MainWindow(QMainWindow):
                     storage_count = queue_size.qsize()
                     storage_max = OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
                     self._update_buffer_status(storage_count=storage_count, storage_max=storage_max)
+
+        # Apply rad conversion if enabled (only for display)
+        processed_data = data
+        if self.params.display.rad_enable:
+            # Convert to radians: data = data / 32767 * π
+            processed_data = data.astype(np.float64) / 32767.0 * 3.141592654
 
         # Update display (use processed data)
         try:

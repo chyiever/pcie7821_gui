@@ -1,7 +1,7 @@
 """
 PCIe-7821 Data Saver Module
 Asynchronous data saving with queue-based buffering
-Saves phase data as 32-bit signed int binary files
+Saves original phase data as 32-bit signed int binary files (no rad conversion)
 """
 
 import os
@@ -145,7 +145,7 @@ class DataSaver:
         Queue data for saving.
 
         Args:
-            data: NumPy array to save (will be converted to int32 for phase data)
+            data: NumPy array to save (original int32 phase data, no rad conversion applied)
 
         Returns:
             True if data was queued, False if queue is full
