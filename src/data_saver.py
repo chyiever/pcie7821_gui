@@ -1,7 +1,16 @@
 """
 PCIe-7821 Data Saver Module
-Asynchronous data saving with queue-based buffering
-Saves original phase data as 32-bit signed int binary files (no rad conversion)
+
+Asynchronous data saving with queue-based buffering.
+Saves original phase data as 32-bit signed int binary (no rad conversion).
+
+Architecture: Producer (acq thread) -> Queue -> Consumer (save thread) -> Disk
+Non-blocking: queue.put_nowait() drops data if full to avoid backpressure.
+
+Classes:
+- DataSaver: Base async saver with single-file output
+- FrameBasedFileSaver: Auto-splits files after N frames (primary)
+- TimedFileSaver: Auto-splits files by time interval (legacy)
 """
 
 import os
@@ -18,11 +27,14 @@ from logger import get_logger
 log = get_logger("data_saver")
 
 
+# ----- BASE DATA SAVER -----
+# Single-file async saver: data queued from producer, written by background thread
+
 class DataSaver:
     """
     Asynchronous data saver with queue-based buffering.
 
-    Saves data to binary files in the format: {序号}-{时}-{分}-{秒}-{采样率}.bin
+    Saves data to binary files in the format: {seq}-{HH}-{MM}-{SS}-{scan_rate}.bin
     Example: 1-12-30-45-2000.bin
     """
 
@@ -76,7 +88,7 @@ class DataSaver:
         self._scan_rate = scan_rate
 
         # Create filename with timestamp and scan rate
-        # Format: 序号-时-分-秒-采样率.bin
+        # Format: seq-HH-MM-SS-scanrate.bin
         now = datetime.now()
         self._current_filename = f"{self._file_no}-{now.hour:02d}-{now.minute:02d}-{now.second:02d}-{scan_rate}.bin"
 
@@ -233,12 +245,16 @@ class DataSaver:
         self.stop()
 
 
+# ----- FRAME-BASED FILE SAVER -----
+# Primary saver: splits files after N frames for manageable file sizes.
+# Filename: {seq}-eDAS-{rate}Hz-{points}pt-{timestamp}.{ms}.bin
+
 class FrameBasedFileSaver(DataSaver):
     """
     Frame-based file saver that creates new files after N frames.
     Each frame is treated as one data package.
 
-    Filename format: 序号-eDAS-采样率Hz-每帧点数pt-时间戳.毫秒.bin
+    Filename format: {seq}-eDAS-{rate}Hz-{points}pt-{timestamp}.{ms}.bin
     Example: 00001-eDAS-1000Hz-0162pt-20260126T014051.256.bin
     """
 
@@ -282,8 +298,7 @@ class FrameBasedFileSaver(DataSaver):
         self._frame_count = 0
         self._total_files_created = 1
 
-        # Create filename with new format
-        # Format: 序号-eDAS-采样率Hz-每帧点数pt-时间戳.毫秒.bin
+        # Create filename: seq-eDAS-rateHz-pointspt-timestamp.ms.bin
         self._current_filename = self._generate_filename()
 
         # Open file
@@ -404,12 +419,15 @@ class FrameBasedFileSaver(DataSaver):
         self._frames_per_file = value
 
 
+# ----- TIME-BASED FILE SAVER (LEGACY) -----
+# Splits files by wall-clock duration. Kept for backward compatibility.
+
 class TimedFileSaver(DataSaver):
     """
     Legacy data saver that creates new files every N seconds.
     Kept for backward compatibility.
 
-    Filename format: 序号-时-分-秒-采样率.bin
+    Filename format: {seq}-{HH}-{MM}-{SS}-{scan_rate}.bin
     Example: 1-12-30-45-2000.bin, 2-12-30-46-2000.bin, ...
     """
 

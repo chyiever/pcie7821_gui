@@ -1,6 +1,17 @@
 """
 PCIe-7821 Data Acquisition Thread Module
-QThread-based acquisition with signal-slot communication
+
+QThread-based acquisition with signal-slot communication.
+Runs hardware DMA reading in background to keep GUI responsive.
+
+Key Design:
+- Dynamic polling: adjusts interval based on buffer fill ratio
+- GUI throttling: caps signal emission at ~20 FPS to prevent queue backup
+- Pause/resume: QMutex + QWaitCondition for thread-safe state transitions
+
+Classes:
+- AcquisitionThread: Real hardware acquisition via DLL API
+- SimulatedAcquisitionThread: Random data generator for UI testing
 """
 
 import time
@@ -16,8 +27,11 @@ from logger import get_logger
 log = get_logger("acq_thread")
 
 # Minimum interval between GUI updates (ms)
-MIN_GUI_UPDATE_INTERVAL_MS = 50  # 20 FPS max
+MIN_GUI_UPDATE_INTERVAL_MS = 50  # 20 FPS max to prevent Qt signal queue backup
 
+
+# ----- HARDWARE ACQUISITION THREAD -----
+# Polls DMA buffer, reads data, emits Qt signals to GUI thread
 
 class AcquisitionThread(QThread):
     """
@@ -67,13 +81,15 @@ class AcquisitionThread(QThread):
         self._loop_count = 0
         self._last_log_time = 0
 
-        # GUI update throttling
+        # GUI throttling: store latest data, only emit when MIN_GUI_UPDATE_INTERVAL_MS
+        # has elapsed. Older pending data is discarded (keeps only latest snapshot).
         self._last_gui_update_time = 0
         self._pending_phase_data = None
         self._pending_raw_data = None
         self._pending_monitor_data = None
 
-        # Dynamic polling configuration
+        # Dynamic polling: switch between fast/slow intervals based on buffer fill.
+        # Hysteresis between high/low thresholds prevents oscillation.
         self._current_polling_interval = POLLING_CONFIG['low_freq_interval_ms'] / 1000.0
         self._high_freq_interval = POLLING_CONFIG['high_freq_interval_ms'] / 1000.0
         self._low_freq_interval = POLLING_CONFIG['low_freq_interval_ms'] / 1000.0
@@ -409,6 +425,9 @@ class AcquisitionThread(QThread):
         """Get total points per scan"""
         return self._total_point_num
 
+
+# ----- SIMULATED ACQUISITION THREAD -----
+# Generates random data for UI testing without hardware
 
 class SimulatedAcquisitionThread(AcquisitionThread):
     """

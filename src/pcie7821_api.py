@@ -1,6 +1,16 @@
 """
 PCIe-7821 DLL Wrapper Module
-Provides Python interface to pcie7821_api.dll using ctypes
+
+Python interface to pcie7821_api.dll via ctypes.
+Handles DMA buffer alignment, thread-safe DLL calls, and error translation.
+
+Key Design:
+- AlignedBuffer: 4KB-aligned memory required by DMA hardware
+- Thread safety: all DLL calls protected by threading.Lock
+- Buffer management: auto-resize on demand, numpy views for zero-copy access
+
+Note: DLL export 'pcie7821_set_pusle_width' has typo ('pusle' vs 'pulse')
+      in original API - kept as-is to match DLL symbol name.
 """
 
 import ctypes
@@ -17,6 +27,11 @@ from logger import get_logger, PerformanceTimer
 # Module logger
 log = get_logger("api")
 
+
+# ----- DMA-ALIGNED MEMORY BUFFER -----
+# DMA transfers require 4KB (4096-byte) aligned memory addresses.
+# Standard numpy allocation does not guarantee alignment, so we
+# over-allocate and manually offset to the next aligned boundary.
 
 class AlignedBuffer:
     """Memory buffer with specified alignment for DMA transfers"""
@@ -35,11 +50,12 @@ class AlignedBuffer:
         self.alignment = alignment
         self.itemsize = self.dtype.itemsize
 
-        # Allocate extra space for alignment
+        # Over-allocate by 'alignment' bytes to guarantee we can find
+        # an aligned start address within the raw buffer
         total_bytes = size * self.itemsize + alignment
         self._raw_buffer = (ctypes.c_char * total_bytes)()
 
-        # Calculate aligned address
+        # Find first aligned offset: (alignment - addr % alignment) % alignment
         raw_addr = ctypes.addressof(self._raw_buffer)
         offset = (alignment - (raw_addr % alignment)) % alignment
 
@@ -74,6 +90,8 @@ class AlignedBuffer:
         self.array = None
 
 
+# ----- API ERROR HANDLING -----
+
 class PCIe7821Error(Exception):
     """Exception for PCIe-7821 API errors"""
     def __init__(self, code: int, message: str = ""):
@@ -81,6 +99,10 @@ class PCIe7821Error(Exception):
         self.message = message or get_error_message(code)
         super().__init__(f"PCIe-7821 Error {code}: {self.message}")
 
+
+# ----- DLL WRAPPER CLASS -----
+# Thread-safe Python wrapper around pcie7821_api.dll functions.
+# All public methods acquire self._lock before calling into the DLL.
 
 class PCIe7821API:
     """Python wrapper for pcie7821_api.dll"""
@@ -151,8 +173,11 @@ class PCIe7821API:
             f"pcie7821_api.dll not found. Please copy it to: {project_root / 'libs'}"
         )
 
+    # ----- DLL FUNCTION PROTOTYPES -----
+    # Must match DLL exports exactly (restype, argtypes)
+
     def _setup_prototypes(self):
-        """Setup ctypes function prototypes"""
+        """Setup ctypes function prototypes to match DLL C API signatures"""
         log.debug("Setting up function prototypes...")
 
         # int pcie7821_open()
@@ -270,6 +295,8 @@ class PCIe7821API:
             log.error(f"{operation} failed with code {result}: {get_error_message(result)}")
             raise PCIe7821Error(result, f"{operation}: {get_error_message(result)}")
 
+    # ----- DEVICE CONTROL -----
+
     def open(self) -> int:
         """
         Open the PCIe-7821 device.
@@ -309,6 +336,9 @@ class PCIe7821API:
     def is_open(self) -> bool:
         """Check if device is open"""
         return self._is_open
+
+    # ----- HARDWARE CONFIGURATION -----
+    # FUTURE: these setters could be consolidated into a single configure() method
 
     def set_clk_src(self, clk_src: int) -> int:
         """
@@ -439,6 +469,9 @@ class PCIe7821API:
             )
         log.debug(f"set_phase_dem_param result: {result}")
         return result
+
+    # ----- DATA READING -----
+    # All read methods return copies of aligned buffer data (safe for cross-thread use)
 
     def query_buffer_points(self) -> int:
         """
@@ -631,6 +664,8 @@ class PCIe7821API:
             log.error(f"Failed to stop acquisition: code {result}")
 
         return result
+
+    # ----- REGISTER ACCESS (TEST / DEBUG) -----
 
     def write_reg(self, addr: int, data: int) -> int:
         """

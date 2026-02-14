@@ -1,6 +1,19 @@
 """
 PCIe-7821 Main Window GUI
-PyQt5-based GUI with real-time waveform display
+
+PyQt5-based GUI with real-time waveform display and parameter control.
+
+Layout: Left panel (parameters) | Right panel (3 plots + status bar)
+Plots: Time/Space domain, FFT Spectrum, Monitor (fiber end detection)
+
+Data Flow: AcqThread --[Qt signals]--> slot handlers --> display update
+           Phase data also forwarded to DataSaver for disk storage.
+
+Key Design:
+- All plotting happens in GUI thread via Qt signal-slot mechanism
+- Raw display throttled to 1 Hz; phase display follows acq thread rate
+- rad conversion is display-only; storage always saves original int32
+- Spectrum analysis delegated to RealTimeSpectrumAnalyzer with averaging
 """
 
 import sys
@@ -37,6 +50,8 @@ from logger import get_logger
 log = get_logger("gui")
 
 
+# ----- MAIN APPLICATION WINDOW -----
+
 class MainWindow(QMainWindow):
     """Main application window"""
 
@@ -69,8 +84,8 @@ class MainWindow(QMainWindow):
         self._last_data_time = 0
         self._data_count = 0
         self._gui_update_count = 0
-        self._raw_data_count = 0  # 专门用于raw数据计数
-        self._last_raw_display_time = 0  # 上次raw显示更新时间
+        self._raw_data_count = 0  # Counter for raw data callbacks
+        self._last_raw_display_time = 0  # Last raw display update timestamp
 
         # System monitoring
         self._last_system_update = 0
@@ -111,6 +126,8 @@ class MainWindow(QMainWindow):
             self._update_device_status(True)
 
         log.info("MainWindow initialized")
+
+    # ----- UI LAYOUT AND WIDGETS -----
 
     def _setup_ui(self):
         """Setup the user interface"""
@@ -179,9 +196,9 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(logo_label)
 
-        # Title - 黑体加粗28号字
+        # Title - SimHei bold 28pt (Chinese UI text)
         title_label = QLabel("分布式光纤传感系统（eDAS）")
-        title_font = QFont("SimHei", 28, QFont.Bold)  # 黑体
+        title_font = QFont("SimHei", 28, QFont.Bold)
         title_label.setFont(title_font)
         title_label.setAlignment(Qt.AlignCenter)
 
@@ -595,18 +612,16 @@ class MainWindow(QMainWindow):
         for pw in [self.plot_widget_1, self.plot_widget_2, self.plot_widget_3]:
             pw.setBackground('w')  # White background
 
-            # 设置更密集的网格线
-            pw.showGrid(x=True, y=True, alpha=0.6)  # 主要网格线，增加透明度使其更明显
+            # Grid and tick configuration
+            pw.showGrid(x=True, y=True, alpha=0.6)
 
-            # 启用更密集的刻度显示
             x_axis = pw.getAxis('bottom')
             y_axis = pw.getAxis('left')
 
-            # 设置刻度样式以显示更多刻度，增加底部标签偏移避免重叠
-            x_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=15)  # More offset for x-axis
+            # Increased bottom offset to prevent label overlap
+            x_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=15)
             y_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=8)
 
-            # 设置网格线样式
             pw.getPlotItem().getViewBox().setBackgroundColor('w')
 
             # Set axis and title colors for white background
@@ -628,8 +643,8 @@ class MainWindow(QMainWindow):
         # Plot 2 - Spectrum
         self.plot_widget_2.setLabel('left', 'Power', units='dB', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         self.plot_widget_2.setLabel('bottom', 'Frequency', units='Hz', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        # 使用线性坐标
-        self.plot_widget_2.setLogMode(x=False, y=False)  # 线性坐标
+        # Linear scale for both axes (dB values already in log scale)
+        self.plot_widget_2.setLogMode(x=False, y=False)
         self.spectrum_curve = self.plot_widget_2.plot(pen=pg.mkPen('#9467bd', width=1.5))  # Purple
 
         # Plot 3 - Monitor
@@ -738,6 +753,8 @@ class MainWindow(QMainWindow):
         for i in range(2):
             curve = self.plot_widget_3.plot(pen=pg.mkPen(colors[i], width=1.5))
             self.monitor_curves.append(curve)
+
+    # ----- SIGNAL-SLOT CONNECTIONS -----
 
     def _connect_signals(self):
         """Connect UI signals to slots"""
@@ -888,6 +905,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to configure device: {e}")
             return False
 
+    # ----- ACQUISITION CONTROL (START / STOP) -----
+
     @pyqtSlot()
     def _on_start(self):
         """Handle start button click"""
@@ -943,7 +962,7 @@ class MainWindow(QMainWindow):
         self._gui_update_count = 0
         self._raw_data_count = 0
         self._last_data_time = time.time()
-        self._last_raw_display_time = 0  # 强制第一次立即更新
+        self._last_raw_display_time = 0  # Force immediate first update
 
         # Create and start acquisition thread
         log.info("Creating acquisition thread...")
@@ -1032,6 +1051,10 @@ class MainWindow(QMainWindow):
                        self.diff_order_spin, self.detrend_bw_spin, self.polar_div_check]:
             widget.setEnabled(enabled)
 
+    # ----- DATA SIGNAL HANDLERS -----
+    # Called in GUI thread when acquisition thread emits new data.
+    # Responsible for: saving to disk, optional rad conversion, display update.
+
     @pyqtSlot(np.ndarray, int)
     def _on_phase_data(self, data: np.ndarray, channel_num: int):
         """Handle phase data from acquisition thread"""
@@ -1056,10 +1079,10 @@ class MainWindow(QMainWindow):
                     storage_max = OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
                     self._update_buffer_status(storage_count=storage_count, storage_max=storage_max)
 
-        # Apply rad conversion if enabled (only for display)
+        # rad conversion: display-only, does NOT affect saved data.
+        # Formula: rad = int32_value / 32767 * π (FPGA uses 32767 as full-scale π)
         processed_data = data
         if self.params.display.rad_enable:
-            # Convert to radians: data = data / 32767 * π
             processed_data = data.astype(np.float64) / 32767.0 * 3.141592654
 
         # Update display (use processed data)
@@ -1091,15 +1114,15 @@ class MainWindow(QMainWindow):
                 frame_info = f"{self.data_saver.frame_count}/{self.data_saver.frames_per_file}"
                 self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {frame_info} frames")
 
-        # 控制raw数据显示更新频率：每秒更新一次
+        # Throttle raw display to 1 Hz to reduce GPU load (raw data is high volume)
         current_time = time.time()
-        if (current_time - self._last_raw_display_time) >= 1.0:  # 1秒间隔
+        if (current_time - self._last_raw_display_time) >= 1.0:
             # Update display
             try:
                 self._update_raw_display(data, channel_num)
                 self._gui_update_count += 1
                 log.debug(f"Raw display updated #{self._raw_data_count}: interval={current_time - self._last_raw_display_time:.1f}s")
-                self._last_raw_display_time = current_time  # 更新时间放在log之后
+                self._last_raw_display_time = current_time
             except Exception as e:
                 log.exception(f"Error in _update_raw_display: {e}")
 
@@ -1126,6 +1149,10 @@ class MainWindow(QMainWindow):
         """Handle error from acquisition thread"""
         log.error(f"Acquisition error: {message}")
         self.statusBar.showMessage(f"Error: {message}", 5000)
+
+    # ----- DISPLAY UPDATE METHODS -----
+    # Time mode: overlay multiple frames on one plot
+    # Space mode: extract single spatial point across frames (temporal trace)
 
     def _update_phase_display(self, data: np.ndarray, channel_num: int):
         """Update display for phase data"""
@@ -1210,17 +1237,17 @@ class MainWindow(QMainWindow):
                 start = i * point_num
                 end = start + point_num
                 if end <= len(data):
-                    # 时域显示：10倍降采样
+                    # Time domain: 10x downsample for display performance
+                    # (raw data has ~20K+ points per frame, too many for realtime plot)
                     raw_frame_data = data[start:end]
-                    downsampled_data = raw_frame_data[::10]  # 每10个点取1个
+                    downsampled_data = raw_frame_data[::10]
                     self.plot_curve_1[i].setData(downsampled_data)
                 else:
                     self.plot_curve_1[i].setData([])
 
-            # 频域计算：使用原始数据（无降采样），每秒更新一次
+            # Spectrum: use full-resolution data (no downsampling) for accuracy
             if self.params.display.spectrum_enable and point_num <= len(data):
                 sample_rate = 1e9 / self.params.upload.data_rate
-                # 使用原始数据计算频谱
                 self._update_spectrum(data[:point_num], sample_rate,
                                      self.params.display.psd_enable, 'short')
         else:
@@ -1229,15 +1256,15 @@ class MainWindow(QMainWindow):
 
             for ch in range(min(channel_num, 4)):
                 if point_num <= len(data):
-                    # 多通道时域显示：10倍降采样
+                    # 10x downsample for multi-channel display performance
                     raw_channel_data = data[:point_num, ch]
-                    downsampled_data = raw_channel_data[::10]  # 每10个点取1个
+                    downsampled_data = raw_channel_data[::10]
                     self.plot_curve_1[ch].setData(downsampled_data)
 
-            # 频域计算：使用原始数据（无降采样）
+            # Spectrum: full-resolution data (no downsampling) for accuracy
             if self.params.display.spectrum_enable and point_num <= len(data):
                 sample_rate = 1e9 / self.params.upload.data_rate
-                # 使用第一个通道的原始数据计算频谱
+                # Use first channel for spectrum computation
                 self._update_spectrum(data[:point_num, 0], sample_rate,
                                      self.params.display.psd_enable, 'short')
 
@@ -1265,55 +1292,53 @@ class MainWindow(QMainWindow):
                 data, sample_rate, psd_mode, data_type
             )
 
-            # 所有频谱图都使用线性坐标
-            self.plot_widget_2.setLogMode(x=False, y=False)  # X轴和Y轴都是线性
+            # Linear axes: Y is already in dB, X is linear frequency
+            self.plot_widget_2.setLogMode(x=False, y=False)
 
-            # 过滤频率范围
+            # Filter frequency range:
+            # Phase data starts from 1Hz (exclude DC) since phase is relative.
+            # Raw IQ data includes 0Hz.
             nyquist = sample_rate / 2
-            if data_type == 'int':  # 相位数据
-                # 相位数据：X轴范围[1, fs/2]，排除0Hz和DC成分
+            if data_type == 'int':  # Phase data
+                # Phase: X-axis [1, fs/2], skip DC component
                 valid_indices = (freq >= 1.0) & (freq <= nyquist)
-            else:  # 原始数据
-                # 原始数据：从0Hz开始
+            else:  # Raw IQ data
+                # Raw data: include 0Hz (DC)
                 valid_indices = (freq >= 0) & (freq <= nyquist)
 
             freq_filtered = freq[valid_indices]
             spectrum_filtered = spectrum[valid_indices]
 
             if len(freq_filtered) > 0:
-                # 根据数据类型处理频率显示
-                if data_type == 'int':  # 相位数据
-                    # 相位数据：直接使用Hz，不转换
+                # Frequency unit: phase data in Hz, raw data in MHz
+                if data_type == 'int':  # Phase data: Hz range (scan rate based)
                     freq_display = freq_filtered
-                else:  # raw数据 (data_type == 'short')
-                    # 原始数据：转换为MHz显示
+                else:  # Raw data: convert Hz to MHz (high-speed ADC sampling)
                     freq_display = freq_filtered / 1e6
 
                 self.spectrum_curve.setData(freq_display, spectrum_filtered)
 
-                # 设置X轴范围
-                if data_type == 'int':  # 相位数据
-                    # 相位数据：显式设置X轴范围[1, fs/2]
-                    nyquist_display = nyquist  # 保持Hz单位
+                # Set X-axis range
+                if data_type == 'int':  # Phase data: explicit range [1, fs/2]
+                    nyquist_display = nyquist
                     self.plot_widget_2.setXRange(1.0, nyquist_display, padding=0.02)
-                else:  # 原始数据
-                    # 原始数据：自动范围
+                else:  # Raw data: auto range
                     self.plot_widget_2.enableAutoRange(axis='x')
 
-                # 更新X轴标签 - 直接在标签中指定单位，避免pyqtgraph自动转换
-                if data_type == 'int':  # 相位数据
+                # Set axis labels with explicit unit text (bypasses pyqtgraph auto-scaling)
+                if data_type == 'int':  # Phase data
                     self.plot_widget_2.setLabel('bottom', 'Frequency (Hz)',
                                               **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-                else:  # raw数据
+                else:  # Raw data
                     self.plot_widget_2.setLabel('bottom', 'Frequency (MHz)',
                                               **{'font-family': 'Times New Roman', 'font-size': '12pt'})
 
-            # 更新Y轴标签 - 也直接在标签中指定单位
+            # Y-axis label depends on PSD mode and data type
             if psd_mode:
-                if data_type == 'int':  # 相位数据
+                if data_type == 'int':  # Phase: PSD in dB/Hz
                     self.plot_widget_2.setLabel('left', 'PSD (dB/Hz)',
                                               **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-                else:  # raw数据
+                else:  # Raw: PSD in dB/MHz
                     self.plot_widget_2.setLabel('left', 'PSD (dB/MHz)',
                                               **{'font-family': 'Times New Roman', 'font-size': '12pt'})
             else:
@@ -1321,6 +1346,8 @@ class MainWindow(QMainWindow):
                                           **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         except Exception as e:
             log.warning(f"Spectrum update error: {e}")
+
+    # ----- STATUS MONITORING -----
 
     def _update_status(self):
         """Periodic status update"""
@@ -1387,8 +1414,10 @@ class MainWindow(QMainWindow):
         if path:
             self.save_path_edit.setText(path)
 
+    # ----- APPLICATION LIFECYCLE -----
+
     def closeEvent(self, event):
-        """Handle window close"""
+        """Handle window close - must release hardware and threads gracefully"""
         log.info("Window closing...")
 
         # Stop acquisition

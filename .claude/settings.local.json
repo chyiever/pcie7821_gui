@@ -14,7 +14,8 @@
       "Bash(copy logger.py src )",
       "Bash(copy __init__.py src)",
       "Bash(python -c \"import sys; sys.path.insert\\(0, ''src''\\); from config import AllParams; from logger import setup_logging; from spectrum_analyzer import RealTimeSpectrumAnalyzer; print\\(''All modules imported successfully!''\\)\")",
-      "Bash(python -c \"import sys; sys.path.insert\\(0, ''src''\\); from main_window import MainWindow; from pcie7821_api import PCIe7821API; print\\(''All core modules imported successfully!''\\)\")"
+      "Bash(python -c \"import sys; sys.path.insert\\(0, ''src''\\); from main_window import MainWindow; from pcie7821_api import PCIe7821API; print\\(''All core modules imported successfully!''\\)\")",
+      "Bash(python -c \"\nimport py_compile\nfiles = [''acquisition_thread.py'', ''data_saver.py'', ''pcie7821_api.py'', ''main_window.py'', ''config.py'', ''logger.py'', ''spectrum_analyzer.py'', ''main.py'']\nfor f in files:\n    try:\n        py_compile.compile\\(f, doraise=True\\)\n        print\\(f''{f}: OK''\\)\n    except py_compile.PyCompileError as e:\n        print\\(f''{f}: ERROR - {e}''\\)\n\")"
     ]
   }
 }
