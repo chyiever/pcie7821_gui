@@ -578,7 +578,7 @@ class MainWindow(QMainWindow):
         """Create the plot display panel"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setSpacing(15)  # Increased spacing between plots to prevent overlap
+        layout.setSpacing(10)  # Reduced spacing between plots
         layout.setContentsMargins(5, 5, 5, 10)  # Add more bottom margin
 
         # Configure pyqtgraph
@@ -637,16 +637,16 @@ class MainWindow(QMainWindow):
 
         # Add plots to layout with balanced heights and proper scaling
         # Set both minimum and maximum heights to prevent over-stretching in fullscreen
-        self.plot_widget_1.setMinimumHeight(170)  # Time Domain plot
-        self.plot_widget_1.setMaximumHeight(200)  # Controlled height range
+        self.plot_widget_1.setMinimumHeight(180)  # Time Domain plot - increased
+        self.plot_widget_1.setMaximumHeight(210)  # Controlled height range
         self.plot_widget_1.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        self.plot_widget_2.setMinimumHeight(170)  # FFT Spectrum plot
-        self.plot_widget_2.setMaximumHeight(200)  # Controlled height range
+        self.plot_widget_2.setMinimumHeight(180)  # FFT Spectrum plot - increased
+        self.plot_widget_2.setMaximumHeight(210)  # Controlled height range
         self.plot_widget_2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        self.plot_widget_3.setMinimumHeight(120)  # Monitor plot
-        self.plot_widget_3.setMaximumHeight(150)  # Controlled height range
+        self.plot_widget_3.setMinimumHeight(130)  # Monitor plot - increased
+        self.plot_widget_3.setMaximumHeight(160)  # Controlled height range
         self.plot_widget_3.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         layout.addWidget(self.plot_widget_1)  # Remove stretch to prevent over-expansion

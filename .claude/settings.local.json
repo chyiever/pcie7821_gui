@@ -1,7 +1,20 @@
 {
   "permissions": {
     "allow": [
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(dir /s /b)",
+      "Bash(tree /F /A)",
+      "Bash(copy main.py src )",
+      "Bash(copy main_window.py src )",
+      "Bash(copy acquisition_thread.py src )",
+      "Bash(copy data_saver.py src )",
+      "Bash(copy spectrum_analyzer.py src )",
+      "Bash(copy pcie7821_api.py src )",
+      "Bash(copy config.py src )",
+      "Bash(copy logger.py src )",
+      "Bash(copy __init__.py src)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, ''src''\\); from config import AllParams; from logger import setup_logging; from spectrum_analyzer import RealTimeSpectrumAnalyzer; print\\(''All modules imported successfully!''\\)\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, ''src''\\); from main_window import MainWindow; from pcie7821_api import PCIe7821API; print\\(''All core modules imported successfully!''\\)\")"
     ]
   }
 }
