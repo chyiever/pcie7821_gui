@@ -86,11 +86,14 @@ class DisplayMode(IntEnum):
 
     TIME: Show multiple frames overlaid (temporal analysis)
     SPACE: Show single spatial position over time (position analysis)
+    TIME_SPACE: Show 2D time-space plot with rolling window (advanced analysis)
 
-    Usage: TIME for overall signal inspection, SPACE for specific location monitoring
+    Usage: TIME for overall signal inspection, SPACE for specific location monitoring,
+           TIME_SPACE for spatiotemporal pattern analysis
     """
-    TIME = 0  # Time domain display (multiple frames overlay)
-    SPACE = 1  # Space domain display (single region over time)
+    TIME = 0       # Time domain display (multiple frames overlay)
+    SPACE = 1      # Space domain display (single region over time)
+    TIME_SPACE = 2 # Time-space 2D plot with rolling window
 
 
 # ----- PARAMETER DATA STRUCTURES -----
@@ -171,6 +174,37 @@ class PhaseDemodParams:
 
 
 @dataclass
+class TimeSpaceParams:
+    """
+    Time-Space plot configuration parameters.
+
+    Controls the 2D time-space plot visualization including rolling window
+    behavior, spatial range selection, downsampling, and colormap settings.
+
+    Attributes:
+        window_frames: Number of frames to keep in rolling window (temporal dimension)
+        distance_range_start: Starting distance index for display
+        distance_range_end: Ending distance index for display
+        time_downsample: Time dimension downsampling factor (1=no downsampling)
+        space_downsample: Space dimension downsampling factor (1=no downsampling)
+        colormap_type: Colormap type for 2D visualization
+        vmin: Minimum value for color mapping
+        vmax: Maximum value for color mapping
+
+    Performance: Larger windows and lower downsampling provide better visualization
+                but require more memory and processing power.
+    """
+    window_frames: int = 5                   # Rolling window size in frames
+    distance_range_start: int = 0           # Start index for distance range
+    distance_range_end: int = 500           # End index for distance range
+    time_downsample: int = 50               # Time downsampling factor
+    space_downsample: int = 2               # Space downsampling factor
+    colormap_type: str = "jet"              # PyQtGraph colormap name
+    vmin: float = -1000.0                   # Color range minimum
+    vmax: float = 1000.0                    # Color range maximum
+
+
+@dataclass
 class DisplayParams:
     """
     Real-time display configuration parameters.
@@ -241,6 +275,7 @@ class AllParams:
     phase_demod: PhaseDemodParams = field(default_factory=PhaseDemodParams)
     display: DisplayParams = field(default_factory=DisplayParams)
     save: SaveParams = field(default_factory=SaveParams)
+    time_space: TimeSpaceParams = field(default_factory=TimeSpaceParams)
 
 
 # ----- GUI OPTION MAPPINGS -----

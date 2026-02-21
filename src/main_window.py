@@ -27,7 +27,8 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QPushButton, QCheckBox,
     QRadioButton, QButtonGroup, QSpinBox, QDoubleSpinBox, QFileDialog,
-    QMessageBox, QStatusBar, QSplitter, QFrame, QSizePolicy, QProgressBar
+    QMessageBox, QStatusBar, QSplitter, QFrame, QSizePolicy, QProgressBar,
+    QTabWidget
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot
 from PyQt5.QtGui import QFont, QColor, QPalette, QPixmap, QFontDatabase
@@ -44,6 +45,7 @@ from pcie7821_api import PCIe7821API, PCIe7821Error
 from acquisition_thread import AcquisitionThread, SimulatedAcquisitionThread
 from data_saver import FrameBasedFileSaver
 from spectrum_analyzer import RealTimeSpectrumAnalyzer
+from time_space_plot import TimeSpacePlotWidget
 from logger import get_logger
 
 # Module logger
@@ -71,6 +73,7 @@ class MainWindow(QMainWindow):
         self.acq_thread: Optional[AcquisitionThread] = None
         self.data_saver: Optional[FrameBasedFileSaver] = None
         self.spectrum_analyzer = RealTimeSpectrumAnalyzer()
+        self.time_space_widget: Optional[TimeSpacePlotWidget] = None
 
         # Parameters
         self.params = AllParams()
@@ -423,14 +426,17 @@ class MainWindow(QMainWindow):
         display_layout.addWidget(QLabel("Mode:"), 0, 0)
         self.mode_time_radio = QRadioButton("Time")
         self.mode_space_radio = QRadioButton("Space")
+        self.mode_time_space_radio = QRadioButton("Time-space")
         self.mode_time_radio.setChecked(True)
         mode_group = QButtonGroup(self)
         mode_group.addButton(self.mode_time_radio, 0)
         mode_group.addButton(self.mode_space_radio, 1)
+        mode_group.addButton(self.mode_time_space_radio, 2)
         mode_layout = QHBoxLayout()
         mode_layout.setSpacing(2)
         mode_layout.addWidget(self.mode_time_radio)
         mode_layout.addWidget(self.mode_space_radio)
+        mode_layout.addWidget(self.mode_time_space_radio)
         display_layout.addLayout(mode_layout, 0, 1)
 
         display_layout.addWidget(QLabel("Region:"), 0, 2)
@@ -438,7 +444,7 @@ class MainWindow(QMainWindow):
         self.region_index_spin.setRange(0, 65535)
         self.region_index_spin.setValue(0)
         self.region_index_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.region_index_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        self.region_index_spin.setMaximumWidth(60)  # 缩小Region输入框宽度
         display_layout.addWidget(self.region_index_spin, 0, 3)
 
         # Row 1: Frames | Spectrum/PSD
@@ -594,84 +600,26 @@ class MainWindow(QMainWindow):
         """)
 
     def _create_plot_panel(self) -> QWidget:
-        """Create the plot display panel"""
+        """Create the plot display panel with tab widget"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setSpacing(10)  # Reduced spacing between plots
-        layout.setContentsMargins(5, 5, 5, 10)  # Add more bottom margin
+        layout.setSpacing(5)
+        layout.setContentsMargins(5, 5, 5, 5)
 
         # Configure pyqtgraph
         pg.setConfigOptions(antialias=True)
 
-        # Create plots
-        self.plot_widget_1 = pg.PlotWidget(title="Time Domain Data")
-        self.plot_widget_2 = pg.PlotWidget(title="FFT Spectrum")
-        self.plot_widget_3 = pg.PlotWidget(title="Monitor (Fiber End Detection)")
+        # Create tab widget
+        self.plot_tabs = QTabWidget()
+        self.plot_tabs.setTabPosition(QTabWidget.North)
 
-        # Configure plot styles - white background
-        for pw in [self.plot_widget_1, self.plot_widget_2, self.plot_widget_3]:
-            pw.setBackground('w')  # White background
+        # Tab 1: Traditional plots (Time/Space + FFT + Monitor)
+        self._create_traditional_plots_tab()
 
-            # Grid and tick configuration
-            pw.showGrid(x=True, y=True, alpha=0.6)
+        # Tab 2: Time-Space plot
+        self._create_time_space_tab()
 
-            x_axis = pw.getAxis('bottom')
-            y_axis = pw.getAxis('left')
-
-            # Increased bottom offset to prevent label overlap
-            x_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=15)
-            y_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=8)
-
-            pw.getPlotItem().getViewBox().setBackgroundColor('w')
-
-            # Set axis and title colors for white background
-            pw.getAxis('left').setPen('k')
-            pw.getAxis('bottom').setPen('k')
-            pw.getAxis('left').setTextPen('k')
-            pw.getAxis('bottom').setTextPen('k')
-
-            # Set font for axis labels and numbers - Times New Roman, larger size
-            font = QFont("Times New Roman", 12)  # 12pt font
-            pw.getAxis('left').setTickFont(font)
-            pw.getAxis('bottom').setTickFont(font)
-
-        # Plot 1 - Time domain
-        self.plot_widget_1.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        self.plot_widget_1.setLabel('bottom', 'Sample', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        self.plot_curve_1 = []
-
-        # Plot 2 - Spectrum
-        self.plot_widget_2.setLabel('left', 'Power', units='dB', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        self.plot_widget_2.setLabel('bottom', 'Frequency', units='Hz', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        # Linear scale for both axes (dB values already in log scale)
-        self.plot_widget_2.setLogMode(x=False, y=False)
-        self.spectrum_curve = self.plot_widget_2.plot(pen=pg.mkPen('#9467bd', width=1.5))  # Purple
-
-        # Plot 3 - Monitor
-        self.plot_widget_3.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        self.plot_widget_3.setLabel('bottom', 'Position', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        self.monitor_curves = []
-
-        # Add plots to layout with balanced heights and proper scaling
-        # Set both minimum and maximum heights to prevent over-stretching in fullscreen
-        self.plot_widget_1.setMinimumHeight(180)  # Time Domain plot - increased
-        self.plot_widget_1.setMaximumHeight(210)  # Controlled height range
-        self.plot_widget_1.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
-        self.plot_widget_2.setMinimumHeight(180)  # FFT Spectrum plot - increased
-        self.plot_widget_2.setMaximumHeight(210)  # Controlled height range
-        self.plot_widget_2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
-        self.plot_widget_3.setMinimumHeight(130)  # Monitor plot - increased
-        self.plot_widget_3.setMaximumHeight(160)  # Controlled height range
-        self.plot_widget_3.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
-        layout.addWidget(self.plot_widget_1)  # Remove stretch to prevent over-expansion
-        layout.addWidget(self.plot_widget_2)  # Remove stretch to prevent over-expansion
-        layout.addWidget(self.plot_widget_3)  # Remove stretch to prevent over-expansion
-
-        # Add a flexible spacer that will absorb extra space in fullscreen mode
-        layout.addStretch(1)
+        layout.addWidget(self.plot_tabs)
 
         # System Monitoring Panel - Single row layout
         monitor_frame = QFrame()
@@ -739,6 +687,101 @@ class MainWindow(QMainWindow):
 
         return panel
 
+    def _create_traditional_plots_tab(self):
+        """Create the traditional plots tab with existing functionality"""
+        tab1_widget = QWidget()
+        tab1_layout = QVBoxLayout(tab1_widget)
+        tab1_layout.setSpacing(10)
+        tab1_layout.setContentsMargins(5, 5, 5, 10)
+
+        # Create plots
+        self.plot_widget_1 = pg.PlotWidget(title="Time Domain Data")
+        self.plot_widget_2 = pg.PlotWidget(title="FFT Spectrum")
+        self.plot_widget_3 = pg.PlotWidget(title="Monitor (Fiber End Detection)")
+
+        # Configure plot styles - white background
+        for pw in [self.plot_widget_1, self.plot_widget_2, self.plot_widget_3]:
+            pw.setBackground('w')  # White background
+
+            # Grid and tick configuration
+            pw.showGrid(x=True, y=True, alpha=0.6)
+
+            x_axis = pw.getAxis('bottom')
+            y_axis = pw.getAxis('left')
+
+            # Increased bottom offset to prevent label overlap
+            x_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=15)
+            y_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=8)
+
+            pw.getPlotItem().getViewBox().setBackgroundColor('w')
+
+            # Set axis and title colors for white background
+            pw.getAxis('left').setPen('k')
+            pw.getAxis('bottom').setPen('k')
+            pw.getAxis('left').setTextPen('k')
+            pw.getAxis('bottom').setTextPen('k')
+
+            # Set font for axis labels and numbers - Times New Roman, larger size
+            font = QFont("Times New Roman", 12)  # 12pt font
+            pw.getAxis('left').setTickFont(font)
+            pw.getAxis('bottom').setTickFont(font)
+
+        # Plot 1 - Time domain
+        self.plot_widget_1.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        self.plot_widget_1.setLabel('bottom', 'Sample', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        self.plot_curve_1 = []
+
+        # Plot 2 - Spectrum
+        self.plot_widget_2.setLabel('left', 'Power', units='dB', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        self.plot_widget_2.setLabel('bottom', 'Frequency', units='Hz', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        # Linear scale for both axes (dB values already in log scale)
+        self.plot_widget_2.setLogMode(x=False, y=False)
+        self.spectrum_curve = self.plot_widget_2.plot(pen=pg.mkPen('#9467bd', width=1.5))  # Purple
+
+        # Plot 3 - Monitor
+        self.plot_widget_3.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        self.plot_widget_3.setLabel('bottom', 'Position', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        self.monitor_curves = []
+
+        # Add plots to layout with balanced heights and proper scaling
+        # Set both minimum and maximum heights to prevent over-stretching in fullscreen
+        self.plot_widget_1.setMinimumHeight(180)  # Time Domain plot - increased
+        self.plot_widget_1.setMaximumHeight(210)  # Controlled height range
+        self.plot_widget_1.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        self.plot_widget_2.setMinimumHeight(180)  # FFT Spectrum plot - increased
+        self.plot_widget_2.setMaximumHeight(210)  # Controlled height range
+        self.plot_widget_2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        self.plot_widget_3.setMinimumHeight(130)  # Monitor plot - increased
+        self.plot_widget_3.setMaximumHeight(160)  # Controlled height range
+        self.plot_widget_3.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        tab1_layout.addWidget(self.plot_widget_1)
+        tab1_layout.addWidget(self.plot_widget_2)
+        tab1_layout.addWidget(self.plot_widget_3)
+
+        # Add a flexible spacer that will absorb extra space in fullscreen mode
+        tab1_layout.addStretch(1)
+
+        self.plot_tabs.addTab(tab1_widget, "Time Plot")
+
+    def _create_time_space_tab(self):
+        """Create the time-space plot tab"""
+        tab2_widget = QWidget()
+        tab2_layout = QVBoxLayout(tab2_widget)
+        tab2_layout.setSpacing(5)
+        tab2_layout.setContentsMargins(5, 5, 5, 5)
+
+        # Create time-space plot widget
+        self.time_space_widget = TimeSpacePlotWidget()
+        tab2_layout.addWidget(self.time_space_widget)
+
+        self.plot_tabs.addTab(tab2_widget, "Time-Space Plot")
+
+        # Connect signals after widget creation
+        self._connect_time_space_signals()
+
     def _setup_plots(self):
         """Initialize plot curves"""
         # Colors suitable for white background
@@ -769,6 +812,12 @@ class MainWindow(QMainWindow):
         self.rate2phase_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.frames_per_file_spin.valueChanged.connect(self._update_file_estimates)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
+
+    def _connect_time_space_signals(self):
+        """Connect time-space widget signals after widget is created"""
+        if hasattr(self, 'time_space_widget') and self.time_space_widget is not None:
+            self.time_space_widget.parametersChanged.connect(self._on_time_space_params_changed)
+            log.debug("Time-space widget signals connected")
 
     def _init_device(self):
         """Initialize the PCIe-7821 device"""
@@ -828,12 +877,31 @@ class MainWindow(QMainWindow):
         params.phase_demod.polarization_diversity = self.polar_div_check.isChecked()
 
         # Display params
-        params.display.mode = DisplayMode.SPACE if self.mode_space_radio.isChecked() else DisplayMode.TIME
+        # Display mode selection
+        if self.mode_time_space_radio.isChecked():
+            params.display.mode = DisplayMode.TIME_SPACE
+        elif self.mode_space_radio.isChecked():
+            params.display.mode = DisplayMode.SPACE
+        else:
+            params.display.mode = DisplayMode.TIME
+
         params.display.region_index = self.region_index_spin.value()
         params.display.frame_num = self.frame_num_spin.value()
         params.display.spectrum_enable = self.spectrum_enable_check.isChecked()
         params.display.psd_enable = self.psd_check.isChecked()
         params.display.rad_enable = self.rad_check.isChecked()
+
+        # Time-Space parameters (get from widget if available)
+        if self.time_space_widget is not None:
+            ts_params = self.time_space_widget.get_parameters()
+            params.time_space.window_frames = ts_params['window_frames']
+            params.time_space.distance_range_start = ts_params['distance_range_start']
+            params.time_space.distance_range_end = ts_params['distance_range_end']
+            params.time_space.time_downsample = ts_params['time_downsample']
+            params.time_space.space_downsample = ts_params['space_downsample']
+            params.time_space.colormap_type = ts_params['colormap_type']
+            params.time_space.vmin = ts_params['vmin']
+            params.time_space.vmax = ts_params['vmax']
 
         # Save params
         params.save.enable = self.save_enable_check.isChecked()
@@ -1198,6 +1266,39 @@ class MainWindow(QMainWindow):
                 for i in range(channel_num, 4):
                     self.plot_curve_1[i].setData([])
 
+        elif self.params.display.mode == DisplayMode.TIME_SPACE:
+            # Time-Space mode: update 2D plot with rolling window
+            if self.time_space_widget is not None:
+                # Process data based on rad_enable setting
+                if self.params.display.rad_enable:
+                    # Convert to radians for display
+                    display_data = data.astype(np.float64) * np.pi / 32767.0
+                else:
+                    # Use raw integer values
+                    display_data = data
+
+                # Reshape data to frames x points for time-space widget
+                if len(display_data.shape) == 1:
+                    # Single frame data
+                    reshaped_data = display_data.reshape(frame_num, point_num)
+                else:
+                    # Multi-channel data - use first channel for now
+                    if channel_num == 1:
+                        reshaped_data = display_data.reshape(frame_num, point_num)
+                    else:
+                        # Take first channel from multi-channel data
+                        channel_data = display_data.reshape(-1, channel_num)[:, 0]
+                        reshaped_data = channel_data.reshape(frame_num, point_num)
+
+                # Update the time-space plot
+                success = self.time_space_widget.update_data(reshaped_data)
+                if not success:
+                    log.warning("Failed to update time-space plot")
+
+            # Clear traditional plots in TIME_SPACE mode
+            for i in range(4):
+                self.plot_curve_1[i].setData([])
+
         else:
             # Time mode: show multiple frames overlay
             if channel_num == 1:
@@ -1471,6 +1572,16 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.warning(f"Error updating file estimates: {e}")
             self.file_size_label.setText("~?MB/file")
+
+    def _on_time_space_params_changed(self):
+        """Handle time-space plot parameters change"""
+        # Update the main parameters with current time-space values
+        try:
+            if self.time_space_widget is not None:
+                self.params = self._collect_params()
+                log.debug("Time-space parameters updated")
+        except Exception as e:
+            log.warning(f"Error updating time-space parameters: {e}")
 
     def _update_system_status(self):
         """Update system monitoring information (CPU, disk, etc.)"""
