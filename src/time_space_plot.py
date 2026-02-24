@@ -59,6 +59,8 @@ class TimeSpacePlotWidget(QWidget):
 
     # Signal emitted when parameters change
     parametersChanged = pyqtSignal()
+    # Signal emitted when data point count changes
+    pointCountChanged = pyqtSignal(int)
 
     def __init__(self):
         """Initialize the time-space plot widget."""
@@ -278,11 +280,13 @@ class TimeSpacePlotWidget(QWidget):
         self.image_view = pg.ImageView()
 
         # Set minimum size for larger display
-        self.image_view.setMinimumSize(800, 400)  # 增大图像显示区域
+        self.image_view.setMinimumSize(800, 400)
 
-        # Configure the image view - use getView() to access the ViewBox
+        # Configure the image view for proper scaling
         view = self.image_view.getView()
-        if hasattr(view, 'setBackgroundColor'):
+        if view:
+            # Allow the image to fill the view regardless of data size
+            view.setAspectLocked(False)  # Allow different X/Y scaling to fill widget
             view.setBackgroundColor('w')  # White background for main plot
 
         # Set colorbar background to white
@@ -303,25 +307,30 @@ class TimeSpacePlotWidget(QWidget):
         self.image_view.ui.roiBtn.hide()  # Hide ROI button
         self.image_view.ui.menuBtn.hide()  # Hide menu button
 
-        # Set up axes labels via the PlotItem
+        # Set up axes labels and enable ticks
         plot_item = self.image_view.getImageItem().getViewBox().parent()
         if hasattr(plot_item, 'setLabel'):
-            plot_item.setLabel('bottom', 'Time (frames)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-            plot_item.setLabel('left', 'Distance (points)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+            plot_item.setLabel('bottom', 'Distance (points)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+            plot_item.setLabel('left', 'Time (samples)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
 
-            # Set axis font
-            font = QFont("Times New Roman", 10)
+            # Configure axes with ticks
             if hasattr(plot_item, 'getAxis'):
                 bottom_axis = plot_item.getAxis('bottom')
                 left_axis = plot_item.getAxis('left')
+
+                font = QFont("Times New Roman", 10)
                 if bottom_axis:
                     bottom_axis.setTickFont(font)
                     bottom_axis.setPen('k')  # Black axis
                     bottom_axis.setTextPen('k')  # Black text
+                    bottom_axis.setStyle(showValues=True)
+                    bottom_axis.enableAutoSIPrefix(False)
                 if left_axis:
                     left_axis.setTickFont(font)
                     left_axis.setPen('k')  # Black axis
                     left_axis.setTextPen('k')  # Black text
+                    left_axis.setStyle(showValues=True)
+                    left_axis.enableAutoSIPrefix(False)
 
         # Initialize with empty data and apply initial colormap
         empty_data = np.zeros((10, 10))
@@ -353,7 +362,10 @@ class TimeSpacePlotWidget(QWidget):
 
             # Update current dimensions
             frame_count, point_count = data.shape
-            self._full_point_num = point_count
+            if self._full_point_num != point_count:
+                self._full_point_num = point_count
+                # Emit signal when point count changes
+                self.pointCountChanged.emit(point_count)
 
             log.debug(f"Processing {frame_count} frames with {point_count} points each")
 
@@ -438,18 +450,26 @@ class TimeSpacePlotWidget(QWidget):
 
             log.debug(f"Concatenated time-space data shape: {time_space_data.shape}")
 
-            # Transpose to get correct orientation: (spatial_points, time_points)
-            # Y-axis: spatial (distance), X-axis: time
-            display_data = time_space_data.T
+            # Keep original orientation: (time_points, spatial_points)
+            # Y-axis: time (vertical, newer data at bottom), X-axis: distance (horizontal)
+            display_data = time_space_data
 
-            log.debug(f"Final display data shape: {display_data.shape} (distance x time)")
+            log.debug(f"Final display data shape: {display_data.shape} (time x distance)")
             log.debug(f"Data range: [{np.min(display_data):.4f}, {np.max(display_data):.4f}]")
 
             # Update image view with current color range
+            # Set autoRange and autoLevels to False to maintain fixed scaling
             self.image_view.setImage(display_data,
                                    levels=[self._vmin, self._vmax],
-                                   autoRange=False,
+                                   autoRange=True,  # Allow auto range for proper display
                                    autoLevels=False)
+
+            # Configure the image view to fill the widget
+            # Set proper aspect ratio and scaling
+            view = self.image_view.getView()
+            if view:
+                view.setAspectLocked(False)  # Allow different X/Y scaling
+                view.autoRange()  # Fit to view
 
             # Apply colormap
             self._apply_colormap()
@@ -569,22 +589,22 @@ class TimeSpacePlotWidget(QWidget):
             plot_item = self.image_view.getImageItem().getViewBox().parent()
 
             if hasattr(plot_item, 'setLabel'):
-                # data_shape is (spatial_points, time_points)
-                n_spatial_points, n_time_points = data_shape
+                # data_shape is (time_points, spatial_points)
+                n_time_points, n_spatial_points = data_shape
 
-                # X-axis: Time
-                plot_item.setLabel('bottom', 'Time (samples)',
-                                 **{'font-family': 'Times New Roman', 'font-size': '10pt'})
-
-                # Y-axis: Distance (spatial points within the selected range)
+                # X-axis: Distance (horizontal)
                 distance_start_actual = self._distance_start
                 distance_step = self._space_downsample
                 distance_end_actual = distance_start_actual + n_spatial_points * distance_step
 
-                plot_item.setLabel('left', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
+                plot_item.setLabel('bottom', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
                                  **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
-                # Configure axis properties
+                # Y-axis: Time (vertical, bottom=newer, top=older)
+                plot_item.setLabel('left', 'Time (samples, bottom=newer)',
+                                 **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+
+                # Configure axis properties and enable ticks
                 if hasattr(plot_item, 'getAxis'):
                     bottom_axis = plot_item.getAxis('bottom')
                     left_axis = plot_item.getAxis('left')
@@ -596,13 +616,17 @@ class TimeSpacePlotWidget(QWidget):
                         bottom_axis.setPen('k')
                         bottom_axis.setTextPen('k')
                         bottom_axis.setStyle(showValues=True)
+                        # Enable ticks
+                        bottom_axis.enableAutoSIPrefix(False)
                     if left_axis:
                         left_axis.setTickFont(font)
                         left_axis.setPen('k')
                         left_axis.setTextPen('k')
                         left_axis.setStyle(showValues=True)
+                        # Enable ticks
+                        left_axis.enableAutoSIPrefix(False)
 
-                log.debug(f"Updated axis labels: X=time({n_time_points} samples), Y=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual})")
+                log.debug(f"Updated axis labels: X=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual}), Y=time({n_time_points} samples)")
 
         except Exception as e:
             log.warning(f"Error updating axis labels: {e}")

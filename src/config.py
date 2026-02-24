@@ -227,7 +227,7 @@ class DisplayParams:
     frame_num: int = 1024                    # Frames to display/analyze
     spectrum_enable: bool = True             # Enable frequency domain analysis
     psd_enable: bool = False                 # Power Spectral Density vs Power Spectrum
-    rad_enable: bool = False                 # Display-only radian conversion
+    rad_enable: bool = True                  # Display-only radian conversion (default enabled)
 
 
 @dataclass

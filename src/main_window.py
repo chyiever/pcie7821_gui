@@ -176,9 +176,16 @@ class MainWindow(QMainWindow):
         self._device_status_label = QLabel("Device: Disconnected")
         self._data_rate_label = QLabel("Data Rate: 0 MB/s")
         self._fiber_length_label = QLabel("Fiber Length: 0 m")
+        self._point_num_label = QLabel("Point num: 0")  # Added point num display
+
+        # Add separators between status items
         self.statusBar.addWidget(self._device_status_label)
+        self.statusBar.addPermanentWidget(QLabel("  |  "))  # Separator
         self.statusBar.addWidget(self._data_rate_label)
+        self.statusBar.addPermanentWidget(QLabel("  |  "))  # Separator
         self.statusBar.addWidget(self._fiber_length_label)
+        self.statusBar.addPermanentWidget(QLabel("  |  "))  # Separator
+        self.statusBar.addWidget(self._point_num_label)
 
     def _create_header(self) -> QWidget:
         """Create header with logo and title"""
@@ -472,6 +479,7 @@ class MainWindow(QMainWindow):
         # Row 2: rad checkbox
         self.rad_check = QCheckBox("rad")
         self.rad_check.setToolTip("Convert phase data to radians for display only: display = data / 32767 * π\n(Storage always saves original int32 data)")
+        self.rad_check.setChecked(True)  # Default checked
         display_layout.addWidget(self.rad_check, 2, 0, 1, 2)
 
         layout.addWidget(display_group)
@@ -823,6 +831,7 @@ class MainWindow(QMainWindow):
         """Connect time-space widget signals after widget is created"""
         if hasattr(self, 'time_space_widget') and self.time_space_widget is not None:
             self.time_space_widget.parametersChanged.connect(self._on_time_space_params_changed)
+            self.time_space_widget.pointCountChanged.connect(self._on_point_count_changed)
             log.debug("Time-space widget signals connected")
 
     def _init_device(self):
@@ -1503,6 +1512,14 @@ class MainWindow(QMainWindow):
         fiber_length = calculate_fiber_length(point_num, data_rate, data_source, rate2phase)
         self._fiber_length_label.setText(f"Fiber Length: {fiber_length:.1f} m")
 
+        # Point num (actual data points after merging)
+        if data_source == DataSource.PHASE:
+            merge_points = self.merge_points_spin.value()
+            actual_point_num = point_num // merge_points
+        else:
+            actual_point_num = point_num
+        self._point_num_label.setText(f"Point num: {actual_point_num}")
+
     def _on_data_source_changed(self, index: int):
         """Handle data source change"""
         data_source = self.data_source_combo.currentData()
@@ -1601,6 +1618,15 @@ class MainWindow(QMainWindow):
                 log.debug("Time-space parameters updated")
         except Exception as e:
             log.warning(f"Error updating time-space parameters: {e}")
+
+    @pyqtSlot(int)
+    def _on_point_count_changed(self, point_count: int):
+        """Handle actual data point count change from time-space widget"""
+        try:
+            self._point_num_label.setText(f"Point num: {point_count}")
+            log.debug(f"Updated point count display: {point_count}")
+        except Exception as e:
+            log.warning(f"Error updating point count display: {e}")
 
     def _update_system_status(self):
         """Update system monitoring information (CPU, disk, etc.)"""
