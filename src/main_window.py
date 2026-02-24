@@ -1269,8 +1269,8 @@ class MainWindow(QMainWindow):
         elif self.params.display.mode == DisplayMode.TIME_SPACE:
             # Time-Space mode: update 2D plot with rolling window
             if self.time_space_widget is not None:
-                # Use processed_data (which already includes rad conversion if enabled)
-                display_data = processed_data
+                # Use the processed data parameter (already includes rad conversion if enabled)
+                display_data = data
 
                 # Reshape data to frames x points for time-space widget
                 if len(display_data.shape) == 1:

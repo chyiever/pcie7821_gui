@@ -76,8 +76,8 @@ class TimeSpacePlotWidget(QWidget):
         self._time_downsample = 50
         self._space_downsample = 2
         self._colormap = "jet"
-        self._vmin = -1000.0
-        self._vmax = 1000.0
+        self._vmin = -10000.0  # Increased range for phase data
+        self._vmax = 10000.0
 
         # Current data dimensions
         self._full_point_num = 0
@@ -232,7 +232,7 @@ class TimeSpacePlotWidget(QWidget):
 
         self.vmin_spin = QDoubleSpinBox()
         self.vmin_spin.setRange(-100000, 100000)
-        self.vmin_spin.setValue(self._vmin)
+        self.vmin_spin.setValue(-10000.0)  # Updated default value
         self.vmin_spin.setMaximumWidth(80)  # 固定宽度
         self.vmin_spin.setMinimumHeight(22)  # 减小高度
         self.vmin_spin.setFont(QFont("Times New Roman", 8))  # 调小字体
@@ -246,7 +246,7 @@ class TimeSpacePlotWidget(QWidget):
 
         self.vmax_spin = QDoubleSpinBox()
         self.vmax_spin.setRange(-100000, 100000)
-        self.vmax_spin.setValue(self._vmax)
+        self.vmax_spin.setValue(10000.0)  # Updated default value
         self.vmax_spin.setMaximumWidth(80)  # 固定宽度
         self.vmax_spin.setMinimumHeight(22)  # 减小高度
         self.vmax_spin.setFont(QFont("Times New Roman", 8))  # 调小字体
@@ -319,9 +319,12 @@ class TimeSpacePlotWidget(QWidget):
                     left_axis.setPen('k')  # Black axis
                     left_axis.setTextPen('k')  # Black text
 
-        # Initialize with empty data
+        # Initialize with empty data and apply initial colormap
         empty_data = np.zeros((10, 10))
         self.image_view.setImage(empty_data, autoRange=True)
+
+        # Apply initial colormap
+        self._apply_colormap()
 
         # Set colorbar background to white
         self._set_colorbar_white_background()
@@ -337,6 +340,8 @@ class TimeSpacePlotWidget(QWidget):
             True if data was successfully processed and displayed
         """
         try:
+            log.debug(f"Received data shape: {data.shape}, dtype: {data.dtype}")
+
             # Ensure data is 2D (frames x points)
             if data.ndim == 1:
                 data = data.reshape(1, -1)
@@ -345,12 +350,15 @@ class TimeSpacePlotWidget(QWidget):
             frame_count, point_count = data.shape
             self._full_point_num = point_count
 
+            log.debug(f"Processing {frame_count} frames with {point_count} points each")
+
             # Initialize buffer if needed
             if self._data_buffer is None:
                 self._data_buffer = deque(maxlen=self._window_frames)
                 log.debug(f"Initialized data buffer with maxlen={self._window_frames}")
 
             # Process each frame and add to buffer
+            frames_added = 0
             for frame_idx in range(frame_count):
                 frame_data = data[frame_idx, :]
 
@@ -361,6 +369,11 @@ class TimeSpacePlotWidget(QWidget):
                     # Add to rolling window buffer
                     self._data_buffer.append(processed_data)
                     self._current_frame_count += 1
+                    frames_added += 1
+                else:
+                    log.warning(f"Failed to process frame {frame_idx}")
+
+            log.debug(f"Added {frames_added} frames to buffer. Buffer size: {len(self._data_buffer)}")
 
             # Update display
             self._update_display()
@@ -368,6 +381,8 @@ class TimeSpacePlotWidget(QWidget):
 
         except Exception as e:
             log.error(f"Error updating time-space data: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def _process_frame_data(self, frame_data: np.ndarray) -> Optional[np.ndarray]:
@@ -405,6 +420,7 @@ class TimeSpacePlotWidget(QWidget):
     def _update_display(self):
         """Update the 2D image display with current buffer data."""
         if not self._data_buffer or len(self._data_buffer) == 0:
+            log.debug("No data in buffer for display update")
             return
 
         try:
@@ -417,15 +433,35 @@ class TimeSpacePlotWidget(QWidget):
 
             # Create 2D array: time (frames) x distance (spatial points)
             time_space_data = np.array(trimmed_frames)
+            log.debug(f"Time-space data shape: {time_space_data.shape}, data range: [{np.min(time_space_data):.2f}, {np.max(time_space_data):.2f}]")
 
             # Apply time downsampling if needed
             if self._time_downsample > 1 and len(time_space_data) > self._time_downsample:
                 # Keep most recent frames, downsample older ones
                 recent_frames = time_space_data[-self._time_downsample:]
                 time_space_data = recent_frames[::max(1, len(recent_frames) // self._time_downsample)]
+                log.debug(f"After time downsampling: {time_space_data.shape}")
 
             # Transpose for proper display orientation (distance x time)
             display_data = time_space_data.T
+            log.debug(f"Final display data shape: {display_data.shape}")
+
+            # Auto-adjust color range if data is outside current range
+            data_min, data_max = np.min(display_data), np.max(display_data)
+            if data_min < self._vmin or data_max > self._vmax:
+                # Expand range with 10% margin
+                margin = (data_max - data_min) * 0.1
+                new_vmin = data_min - margin
+                new_vmax = data_max + margin
+                log.info(f"Auto-adjusting color range from [{self._vmin:.1f}, {self._vmax:.1f}] to [{new_vmin:.1f}, {new_vmax:.1f}]")
+
+                # Update internal values
+                self._vmin = new_vmin
+                self._vmax = new_vmax
+
+                # Update UI controls
+                self.vmin_spin.setValue(new_vmin)
+                self.vmax_spin.setValue(new_vmax)
 
             # Update image view with colormap
             self.image_view.setImage(display_data,
@@ -442,8 +478,12 @@ class TimeSpacePlotWidget(QWidget):
             # Update scale and labels to reflect actual data dimensions
             self._update_axis_labels(display_data.shape)
 
+            log.debug(f"Display updated successfully with data shape {display_data.shape}")
+
         except Exception as e:
             log.error(f"Error updating display: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _set_colorbar_white_background(self):
         """Set colorbar background to white."""
@@ -478,15 +518,67 @@ class TimeSpacePlotWidget(QWidget):
     def _apply_colormap(self):
         """Apply the selected colormap to the image view."""
         try:
-            # Get the colormap lookup table
-            colormap = pg.colormap.get(self._colormap)
-            if colormap is not None:
-                # Apply colormap to the image view
-                self.image_view.setColorMap(colormap)
+            # Use PyQtGraph's built-in colormap
+            if self._colormap == "jet":
+                # Create a jet-like colormap
+                colors = [
+                    (0.0, (0, 0, 128)),      # dark blue
+                    (0.25, (0, 0, 255)),     # blue
+                    (0.5, (0, 255, 255)),    # cyan
+                    (0.75, (255, 255, 0)),   # yellow
+                    (1.0, (255, 0, 0))       # red
+                ]
+            elif self._colormap == "viridis":
+                colors = [
+                    (0.0, (68, 1, 84)),
+                    (0.25, (59, 82, 139)),
+                    (0.5, (33, 144, 140)),
+                    (0.75, (93, 201, 99)),
+                    (1.0, (253, 231, 37))
+                ]
+            elif self._colormap == "plasma":
+                colors = [
+                    (0.0, (13, 8, 135)),
+                    (0.25, (126, 3, 168)),
+                    (0.5, (203, 70, 121)),
+                    (0.75, (248, 149, 64)),
+                    (1.0, (240, 249, 33))
+                ]
+            elif self._colormap == "hot":
+                colors = [
+                    (0.0, (0, 0, 0)),        # black
+                    (0.33, (255, 0, 0)),     # red
+                    (0.66, (255, 255, 0)),   # yellow
+                    (1.0, (255, 255, 255))   # white
+                ]
+            elif self._colormap == "gray":
+                colors = [
+                    (0.0, (0, 0, 0)),        # black
+                    (1.0, (255, 255, 255))   # white
+                ]
             else:
-                log.warning(f"Colormap '{self._colormap}' not found, using default")
+                # Default to a simple blue-red colormap
+                colors = [
+                    (0.0, (0, 0, 255)),      # blue
+                    (0.5, (0, 255, 0)),      # green
+                    (1.0, (255, 0, 0))       # red
+                ]
+
+            # Create colormap
+            colormap = pg.ColorMap(pos=[c[0] for c in colors],
+                                 color=[c[1] for c in colors])
+
+            # Apply to histogram widget
+            hist_widget = self.image_view.getHistogramWidget()
+            if hist_widget is not None:
+                hist_widget.gradient.setColorMap(colormap)
+
+            log.debug(f"Applied colormap: {self._colormap}")
+
         except Exception as e:
             log.warning(f"Error applying colormap: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _update_axis_labels(self, data_shape: tuple):
         """Update axis labels and scales based on data dimensions."""
@@ -613,8 +705,8 @@ class TimeSpacePlotWidget(QWidget):
         self._time_downsample = 50
         self._space_downsample = 2
         self._colormap = "jet"
-        self._vmin = -1000.0
-        self._vmax = 1000.0
+        self._vmin = -10000.0  # Updated reset value
+        self._vmax = 10000.0
 
         # Update UI controls
         self.window_frames_spin.setValue(self._window_frames)
