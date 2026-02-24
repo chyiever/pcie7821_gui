@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
     QLabel, QSpinBox, QDoubleSpinBox, QComboBox, QPushButton,
     QCheckBox, QSizePolicy
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont
 import pyqtgraph as pg
 
@@ -78,12 +78,19 @@ class TimeSpacePlotWidget(QWidget):
         self._time_downsample = 50
         self._space_downsample = 2
         self._colormap = "jet"
-        self._vmin = -0.02  # Default range for phase data
-        self._vmax = 0.02
+        self._vmin = -0.1  # Updated default range
+        self._vmax = 0.1   # Updated default range
+        self._update_interval_ms = 100  # Update interval in milliseconds
 
         # Current data dimensions
         self._full_point_num = 0
         self._current_frame_count = 0
+
+        # Display update timer for controlling refresh rate
+        self._display_timer = QTimer(self)
+        self._display_timer.timeout.connect(self._update_display)
+        self._display_timer.setSingleShot(True)  # Single shot timer for controlled updates
+        self._pending_update = False
 
         self._setup_ui()
         log.debug("TimeSpacePlotWidget initialized")
@@ -116,161 +123,173 @@ class TimeSpacePlotWidget(QWidget):
 
         layout = QGridLayout(group)
         layout.setHorizontalSpacing(15)  # 水平间距
-        layout.setVerticalSpacing(10)    # 保持垂直间距
+        layout.setVerticalSpacing(8)     # 减小垂直间距
 
+        # Row 0: Distance Range + Window Frames + Time Downsample + Space Downsample
         row = 0
 
-        # Distance range controls
+        # Distance Range controls
         distance_label = QLabel("Distance Range:")
-        distance_label.setFont(QFont("Times New Roman", 8))  # 调小标签字体
-        distance_label.setMinimumHeight(22)  # 减小标签高度与输入框一致
+        distance_label.setFont(QFont("Times New Roman", 8))
+        distance_label.setMinimumHeight(22)
         layout.addWidget(distance_label, row, 0)
 
         from_label = QLabel("From:")
         from_label.setFont(QFont("Times New Roman", 8))
-        from_label.setMinimumHeight(22)  # 减小高度
+        from_label.setMinimumHeight(22)
         layout.addWidget(from_label, row, 1)
 
         self.distance_start_spin = QSpinBox()
         self.distance_start_spin.setRange(0, 1000000)  # Increased range
         self.distance_start_spin.setValue(40)           # Updated default value
-        self.distance_start_spin.setMaximumWidth(80)    # 固定宽度
+        self.distance_start_spin.setMaximumWidth(60)    # 更小宽度
         self.distance_start_spin.setMinimumHeight(22)   # 减小高度
-        self.distance_start_spin.setFont(QFont("Times New Roman", 8))  # 调小输入框字体
+        self.distance_start_spin.setFont(QFont("Times New Roman", 8))
         self.distance_start_spin.valueChanged.connect(self._on_distance_start_changed)
         layout.addWidget(self.distance_start_spin, row, 2)
 
         to_label = QLabel("To:")
         to_label.setFont(QFont("Times New Roman", 8))
-        to_label.setMinimumHeight(22)  # 减小高度
+        to_label.setMinimumHeight(22)
         layout.addWidget(to_label, row, 3)
 
         self.distance_end_spin = QSpinBox()
         self.distance_end_spin.setRange(1, 1000000)  # Increased range
         self.distance_end_spin.setValue(100)         # Updated default value
-        self.distance_end_spin.setMaximumWidth(80)   # 固定宽度
+        self.distance_end_spin.setMaximumWidth(60)   # 更小宽度
         self.distance_end_spin.setMinimumHeight(22)  # 减小高度
-        self.distance_end_spin.setFont(QFont("Times New Roman", 8))  # 调小输入框字体
+        self.distance_end_spin.setFont(QFont("Times New Roman", 8))
         self.distance_end_spin.valueChanged.connect(self._on_distance_end_changed)
         layout.addWidget(self.distance_end_spin, row, 4)
 
-        row += 1
-
-        # Window frames control
+        # Window Frames
         window_label = QLabel("Window Frames:")
         window_label.setFont(QFont("Times New Roman", 8))
-        window_label.setMinimumHeight(22)  # 减小高度
-        layout.addWidget(window_label, row, 0)
+        window_label.setMinimumHeight(22)
+        layout.addWidget(window_label, row, 5)
 
         self.window_frames_spin = QSpinBox()
         self.window_frames_spin.setRange(1, self._max_window_frames)  # Minimum changed to 1
         self.window_frames_spin.setValue(self._window_frames)
-        self.window_frames_spin.setMaximumWidth(80)  # 固定宽度
-        self.window_frames_spin.setMinimumHeight(22)  # 减小高度
-        self.window_frames_spin.setFont(QFont("Times New Roman", 8))  # 调小字体
+        self.window_frames_spin.setMaximumWidth(50)  # 更小宽度
+        self.window_frames_spin.setMinimumHeight(22)
+        self.window_frames_spin.setFont(QFont("Times New Roman", 8))
         self.window_frames_spin.valueChanged.connect(self._on_window_frames_changed)
-        layout.addWidget(self.window_frames_spin, row, 1, 1, 2)  # 跨两列
+        layout.addWidget(self.window_frames_spin, row, 6)
 
-        # Downsampling controls
-        time_ds_label = QLabel("Time Downsample:")
+        # Time Downsample
+        time_ds_label = QLabel("Time DS:")
         time_ds_label.setFont(QFont("Times New Roman", 8))
-        time_ds_label.setMinimumHeight(22)  # 减小高度
-        layout.addWidget(time_ds_label, row, 3)
+        time_ds_label.setMinimumHeight(22)
+        layout.addWidget(time_ds_label, row, 7)
 
         self.time_downsample_spin = QSpinBox()
         self.time_downsample_spin.setRange(1, 1000)
         self.time_downsample_spin.setValue(self._time_downsample)
-        self.time_downsample_spin.setMaximumWidth(80)  # 固定宽度
-        self.time_downsample_spin.setMinimumHeight(22)  # 减小高度
-        self.time_downsample_spin.setFont(QFont("Times New Roman", 8))  # 调小字体
+        self.time_downsample_spin.setMaximumWidth(50)  # 更小宽度
+        self.time_downsample_spin.setMinimumHeight(22)
+        self.time_downsample_spin.setFont(QFont("Times New Roman", 8))
         self.time_downsample_spin.valueChanged.connect(self._on_time_downsample_changed)
-        layout.addWidget(self.time_downsample_spin, row, 4)
+        layout.addWidget(self.time_downsample_spin, row, 8)
 
-        row += 1
-
-        # Space downsampling
-        space_ds_label = QLabel("Space Downsample:")
+        # Space Downsample
+        space_ds_label = QLabel("Space DS:")
         space_ds_label.setFont(QFont("Times New Roman", 8))
-        space_ds_label.setMinimumHeight(22)  # 减小高度
-        layout.addWidget(space_ds_label, row, 0)
+        space_ds_label.setMinimumHeight(22)
+        layout.addWidget(space_ds_label, row, 9)
 
         self.space_downsample_spin = QSpinBox()
         self.space_downsample_spin.setRange(1, 100)
         self.space_downsample_spin.setValue(self._space_downsample)
-        self.space_downsample_spin.setMaximumWidth(80)  # 固定宽度
-        self.space_downsample_spin.setMinimumHeight(22)  # 减小高度
-        self.space_downsample_spin.setFont(QFont("Times New Roman", 8))  # 调小字体
+        self.space_downsample_spin.setMaximumWidth(50)  # 更小宽度
+        self.space_downsample_spin.setMinimumHeight(22)
+        self.space_downsample_spin.setFont(QFont("Times New Roman", 8))
         self.space_downsample_spin.valueChanged.connect(self._on_space_downsample_changed)
-        layout.addWidget(self.space_downsample_spin, row, 1, 1, 2)  # 跨两列
+        layout.addWidget(self.space_downsample_spin, row, 10)
 
-        # Color mapping controls
-        colormap_label = QLabel("Colormap:")
-        colormap_label.setFont(QFont("Times New Roman", 8))
-        colormap_label.setMinimumHeight(22)  # 减小高度
-        layout.addWidget(colormap_label, row, 3)
+        # Row 1: Color Range + Colormap + Update Interval + Reset Button
+        row = 1
 
-        self.colormap_combo = QComboBox()
-        self.colormap_combo.setMaximumWidth(100)  # 固定宽度
-        self.colormap_combo.setMinimumHeight(22)  # 减小高度
-        self.colormap_combo.setFont(QFont("Times New Roman", 8))  # 调小字体
-        for name, value in COLORMAP_OPTIONS:
-            self.colormap_combo.addItem(name, value)
-        self.colormap_combo.setCurrentText("Jet")
-        self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
-        layout.addWidget(self.colormap_combo, row, 4)
-
-        row += 1
-
-        # Color range controls
+        # Color Range controls
         color_range_label = QLabel("Color Range:")
         color_range_label.setFont(QFont("Times New Roman", 8))
-        color_range_label.setMinimumHeight(22)  # 减小高度
+        color_range_label.setMinimumHeight(22)
         layout.addWidget(color_range_label, row, 0)
 
         min_label = QLabel("Min:")
         min_label.setFont(QFont("Times New Roman", 8))
-        min_label.setMinimumHeight(22)  # 减小高度
+        min_label.setMinimumHeight(22)
         layout.addWidget(min_label, row, 1)
 
         self.vmin_spin = QDoubleSpinBox()
         self.vmin_spin.setRange(-1.0, 1.0)           # Smaller range for phase data
         self.vmin_spin.setDecimals(3)                # 3 decimal places for precision
         self.vmin_spin.setSingleStep(0.001)          # Fine adjustment step
-        self.vmin_spin.setValue(-0.02)               # Updated default value
-        self.vmin_spin.setMaximumWidth(80)           # 固定宽度
+        self.vmin_spin.setValue(-0.1)                # Updated default value
+        self.vmin_spin.setMaximumWidth(60)           # 更小宽度
         self.vmin_spin.setMinimumHeight(22)          # 减小高度
-        self.vmin_spin.setFont(QFont("Times New Roman", 8))  # 调小字体
+        self.vmin_spin.setFont(QFont("Times New Roman", 8))
         self.vmin_spin.valueChanged.connect(self._on_vmin_changed)
         layout.addWidget(self.vmin_spin, row, 2)
 
         max_label = QLabel("Max:")
         max_label.setFont(QFont("Times New Roman", 8))
-        max_label.setMinimumHeight(22)  # 减小高度
+        max_label.setMinimumHeight(22)
         layout.addWidget(max_label, row, 3)
 
         self.vmax_spin = QDoubleSpinBox()
         self.vmax_spin.setRange(-1.0, 1.0)           # Smaller range for phase data
         self.vmax_spin.setDecimals(3)                # 3 decimal places for precision
         self.vmax_spin.setSingleStep(0.001)          # Fine adjustment step
-        self.vmax_spin.setValue(0.02)                # Updated default value
-        self.vmax_spin.setMaximumWidth(80)           # 固定宽度
+        self.vmax_spin.setValue(0.1)                 # Updated default value
+        self.vmax_spin.setMaximumWidth(60)           # 更小宽度
         self.vmax_spin.setMinimumHeight(22)          # 减小高度
-        self.vmax_spin.setFont(QFont("Times New Roman", 8))  # 调小字体
+        self.vmax_spin.setFont(QFont("Times New Roman", 8))
         self.vmax_spin.valueChanged.connect(self._on_vmax_changed)
         layout.addWidget(self.vmax_spin, row, 4)
 
-        row += 1
+        # Colormap
+        colormap_label = QLabel("Colormap:")
+        colormap_label.setFont(QFont("Times New Roman", 8))
+        colormap_label.setMinimumHeight(22)
+        layout.addWidget(colormap_label, row, 5)
 
-        # Reset button
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.setMaximumWidth(80)      # 调整宽度
+        self.colormap_combo.setMinimumHeight(22)
+        self.colormap_combo.setFont(QFont("Times New Roman", 8))
+        for name, value in COLORMAP_OPTIONS:
+            self.colormap_combo.addItem(name, value)
+        self.colormap_combo.setCurrentText("Jet")
+        self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
+        layout.addWidget(self.colormap_combo, row, 6)
+
+        # Update Interval
+        interval_label = QLabel("Update Interval:")
+        interval_label.setFont(QFont("Times New Roman", 8))
+        interval_label.setMinimumHeight(22)
+        layout.addWidget(interval_label, row, 7)
+
+        self.update_interval_spin = QSpinBox()
+        self.update_interval_spin.setRange(50, 5000)  # 50ms to 5s
+        self.update_interval_spin.setValue(self._update_interval_ms)
+        self.update_interval_spin.setSuffix(" ms")
+        self.update_interval_spin.setMaximumWidth(80)
+        self.update_interval_spin.setMinimumHeight(22)
+        self.update_interval_spin.setFont(QFont("Times New Roman", 8))
+        self.update_interval_spin.valueChanged.connect(self._on_update_interval_changed)
+        layout.addWidget(self.update_interval_spin, row, 8)
+
+        # Reset Button
         reset_btn = QPushButton("Reset to Defaults")
-        reset_btn.setFont(QFont("Times New Roman", 8))  # 调小字体
-        reset_btn.setMaximumWidth(120)  # 固定宽度
-        reset_btn.setMinimumHeight(22)  # 减小高度
+        reset_btn.setFont(QFont("Times New Roman", 8))
+        reset_btn.setMaximumWidth(120)
+        reset_btn.setMinimumHeight(22)
         reset_btn.clicked.connect(self._reset_to_defaults)
-        layout.addWidget(reset_btn, row, 0, 1, 2)  # 跨两列
+        layout.addWidget(reset_btn, row, 9, 1, 2)  # 跨两列
 
         # 添加弹性空间推到左边
-        layout.setColumnStretch(5, 1)
+        layout.setColumnStretch(11, 1)
 
         return group
 
@@ -288,6 +307,9 @@ class TimeSpacePlotWidget(QWidget):
             # Allow the image to fill the view regardless of data size
             view.setAspectLocked(False)  # Allow different X/Y scaling to fill widget
             view.setBackgroundColor('w')  # White background for main plot
+            # Show axes and enable interaction
+            view.showAxes(True)
+            view.setMouseEnabled(x=True, y=True)
 
         # Set colorbar background to white
         colorbar = self.image_view.getHistogramWidget()
@@ -308,29 +330,37 @@ class TimeSpacePlotWidget(QWidget):
         self.image_view.ui.menuBtn.hide()  # Hide menu button
 
         # Set up axes labels and enable ticks
-        plot_item = self.image_view.getImageItem().getViewBox().parent()
-        if hasattr(plot_item, 'setLabel'):
+        # Get the plot item correctly from ImageView
+        plot_item = self.image_view.getPlotItem()
+        if plot_item is not None:
             plot_item.setLabel('bottom', 'Distance (points)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
             plot_item.setLabel('left', 'Time (samples)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
 
-            # Configure axes with ticks
-            if hasattr(plot_item, 'getAxis'):
-                bottom_axis = plot_item.getAxis('bottom')
-                left_axis = plot_item.getAxis('left')
+            # Configure axes with ticks - Force show axes and values
+            plot_item.showAxis('bottom', show=True)
+            plot_item.showAxis('left', show=True)
+            plot_item.showAxis('top', show=False)
+            plot_item.showAxis('right', show=False)
 
-                font = QFont("Times New Roman", 10)
-                if bottom_axis:
-                    bottom_axis.setTickFont(font)
-                    bottom_axis.setPen('k')  # Black axis
-                    bottom_axis.setTextPen('k')  # Black text
-                    bottom_axis.setStyle(showValues=True)
-                    bottom_axis.enableAutoSIPrefix(False)
-                if left_axis:
-                    left_axis.setTickFont(font)
-                    left_axis.setPen('k')  # Black axis
-                    left_axis.setTextPen('k')  # Black text
-                    left_axis.setStyle(showValues=True)
-                    left_axis.enableAutoSIPrefix(False)
+            # Get axes and configure them properly
+            bottom_axis = plot_item.getAxis('bottom')
+            left_axis = plot_item.getAxis('left')
+
+            font = QFont("Times New Roman", 10)
+            if bottom_axis:
+                bottom_axis.setTickFont(font)
+                bottom_axis.setPen('k')  # Black axis line
+                bottom_axis.setTextPen('k')  # Black text
+                bottom_axis.setStyle(showValues=True)
+                bottom_axis.enableAutoSIPrefix(False)
+                bottom_axis.show()  # Explicitly show the axis
+            if left_axis:
+                left_axis.setTickFont(font)
+                left_axis.setPen('k')  # Black axis line
+                left_axis.setTextPen('k')  # Black text
+                left_axis.setStyle(showValues=True)
+                left_axis.enableAutoSIPrefix(False)
+                left_axis.show()  # Explicitly show the axis
 
         # Initialize with empty data and apply initial colormap
         empty_data = np.zeros((10, 10))
@@ -341,6 +371,9 @@ class TimeSpacePlotWidget(QWidget):
 
         # Set colorbar background to white
         self._set_colorbar_white_background()
+
+        # Force initial axis configuration after image is set
+        self._configure_initial_axes()
 
     def update_data(self, data: np.ndarray) -> bool:
         """
@@ -382,8 +415,8 @@ class TimeSpacePlotWidget(QWidget):
                 self._data_buffer.append(processed_data_block)
                 log.debug(f"Added data block shape {processed_data_block.shape} to buffer. Buffer size: {len(self._data_buffer)}")
 
-            # Update display
-            self._update_display()
+            # Schedule display update with controlled interval
+            self._schedule_display_update()
             return True
 
         except Exception as e:
@@ -431,6 +464,16 @@ class TimeSpacePlotWidget(QWidget):
             log.error(f"Error processing data block: {e}")
             return None
 
+    def _schedule_display_update(self):
+        """Schedule a display update with controlled interval."""
+        if not self._display_timer.isActive():
+            # Start timer for next update
+            self._display_timer.start(self._update_interval_ms)
+            self._pending_update = False
+        else:
+            # Timer is running, mark that we have pending update
+            self._pending_update = True
+
     def _update_display(self):
         """Update the 2D image display with current buffer data."""
         if not self._data_buffer or len(self._data_buffer) == 0:
@@ -464,12 +507,22 @@ class TimeSpacePlotWidget(QWidget):
                                    autoRange=True,  # Allow auto range for proper display
                                    autoLevels=False)
 
-            # Configure the image view to fill the widget
-            # Set proper aspect ratio and scaling
+            # Configure the image view to fill the widget and show axes properly
             view = self.image_view.getView()
             if view:
                 view.setAspectLocked(False)  # Allow different X/Y scaling
                 view.autoRange()  # Fit to view
+                # Force show and enable axes
+                view.showAxes(True)
+                view.setMouseEnabled(x=True, y=True)  # Enable mouse interaction
+
+                # Ensure the plot item shows axes
+                plot_item = self.image_view.getPlotItem()
+                if plot_item:
+                    plot_item.showAxis('bottom', show=True)
+                    plot_item.showAxis('left', show=True)
+                    plot_item.showAxis('top', show=False)
+                    plot_item.showAxis('right', show=False)
 
             # Apply colormap
             self._apply_colormap()
@@ -481,6 +534,11 @@ class TimeSpacePlotWidget(QWidget):
             self._update_axis_labels(display_data.shape)
 
             log.debug(f"Display updated successfully with data shape {display_data.shape}")
+
+            # If there are pending updates, schedule another one
+            if self._pending_update:
+                self._pending_update = False
+                self._display_timer.start(self._update_interval_ms)
 
         except Exception as e:
             log.error(f"Error updating display: {e}")
@@ -516,6 +574,49 @@ class TimeSpacePlotWidget(QWidget):
 
         except Exception as e:
             log.debug(f"Could not set colorbar background: {e}")
+
+    def _configure_initial_axes(self):
+        """Configure axes immediately after ImageView is created"""
+        try:
+            plot_item = self.image_view.getPlotItem()
+            if plot_item is None:
+                log.warning("Could not get plot item for initial axis configuration")
+                return
+
+            # Show axes explicitly
+            plot_item.showAxis('bottom', show=True)
+            plot_item.showAxis('left', show=True)
+            plot_item.showAxis('top', show=False)
+            plot_item.showAxis('right', show=False)
+
+            # Set initial axis labels
+            plot_item.setLabel('bottom', 'Distance (points)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+            plot_item.setLabel('left', 'Time (samples)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+
+            # Configure axes
+            bottom_axis = plot_item.getAxis('bottom')
+            left_axis = plot_item.getAxis('left')
+
+            font = QFont("Times New Roman", 10)
+            if bottom_axis:
+                bottom_axis.setTickFont(font)
+                bottom_axis.setPen('k')
+                bottom_axis.setTextPen('k')
+                bottom_axis.setStyle(showValues=True)
+                bottom_axis.enableAutoSIPrefix(False)
+                bottom_axis.show()
+            if left_axis:
+                left_axis.setTickFont(font)
+                left_axis.setPen('k')
+                left_axis.setTextPen('k')
+                left_axis.setStyle(showValues=True)
+                left_axis.enableAutoSIPrefix(False)
+                left_axis.show()
+
+            log.debug("Initial axes configured")
+
+        except Exception as e:
+            log.warning(f"Error configuring initial axes: {e}")
 
     def _apply_colormap(self):
         """Apply the selected colormap to the image view."""
@@ -585,48 +686,57 @@ class TimeSpacePlotWidget(QWidget):
     def _update_axis_labels(self, data_shape: tuple):
         """Update axis labels and scales based on data dimensions."""
         try:
-            # Get the plot item
-            plot_item = self.image_view.getImageItem().getViewBox().parent()
+            # Get the plot item correctly
+            plot_item = self.image_view.getPlotItem()
+            if plot_item is None:
+                log.warning("Could not get plot item for axis update")
+                return
 
-            if hasattr(plot_item, 'setLabel'):
-                # data_shape is (time_points, spatial_points)
-                n_time_points, n_spatial_points = data_shape
+            # data_shape is (time_points, spatial_points)
+            n_time_points, n_spatial_points = data_shape
 
-                # X-axis: Distance (horizontal)
-                distance_start_actual = self._distance_start
-                distance_step = self._space_downsample
-                distance_end_actual = distance_start_actual + n_spatial_points * distance_step
+            # X-axis: Distance (horizontal)
+            distance_start_actual = self._distance_start
+            distance_step = self._space_downsample
+            distance_end_actual = distance_start_actual + n_spatial_points * distance_step
 
-                plot_item.setLabel('bottom', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
-                                 **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+            plot_item.setLabel('bottom', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
+                             **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
-                # Y-axis: Time (vertical, bottom=newer, top=older)
-                plot_item.setLabel('left', 'Time (samples, bottom=newer)',
-                                 **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+            # Y-axis: Time (vertical, bottom=newer, top=older)
+            plot_item.setLabel('left', 'Time (samples, bottom=newer)',
+                             **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
-                # Configure axis properties and enable ticks
-                if hasattr(plot_item, 'getAxis'):
-                    bottom_axis = plot_item.getAxis('bottom')
-                    left_axis = plot_item.getAxis('left')
+            # Force show axes and configure them properly
+            plot_item.showAxis('bottom', show=True)
+            plot_item.showAxis('left', show=True)
 
-                    # Set axis fonts and colors
-                    font = QFont("Times New Roman", 9)
-                    if bottom_axis:
-                        bottom_axis.setTickFont(font)
-                        bottom_axis.setPen('k')
-                        bottom_axis.setTextPen('k')
-                        bottom_axis.setStyle(showValues=True)
-                        # Enable ticks
-                        bottom_axis.enableAutoSIPrefix(False)
-                    if left_axis:
-                        left_axis.setTickFont(font)
-                        left_axis.setPen('k')
-                        left_axis.setTextPen('k')
-                        left_axis.setStyle(showValues=True)
-                        # Enable ticks
-                        left_axis.enableAutoSIPrefix(False)
+            # Get and configure axes
+            bottom_axis = plot_item.getAxis('bottom')
+            left_axis = plot_item.getAxis('left')
 
-                log.debug(f"Updated axis labels: X=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual}), Y=time({n_time_points} samples)")
+            # Set axis fonts and colors with explicit tick configuration
+            font = QFont("Times New Roman", 9)
+            if bottom_axis:
+                bottom_axis.setTickFont(font)
+                bottom_axis.setPen('k')
+                bottom_axis.setTextPen('k')
+                bottom_axis.setStyle(showValues=True)
+                bottom_axis.enableAutoSIPrefix(False)
+                bottom_axis.show()
+                # Force tick update
+                bottom_axis.setTickSpacing()
+            if left_axis:
+                left_axis.setTickFont(font)
+                left_axis.setPen('k')
+                left_axis.setTextPen('k')
+                left_axis.setStyle(showValues=True)
+                left_axis.enableAutoSIPrefix(False)
+                left_axis.show()
+                # Force tick update
+                left_axis.setTickSpacing()
+
+            log.debug(f"Updated axis labels: X=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual}), Y=time({n_time_points} samples)")
 
         except Exception as e:
             log.warning(f"Error updating axis labels: {e}")
@@ -682,6 +792,12 @@ class TimeSpacePlotWidget(QWidget):
             self._data_buffer.clear()
         self.parametersChanged.emit()
 
+    def _on_update_interval_changed(self, value: int):
+        """Handle update interval change."""
+        self._update_interval_ms = value
+        self.parametersChanged.emit()
+        log.debug(f"Update interval changed to {value}ms")
+
     def _on_colormap_changed(self, text: str):
         """Handle colormap change."""
         # Find the colormap value
@@ -714,8 +830,9 @@ class TimeSpacePlotWidget(QWidget):
         self._time_downsample = 50
         self._space_downsample = 2
         self._colormap = "jet"
-        self._vmin = -0.02            # Updated reset value
-        self._vmax = 0.02             # Updated reset value
+        self._vmin = -0.1             # Updated reset value
+        self._vmax = 0.1              # Updated reset value
+        self._update_interval_ms = 100  # Reset update interval
 
         # Update UI controls
         self.window_frames_spin.setValue(self._window_frames)
@@ -726,6 +843,7 @@ class TimeSpacePlotWidget(QWidget):
         self.colormap_combo.setCurrentText("Jet")
         self.vmin_spin.setValue(self._vmin)
         self.vmax_spin.setValue(self._vmax)
+        self.update_interval_spin.setValue(self._update_interval_ms)
 
         # Clear buffer and recreate with default size
         if self._data_buffer is not None:
@@ -748,7 +866,8 @@ class TimeSpacePlotWidget(QWidget):
             'space_downsample': self._space_downsample,
             'colormap_type': self._colormap,
             'vmin': self._vmin,
-            'vmax': self._vmax
+            'vmax': self._vmax,
+            'update_interval_ms': self._update_interval_ms
         }
 
     def set_parameters(self, params: Dict[str, Any]):
@@ -778,6 +897,8 @@ class TimeSpacePlotWidget(QWidget):
             self.vmin_spin.setValue(params['vmin'])
         if 'vmax' in params:
             self.vmax_spin.setValue(params['vmax'])
+        if 'update_interval_ms' in params:
+            self.update_interval_spin.setValue(params['update_interval_ms'])
 
     def clear_data(self):
         """Clear all data buffers and reset display."""
