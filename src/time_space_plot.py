@@ -307,8 +307,7 @@ class TimeSpacePlotWidget(QWidget):
             # Allow the image to fill the view regardless of data size
             view.setAspectLocked(False)  # Allow different X/Y scaling to fill widget
             view.setBackgroundColor('w')  # White background for main plot
-            # Show axes and enable interaction
-            view.showAxes(True)
+            # Enable mouse interaction
             view.setMouseEnabled(x=True, y=True)
 
         # Set colorbar background to white
@@ -330,37 +329,39 @@ class TimeSpacePlotWidget(QWidget):
         self.image_view.ui.menuBtn.hide()  # Hide menu button
 
         # Set up axes labels and enable ticks
-        # Get the plot item correctly from ImageView
-        plot_item = self.image_view.getPlotItem()
-        if plot_item is not None:
-            plot_item.setLabel('bottom', 'Distance (points)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-            plot_item.setLabel('left', 'Time (samples)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+        # Get the plot item correctly from ImageView through the view
+        view = self.image_view.getView()
+        if view and hasattr(view, 'getPlotItem'):
+            plot_item = view.getPlotItem()
+            if plot_item is not None:
+                plot_item.setLabel('bottom', 'Distance (points)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                plot_item.setLabel('left', 'Time (samples)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
 
-            # Configure axes with ticks - Force show axes and values
-            plot_item.showAxis('bottom', show=True)
-            plot_item.showAxis('left', show=True)
-            plot_item.showAxis('top', show=False)
-            plot_item.showAxis('right', show=False)
+                # Configure axes with ticks - Force show axes and values
+                plot_item.showAxis('bottom', show=True)
+                plot_item.showAxis('left', show=True)
+                plot_item.showAxis('top', show=False)
+                plot_item.showAxis('right', show=False)
 
-            # Get axes and configure them properly
-            bottom_axis = plot_item.getAxis('bottom')
-            left_axis = plot_item.getAxis('left')
+                # Get axes and configure them properly
+                bottom_axis = plot_item.getAxis('bottom')
+                left_axis = plot_item.getAxis('left')
 
-            font = QFont("Times New Roman", 10)
-            if bottom_axis:
-                bottom_axis.setTickFont(font)
-                bottom_axis.setPen('k')  # Black axis line
-                bottom_axis.setTextPen('k')  # Black text
-                bottom_axis.setStyle(showValues=True)
-                bottom_axis.enableAutoSIPrefix(False)
-                bottom_axis.show()  # Explicitly show the axis
-            if left_axis:
-                left_axis.setTickFont(font)
-                left_axis.setPen('k')  # Black axis line
-                left_axis.setTextPen('k')  # Black text
-                left_axis.setStyle(showValues=True)
-                left_axis.enableAutoSIPrefix(False)
-                left_axis.show()  # Explicitly show the axis
+                font = QFont("Times New Roman", 10)
+                if bottom_axis:
+                    bottom_axis.setTickFont(font)
+                    bottom_axis.setPen('k')  # Black axis line
+                    bottom_axis.setTextPen('k')  # Black text
+                    bottom_axis.setStyle(showValues=True)
+                    bottom_axis.enableAutoSIPrefix(False)
+                    bottom_axis.show()  # Explicitly show the axis
+                if left_axis:
+                    left_axis.setTickFont(font)
+                    left_axis.setPen('k')  # Black axis line
+                    left_axis.setTextPen('k')  # Black text
+                    left_axis.setStyle(showValues=True)
+                    left_axis.enableAutoSIPrefix(False)
+                    left_axis.show()  # Explicitly show the axis
 
         # Initialize with empty data and apply initial colormap
         empty_data = np.zeros((10, 10))
@@ -512,17 +513,17 @@ class TimeSpacePlotWidget(QWidget):
             if view:
                 view.setAspectLocked(False)  # Allow different X/Y scaling
                 view.autoRange()  # Fit to view
-                # Force show and enable axes
-                view.showAxes(True)
                 view.setMouseEnabled(x=True, y=True)  # Enable mouse interaction
 
                 # Ensure the plot item shows axes
-                plot_item = self.image_view.getPlotItem()
-                if plot_item:
-                    plot_item.showAxis('bottom', show=True)
-                    plot_item.showAxis('left', show=True)
-                    plot_item.showAxis('top', show=False)
-                    plot_item.showAxis('right', show=False)
+                view = self.image_view.getView()
+                if view and hasattr(view, 'getPlotItem'):
+                    plot_item = view.getPlotItem()
+                    if plot_item:
+                        plot_item.showAxis('bottom', show=True)
+                        plot_item.showAxis('left', show=True)
+                        plot_item.showAxis('top', show=False)
+                        plot_item.showAxis('right', show=False)
 
             # Apply colormap
             self._apply_colormap()
@@ -578,42 +579,44 @@ class TimeSpacePlotWidget(QWidget):
     def _configure_initial_axes(self):
         """Configure axes immediately after ImageView is created"""
         try:
-            plot_item = self.image_view.getPlotItem()
-            if plot_item is None:
-                log.warning("Could not get plot item for initial axis configuration")
-                return
+            view = self.image_view.getView()
+            if view and hasattr(view, 'getPlotItem'):
+                plot_item = view.getPlotItem()
+                if plot_item is None:
+                    log.warning("Could not get plot item for initial axis configuration")
+                    return
 
-            # Show axes explicitly
-            plot_item.showAxis('bottom', show=True)
-            plot_item.showAxis('left', show=True)
-            plot_item.showAxis('top', show=False)
-            plot_item.showAxis('right', show=False)
+                # Show axes explicitly
+                plot_item.showAxis('bottom', show=True)
+                plot_item.showAxis('left', show=True)
+                plot_item.showAxis('top', show=False)
+                plot_item.showAxis('right', show=False)
 
-            # Set initial axis labels
-            plot_item.setLabel('bottom', 'Distance (points)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-            plot_item.setLabel('left', 'Time (samples)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                # Set initial axis labels
+                plot_item.setLabel('bottom', 'Distance (points)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                plot_item.setLabel('left', 'Time (samples)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
 
-            # Configure axes
-            bottom_axis = plot_item.getAxis('bottom')
-            left_axis = plot_item.getAxis('left')
+                # Configure axes
+                bottom_axis = plot_item.getAxis('bottom')
+                left_axis = plot_item.getAxis('left')
 
-            font = QFont("Times New Roman", 10)
-            if bottom_axis:
-                bottom_axis.setTickFont(font)
-                bottom_axis.setPen('k')
-                bottom_axis.setTextPen('k')
-                bottom_axis.setStyle(showValues=True)
-                bottom_axis.enableAutoSIPrefix(False)
-                bottom_axis.show()
-            if left_axis:
-                left_axis.setTickFont(font)
-                left_axis.setPen('k')
-                left_axis.setTextPen('k')
-                left_axis.setStyle(showValues=True)
-                left_axis.enableAutoSIPrefix(False)
-                left_axis.show()
+                font = QFont("Times New Roman", 10)
+                if bottom_axis:
+                    bottom_axis.setTickFont(font)
+                    bottom_axis.setPen('k')
+                    bottom_axis.setTextPen('k')
+                    bottom_axis.setStyle(showValues=True)
+                    bottom_axis.enableAutoSIPrefix(False)
+                    bottom_axis.show()
+                if left_axis:
+                    left_axis.setTickFont(font)
+                    left_axis.setPen('k')
+                    left_axis.setTextPen('k')
+                    left_axis.setStyle(showValues=True)
+                    left_axis.enableAutoSIPrefix(False)
+                    left_axis.show()
 
-            log.debug("Initial axes configured")
+                log.debug("Initial axes configured")
 
         except Exception as e:
             log.warning(f"Error configuring initial axes: {e}")
@@ -686,57 +689,59 @@ class TimeSpacePlotWidget(QWidget):
     def _update_axis_labels(self, data_shape: tuple):
         """Update axis labels and scales based on data dimensions."""
         try:
-            # Get the plot item correctly
-            plot_item = self.image_view.getPlotItem()
-            if plot_item is None:
-                log.warning("Could not get plot item for axis update")
-                return
+            # Get the plot item correctly through view
+            view = self.image_view.getView()
+            if view and hasattr(view, 'getPlotItem'):
+                plot_item = view.getPlotItem()
+                if plot_item is None:
+                    log.warning("Could not get plot item for axis update")
+                    return
 
-            # data_shape is (time_points, spatial_points)
-            n_time_points, n_spatial_points = data_shape
+                # data_shape is (time_points, spatial_points)
+                n_time_points, n_spatial_points = data_shape
 
-            # X-axis: Distance (horizontal)
-            distance_start_actual = self._distance_start
-            distance_step = self._space_downsample
-            distance_end_actual = distance_start_actual + n_spatial_points * distance_step
+                # X-axis: Distance (horizontal)
+                distance_start_actual = self._distance_start
+                distance_step = self._space_downsample
+                distance_end_actual = distance_start_actual + n_spatial_points * distance_step
 
-            plot_item.setLabel('bottom', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
-                             **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+                plot_item.setLabel('bottom', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
+                                 **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
-            # Y-axis: Time (vertical, bottom=newer, top=older)
-            plot_item.setLabel('left', 'Time (samples, bottom=newer)',
-                             **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+                # Y-axis: Time (vertical, bottom=newer, top=older)
+                plot_item.setLabel('left', 'Time (samples, bottom=newer)',
+                                 **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
-            # Force show axes and configure them properly
-            plot_item.showAxis('bottom', show=True)
-            plot_item.showAxis('left', show=True)
+                # Force show axes and configure them properly
+                plot_item.showAxis('bottom', show=True)
+                plot_item.showAxis('left', show=True)
 
-            # Get and configure axes
-            bottom_axis = plot_item.getAxis('bottom')
-            left_axis = plot_item.getAxis('left')
+                # Get and configure axes
+                bottom_axis = plot_item.getAxis('bottom')
+                left_axis = plot_item.getAxis('left')
 
-            # Set axis fonts and colors with explicit tick configuration
-            font = QFont("Times New Roman", 9)
-            if bottom_axis:
-                bottom_axis.setTickFont(font)
-                bottom_axis.setPen('k')
-                bottom_axis.setTextPen('k')
-                bottom_axis.setStyle(showValues=True)
-                bottom_axis.enableAutoSIPrefix(False)
-                bottom_axis.show()
-                # Force tick update
-                bottom_axis.setTickSpacing()
-            if left_axis:
-                left_axis.setTickFont(font)
-                left_axis.setPen('k')
-                left_axis.setTextPen('k')
-                left_axis.setStyle(showValues=True)
-                left_axis.enableAutoSIPrefix(False)
-                left_axis.show()
-                # Force tick update
-                left_axis.setTickSpacing()
+                # Set axis fonts and colors with explicit tick configuration
+                font = QFont("Times New Roman", 9)
+                if bottom_axis:
+                    bottom_axis.setTickFont(font)
+                    bottom_axis.setPen('k')
+                    bottom_axis.setTextPen('k')
+                    bottom_axis.setStyle(showValues=True)
+                    bottom_axis.enableAutoSIPrefix(False)
+                    bottom_axis.show()
+                    # Force tick update
+                    bottom_axis.setTickSpacing()
+                if left_axis:
+                    left_axis.setTickFont(font)
+                    left_axis.setPen('k')
+                    left_axis.setTextPen('k')
+                    left_axis.setStyle(showValues=True)
+                    left_axis.enableAutoSIPrefix(False)
+                    left_axis.show()
+                    # Force tick update
+                    left_axis.setTickSpacing()
 
-            log.debug(f"Updated axis labels: X=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual}), Y=time({n_time_points} samples)")
+                log.debug(f"Updated axis labels: X=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual}), Y=time({n_time_points} samples)")
 
         except Exception as e:
             log.warning(f"Error updating axis labels: {e}")
