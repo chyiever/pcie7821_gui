@@ -71,13 +71,13 @@ class TimeSpacePlotWidget(QWidget):
 
         # Plot parameters
         self._window_frames = 5
-        self._distance_start = 0
-        self._distance_end = 10000  # Increased default distance range
+        self._distance_start = 40     # Changed default range
+        self._distance_end = 100      # Changed default range
         self._time_downsample = 50
         self._space_downsample = 2
         self._colormap = "jet"
-        self._vmin = -10000.0  # Increased range for phase data
-        self._vmax = 10000.0
+        self._vmin = -0.02  # Default range for phase data
+        self._vmax = 0.02
 
         # Current data dimensions
         self._full_point_num = 0
@@ -131,9 +131,9 @@ class TimeSpacePlotWidget(QWidget):
 
         self.distance_start_spin = QSpinBox()
         self.distance_start_spin.setRange(0, 1000000)  # Increased range
-        self.distance_start_spin.setValue(self._distance_start)
-        self.distance_start_spin.setMaximumWidth(80)  # 固定宽度
-        self.distance_start_spin.setMinimumHeight(22)  # 减小高度
+        self.distance_start_spin.setValue(40)           # Updated default value
+        self.distance_start_spin.setMaximumWidth(80)    # 固定宽度
+        self.distance_start_spin.setMinimumHeight(22)   # 减小高度
         self.distance_start_spin.setFont(QFont("Times New Roman", 8))  # 调小输入框字体
         self.distance_start_spin.valueChanged.connect(self._on_distance_start_changed)
         layout.addWidget(self.distance_start_spin, row, 2)
@@ -145,8 +145,8 @@ class TimeSpacePlotWidget(QWidget):
 
         self.distance_end_spin = QSpinBox()
         self.distance_end_spin.setRange(1, 1000000)  # Increased range
-        self.distance_end_spin.setValue(self._distance_end)
-        self.distance_end_spin.setMaximumWidth(80)  # 固定宽度
+        self.distance_end_spin.setValue(100)         # Updated default value
+        self.distance_end_spin.setMaximumWidth(80)   # 固定宽度
         self.distance_end_spin.setMinimumHeight(22)  # 减小高度
         self.distance_end_spin.setFont(QFont("Times New Roman", 8))  # 调小输入框字体
         self.distance_end_spin.valueChanged.connect(self._on_distance_end_changed)
@@ -161,7 +161,7 @@ class TimeSpacePlotWidget(QWidget):
         layout.addWidget(window_label, row, 0)
 
         self.window_frames_spin = QSpinBox()
-        self.window_frames_spin.setRange(2, self._max_window_frames)
+        self.window_frames_spin.setRange(1, self._max_window_frames)  # Minimum changed to 1
         self.window_frames_spin.setValue(self._window_frames)
         self.window_frames_spin.setMaximumWidth(80)  # 固定宽度
         self.window_frames_spin.setMinimumHeight(22)  # 减小高度
@@ -231,10 +231,12 @@ class TimeSpacePlotWidget(QWidget):
         layout.addWidget(min_label, row, 1)
 
         self.vmin_spin = QDoubleSpinBox()
-        self.vmin_spin.setRange(-100000, 100000)
-        self.vmin_spin.setValue(-10000.0)  # Updated default value
-        self.vmin_spin.setMaximumWidth(80)  # 固定宽度
-        self.vmin_spin.setMinimumHeight(22)  # 减小高度
+        self.vmin_spin.setRange(-1.0, 1.0)           # Smaller range for phase data
+        self.vmin_spin.setDecimals(3)                # 3 decimal places for precision
+        self.vmin_spin.setSingleStep(0.001)          # Fine adjustment step
+        self.vmin_spin.setValue(-0.02)               # Updated default value
+        self.vmin_spin.setMaximumWidth(80)           # 固定宽度
+        self.vmin_spin.setMinimumHeight(22)          # 减小高度
         self.vmin_spin.setFont(QFont("Times New Roman", 8))  # 调小字体
         self.vmin_spin.valueChanged.connect(self._on_vmin_changed)
         layout.addWidget(self.vmin_spin, row, 2)
@@ -245,10 +247,12 @@ class TimeSpacePlotWidget(QWidget):
         layout.addWidget(max_label, row, 3)
 
         self.vmax_spin = QDoubleSpinBox()
-        self.vmax_spin.setRange(-100000, 100000)
-        self.vmax_spin.setValue(10000.0)  # Updated default value
-        self.vmax_spin.setMaximumWidth(80)  # 固定宽度
-        self.vmax_spin.setMinimumHeight(22)  # 减小高度
+        self.vmax_spin.setRange(-1.0, 1.0)           # Smaller range for phase data
+        self.vmax_spin.setDecimals(3)                # 3 decimal places for precision
+        self.vmax_spin.setSingleStep(0.001)          # Fine adjustment step
+        self.vmax_spin.setValue(0.02)                # Updated default value
+        self.vmax_spin.setMaximumWidth(80)           # 固定宽度
+        self.vmax_spin.setMinimumHeight(22)          # 减小高度
         self.vmax_spin.setFont(QFont("Times New Roman", 8))  # 调小字体
         self.vmax_spin.valueChanged.connect(self._on_vmax_changed)
         layout.addWidget(self.vmax_spin, row, 4)
@@ -424,46 +428,40 @@ class TimeSpacePlotWidget(QWidget):
             return
 
         try:
-            # Convert buffer to 2D array (time x distance)
+            # Convert buffer to list of frame data
             buffer_list = list(self._data_buffer)
 
-            # Ensure all frames have the same length
-            min_length = min(len(frame) for frame in buffer_list)
-            trimmed_frames = [frame[:min_length] for frame in buffer_list]
+            # Each element in buffer_list is processed frame data (distance range applied)
+            # We need to reorganize this data so that:
+            # - Y axis represents distance points (spatial positions)
+            # - X axis represents time (frames)
 
-            # Create 2D array: time (frames) x distance (spatial points)
-            time_space_data = np.array(trimmed_frames)
-            log.debug(f"Time-space data shape: {time_space_data.shape}, data range: [{np.min(time_space_data):.2f}, {np.max(time_space_data):.2f}]")
+            if len(buffer_list) == 0:
+                return
 
-            # Apply time downsampling if needed
-            if self._time_downsample > 1 and len(time_space_data) > self._time_downsample:
-                # Keep most recent frames, downsample older ones
-                recent_frames = time_space_data[-self._time_downsample:]
-                time_space_data = recent_frames[::max(1, len(recent_frames) // self._time_downsample)]
-                log.debug(f"After time downsampling: {time_space_data.shape}")
+            # All frames should have the same spatial dimension after processing
+            frame_length = len(buffer_list[0])  # Number of spatial points after range/downsample
+            n_frames = len(buffer_list)
 
-            # Transpose for proper display orientation (distance x time)
-            display_data = time_space_data.T
-            log.debug(f"Final display data shape: {display_data.shape}")
+            log.debug(f"Buffer contains {n_frames} frames, each with {frame_length} spatial points")
 
-            # Auto-adjust color range if data is outside current range
-            data_min, data_max = np.min(display_data), np.max(display_data)
-            if data_min < self._vmin or data_max > self._vmax:
-                # Expand range with 10% margin
-                margin = (data_max - data_min) * 0.1
-                new_vmin = data_min - margin
-                new_vmax = data_max + margin
-                log.info(f"Auto-adjusting color range from [{self._vmin:.1f}, {self._vmax:.1f}] to [{new_vmin:.1f}, {new_vmax:.1f}]")
+            # Create 2D array: distance (Y) x time (X)
+            # Shape will be (spatial_points, time_frames)
+            display_data = np.zeros((frame_length, n_frames))
 
-                # Update internal values
-                self._vmin = new_vmin
-                self._vmax = new_vmax
+            # Fill the array: each column represents one time frame
+            for frame_idx, frame_data in enumerate(buffer_list):
+                if len(frame_data) == frame_length:
+                    display_data[:, frame_idx] = frame_data
+                else:
+                    # Handle size mismatch by truncating or padding
+                    min_len = min(len(frame_data), frame_length)
+                    display_data[:min_len, frame_idx] = frame_data[:min_len]
 
-                # Update UI controls
-                self.vmin_spin.setValue(new_vmin)
-                self.vmax_spin.setValue(new_vmax)
+            log.debug(f"Final display data shape: {display_data.shape} (distance x time)")
+            log.debug(f"Data range: [{np.min(display_data):.4f}, {np.max(display_data):.4f}]")
 
-            # Update image view with colormap
+            # Update image view with current color range (no auto-adjustment)
             self.image_view.setImage(display_data,
                                    levels=[self._vmin, self._vmax],
                                    autoRange=False,
@@ -587,20 +585,20 @@ class TimeSpacePlotWidget(QWidget):
             plot_item = self.image_view.getImageItem().getViewBox().parent()
 
             if hasattr(plot_item, 'setLabel'):
-                # Calculate actual distance and time ranges
-                n_distance, n_time = data_shape
+                # data_shape is (distance_points, time_frames)
+                n_distance_points, n_time_frames = data_shape
 
-                # Distance axis (Y-axis) - based on distance range and downsampling
-                distance_start_m = self._distance_start * 0.5  # Assuming 0.5m per point
-                distance_end_m = (self._distance_start + n_distance * self._space_downsample) * 0.5
-
-                # Time axis (X-axis) - based on frame count and time downsampling
-                time_span_s = n_time * self._time_downsample / 1000.0  # Assuming 1kHz frame rate
-
-                # Set axis labels with units
-                plot_item.setLabel('bottom', 'Time', units='frames',
+                # Update axis labels to reflect the correct orientation
+                # X-axis: Time (frames in the rolling window)
+                plot_item.setLabel('bottom', 'Time (frames)',
                                  **{'font-family': 'Times New Roman', 'font-size': '10pt'})
-                plot_item.setLabel('left', 'Distance', units='points',
+
+                # Y-axis: Distance (spatial points within the selected range)
+                # Calculate actual distance values
+                distance_start_actual = self._distance_start
+                distance_end_actual = self._distance_start + n_distance_points * self._space_downsample
+
+                plot_item.setLabel('left', f'Distance (points: {distance_start_actual}-{distance_end_actual})',
                                  **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
                 # Configure axis properties
@@ -620,6 +618,8 @@ class TimeSpacePlotWidget(QWidget):
                         left_axis.setPen('k')
                         left_axis.setTextPen('k')
                         left_axis.setStyle(showValues=True)
+
+                log.debug(f"Updated axis labels: X=time({n_time_frames} frames), Y=distance({n_distance_points} points)")
 
         except Exception as e:
             log.warning(f"Error updating axis labels: {e}")
@@ -700,13 +700,13 @@ class TimeSpacePlotWidget(QWidget):
     def _reset_to_defaults(self):
         """Reset all parameters to default values."""
         self._window_frames = 5
-        self._distance_start = 0
-        self._distance_end = 10000  # Increased default distance range
+        self._distance_start = 40     # Updated reset value
+        self._distance_end = 100      # Updated reset value
         self._time_downsample = 50
         self._space_downsample = 2
         self._colormap = "jet"
-        self._vmin = -10000.0  # Updated reset value
-        self._vmax = 10000.0
+        self._vmin = -0.02            # Updated reset value
+        self._vmax = 0.02             # Updated reset value
 
         # Update UI controls
         self.window_frames_spin.setValue(self._window_frames)

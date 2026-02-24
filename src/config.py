@@ -195,13 +195,13 @@ class TimeSpaceParams:
                 but require more memory and processing power.
     """
     window_frames: int = 5                   # Rolling window size in frames
-    distance_range_start: int = 0           # Start index for distance range
-    distance_range_end: int = 10000         # End index for distance range (increased)
+    distance_range_start: int = 40          # Start index for distance range (updated default)
+    distance_range_end: int = 100           # End index for distance range (updated default)
     time_downsample: int = 50               # Time downsampling factor
     space_downsample: int = 2               # Space downsampling factor
     colormap_type: str = "jet"              # PyQtGraph colormap name
-    vmin: float = -1000.0                   # Color range minimum
-    vmax: float = 1000.0                    # Color range maximum
+    vmin: float = -0.02                     # Color range minimum (updated for phase data)
+    vmax: float = 0.02                      # Color range maximum (updated for phase data)
 
 
 @dataclass
