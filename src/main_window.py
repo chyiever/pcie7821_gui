@@ -119,6 +119,12 @@ class MainWindow(QMainWindow):
         self._cpu_percent = 0.0
         self._disk_free_gb = 0.0
 
+        # Initialize psutil CPU monitoring (first call to establish baseline)
+        try:
+            psutil.cpu_percent(interval=None)  # Initialize CPU monitoring
+        except Exception as e:
+            log.warning(f"Failed to initialize CPU monitoring: {e}")
+
         # Initialize file estimates
         self._update_file_estimates()
 
@@ -1447,27 +1453,38 @@ class MainWindow(QMainWindow):
 
     def _update_status(self):
         """Periodic status update"""
-        self._update_calculated_values()
+        try:
+            # Check if widgets still exist (window might be closing)
+            if not hasattr(self, 'frames_label'):
+                return
 
-        # Update acquisition status
-        if self.acq_thread is not None and self.acq_thread.is_running:
-            frames = self.acq_thread.frames_acquired
-            self.frames_label.setText(f"Frames: {frames}")
+            self._update_calculated_values()
 
-            # Update buffer status with estimated values
-            if hasattr(self.acq_thread, '_current_polling_interval'):
-                polling_ms = self.acq_thread._current_polling_interval * 1000
-                self.polling_label.setText(f"Poll: {polling_ms:.1f}ms")
+            # Update acquisition status
+            if self.acq_thread is not None and self.acq_thread.is_running:
+                frames = self.acq_thread.frames_acquired
+                if hasattr(self, 'frames_label'):
+                    self.frames_label.setText(f"Frames: {frames}")
 
-            # Update buffer status displays (with estimated values)
-            self._update_buffer_status()
-        else:
-            self.frames_label.setText("Frames: 0")
-            if hasattr(self, 'polling_label'):
-                self.polling_label.setText("Poll: --ms")
+                # Update buffer status with estimated values
+                if hasattr(self.acq_thread, '_current_polling_interval'):
+                    polling_ms = self.acq_thread._current_polling_interval * 1000
+                    if hasattr(self, 'polling_label'):
+                        self.polling_label.setText(f"Poll: {polling_ms:.1f}ms")
 
-        # Update file size estimates
-        self._update_file_estimates()
+                # Update buffer status displays (with estimated values)
+                self._update_buffer_status()
+            else:
+                if hasattr(self, 'frames_label'):
+                    self.frames_label.setText("Frames: 0")
+                if hasattr(self, 'polling_label'):
+                    self.polling_label.setText("Poll: --ms")
+
+            # Update file size estimates
+            self._update_file_estimates()
+
+        except Exception as e:
+            log.warning(f"Error in _update_status: {e}")
 
     def _update_calculated_values(self):
         """Update calculated display values"""
@@ -1515,6 +1532,13 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close - must release hardware and threads gracefully"""
         log.info("Window closing...")
+
+        # Stop all timers first to prevent interference
+        log.debug("Stopping timers...")
+        if hasattr(self, '_status_timer'):
+            self._status_timer.stop()
+        if hasattr(self, '_system_timer'):
+            self._system_timer.stop()
 
         # Stop acquisition
         if self.acq_thread is not None and self.acq_thread.isRunning():
@@ -1587,9 +1611,11 @@ class MainWindow(QMainWindow):
 
             self._last_system_update = current_time
 
-            # Update CPU usage
-            self._cpu_percent = psutil.cpu_percent(interval=0.1)
-            self.cpu_label.setText(f"CPU: {self._cpu_percent:.1f}%")
+            # Update CPU usage (non-blocking version)
+            # Use interval=None for non-blocking call (returns value from last call)
+            self._cpu_percent = psutil.cpu_percent(interval=None)
+            if hasattr(self, 'cpu_label'):  # Check if widget still exists
+                self.cpu_label.setText(f"CPU: {self._cpu_percent:.1f}%")
 
             # Update disk space for save path
             if self.data_saver and self.data_saver.is_running:
@@ -1597,12 +1623,14 @@ class MainWindow(QMainWindow):
                 if os.path.exists(save_path):
                     _, _, free_bytes = shutil.disk_usage(save_path)
                     self._disk_free_gb = free_bytes / (1024**3)
-                    self.disk_label.setText(f"Disk: {self._disk_free_gb:.1f}GB free")
+                    if hasattr(self, 'disk_label'):  # Check if widget still exists
+                        self.disk_label.setText(f"Disk: {self._disk_free_gb:.1f}GB free")
 
             # Update polling interval display (if acquisition is running)
             if self.acq_thread and self.acq_thread.is_running:
                 polling_ms = getattr(self.acq_thread, '_current_polling_interval', 0.001) * 1000
-                self.polling_label.setText(f"Poll: {polling_ms:.1f}ms")
+                if hasattr(self, 'polling_label'):  # Check if widget still exists
+                    self.polling_label.setText(f"Poll: {polling_ms:.1f}ms")
 
         except Exception as e:
             log.warning(f"Error updating system status: {e}")
