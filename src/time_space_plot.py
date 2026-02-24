@@ -338,7 +338,8 @@ class TimeSpacePlotWidget(QWidget):
         Update the plot with new phase data.
 
         Args:
-            data: Phase data array (1D: points, or 2D: frames x points)
+            data: Phase data array (2D: frames x points)
+                 Shape: (frame_num, point_num)
 
         Returns:
             True if data was successfully processed and displayed
@@ -356,28 +357,18 @@ class TimeSpacePlotWidget(QWidget):
 
             log.debug(f"Processing {frame_count} frames with {point_count} points each")
 
-            # Initialize buffer if needed
+            # Initialize buffer if needed - store complete data blocks, not individual frames
             if self._data_buffer is None:
                 self._data_buffer = deque(maxlen=self._window_frames)
                 log.debug(f"Initialized data buffer with maxlen={self._window_frames}")
 
-            # Process each frame and add to buffer
-            frames_added = 0
-            for frame_idx in range(frame_count):
-                frame_data = data[frame_idx, :]
+            # Add the entire data block to buffer
+            # Each buffer element will be a (frame_count, processed_point_count) array
+            processed_data_block = self._process_data_block(data)
 
-                # Apply spatial range and downsampling
-                processed_data = self._process_frame_data(frame_data)
-
-                if processed_data is not None:
-                    # Add to rolling window buffer
-                    self._data_buffer.append(processed_data)
-                    self._current_frame_count += 1
-                    frames_added += 1
-                else:
-                    log.warning(f"Failed to process frame {frame_idx}")
-
-            log.debug(f"Added {frames_added} frames to buffer. Buffer size: {len(self._data_buffer)}")
+            if processed_data_block is not None:
+                self._data_buffer.append(processed_data_block)
+                log.debug(f"Added data block shape {processed_data_block.shape} to buffer. Buffer size: {len(self._data_buffer)}")
 
             # Update display
             self._update_display()
@@ -389,36 +380,43 @@ class TimeSpacePlotWidget(QWidget):
             traceback.print_exc()
             return False
 
-    def _process_frame_data(self, frame_data: np.ndarray) -> Optional[np.ndarray]:
+    def _process_data_block(self, data_block: np.ndarray) -> Optional[np.ndarray]:
         """
-        Process a single frame of data with range selection and downsampling.
+        Process a block of frame data with range selection and downsampling.
 
         Args:
-            frame_data: 1D array of phase data for one frame
+            data_block: 2D array (frames x points)
 
         Returns:
-            Processed 1D array or None if processing failed
+            Processed 2D array or None if processing failed
         """
         try:
+            frame_count, point_count = data_block.shape
+
             # Apply distance range
             start_idx = max(0, self._distance_start)
-            end_idx = min(len(frame_data), self._distance_end)
+            end_idx = min(point_count, self._distance_end)
 
             if start_idx >= end_idx:
                 log.warning(f"Invalid distance range: {start_idx} >= {end_idx}")
                 return None
 
-            range_data = frame_data[start_idx:end_idx]
+            # Extract distance range for all frames
+            range_data = data_block[:, start_idx:end_idx]  # (frames, selected_points)
 
             # Apply spatial downsampling
             if self._space_downsample > 1:
-                # Use strided indexing for downsampling
-                range_data = range_data[::self._space_downsample]
+                range_data = range_data[:, ::self._space_downsample]
 
+            # Apply time downsampling
+            if self._time_downsample > 1 and frame_count > self._time_downsample:
+                range_data = range_data[::self._time_downsample, :]
+
+            log.debug(f"Processed data block: {data_block.shape} -> {range_data.shape}")
             return range_data
 
         except Exception as e:
-            log.error(f"Error processing frame data: {e}")
+            log.error(f"Error processing data block: {e}")
             return None
 
     def _update_display(self):
@@ -428,40 +426,26 @@ class TimeSpacePlotWidget(QWidget):
             return
 
         try:
-            # Convert buffer to list of frame data
+            # Concatenate all data blocks in buffer along time axis
             buffer_list = list(self._data_buffer)
-
-            # Each element in buffer_list is processed frame data (distance range applied)
-            # We need to reorganize this data so that:
-            # - Y axis represents distance points (spatial positions)
-            # - X axis represents time (frames)
 
             if len(buffer_list) == 0:
                 return
 
-            # All frames should have the same spatial dimension after processing
-            frame_length = len(buffer_list[0])  # Number of spatial points after range/downsample
-            n_frames = len(buffer_list)
+            # Each element in buffer_list is a (frames, spatial_points) array
+            # Concatenate along time axis to create full time-space data
+            time_space_data = np.concatenate(buffer_list, axis=0)  # (total_frames, spatial_points)
 
-            log.debug(f"Buffer contains {n_frames} frames, each with {frame_length} spatial points")
+            log.debug(f"Concatenated time-space data shape: {time_space_data.shape}")
 
-            # Create 2D array: distance (Y) x time (X)
-            # Shape will be (spatial_points, time_frames)
-            display_data = np.zeros((frame_length, n_frames))
-
-            # Fill the array: each column represents one time frame
-            for frame_idx, frame_data in enumerate(buffer_list):
-                if len(frame_data) == frame_length:
-                    display_data[:, frame_idx] = frame_data
-                else:
-                    # Handle size mismatch by truncating or padding
-                    min_len = min(len(frame_data), frame_length)
-                    display_data[:min_len, frame_idx] = frame_data[:min_len]
+            # Transpose to get correct orientation: (spatial_points, time_points)
+            # Y-axis: spatial (distance), X-axis: time
+            display_data = time_space_data.T
 
             log.debug(f"Final display data shape: {display_data.shape} (distance x time)")
             log.debug(f"Data range: [{np.min(display_data):.4f}, {np.max(display_data):.4f}]")
 
-            # Update image view with current color range (no auto-adjustment)
+            # Update image view with current color range
             self.image_view.setImage(display_data,
                                    levels=[self._vmin, self._vmax],
                                    autoRange=False,
@@ -585,20 +569,19 @@ class TimeSpacePlotWidget(QWidget):
             plot_item = self.image_view.getImageItem().getViewBox().parent()
 
             if hasattr(plot_item, 'setLabel'):
-                # data_shape is (distance_points, time_frames)
-                n_distance_points, n_time_frames = data_shape
+                # data_shape is (spatial_points, time_points)
+                n_spatial_points, n_time_points = data_shape
 
-                # Update axis labels to reflect the correct orientation
-                # X-axis: Time (frames in the rolling window)
-                plot_item.setLabel('bottom', 'Time (frames)',
+                # X-axis: Time
+                plot_item.setLabel('bottom', 'Time (samples)',
                                  **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
                 # Y-axis: Distance (spatial points within the selected range)
-                # Calculate actual distance values
                 distance_start_actual = self._distance_start
-                distance_end_actual = self._distance_start + n_distance_points * self._space_downsample
+                distance_step = self._space_downsample
+                distance_end_actual = distance_start_actual + n_spatial_points * distance_step
 
-                plot_item.setLabel('left', f'Distance (points: {distance_start_actual}-{distance_end_actual})',
+                plot_item.setLabel('left', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
                                  **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
                 # Configure axis properties
@@ -619,7 +602,7 @@ class TimeSpacePlotWidget(QWidget):
                         left_axis.setTextPen('k')
                         left_axis.setStyle(showValues=True)
 
-                log.debug(f"Updated axis labels: X=time({n_time_frames} frames), Y=distance({n_distance_points} points)")
+                log.debug(f"Updated axis labels: X=time({n_time_points} samples), Y=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual})")
 
         except Exception as e:
             log.warning(f"Error updating axis labels: {e}")
@@ -659,16 +642,18 @@ class TimeSpacePlotWidget(QWidget):
 
         self.parametersChanged.emit()
 
-    def _on_time_downsample_changed(self, value: int):
-        """Handle time downsampling change."""
-        self._time_downsample = value
-        self._update_display()
-        self.parametersChanged.emit()
-
     def _on_space_downsample_changed(self, value: int):
         """Handle space downsampling change."""
         self._space_downsample = value
         # Clear buffer to force reprocessing with new downsampling
+        if self._data_buffer is not None:
+            self._data_buffer.clear()
+        self.parametersChanged.emit()
+
+    def _on_time_downsample_changed(self, value: int):
+        """Handle time downsampling change."""
+        self._time_downsample = value
+        # Clear buffer to force reprocessing with new time downsampling
         if self._data_buffer is not None:
             self._data_buffer.clear()
         self.parametersChanged.emit()
