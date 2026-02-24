@@ -196,7 +196,7 @@ class TimeSpaceParams:
     """
     window_frames: int = 5                   # Rolling window size in frames
     distance_range_start: int = 0           # Start index for distance range
-    distance_range_end: int = 500           # End index for distance range
+    distance_range_end: int = 10000         # End index for distance range (increased)
     time_downsample: int = 50               # Time downsampling factor
     space_downsample: int = 2               # Space downsampling factor
     colormap_type: str = "jet"              # PyQtGraph colormap name
