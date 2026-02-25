@@ -439,17 +439,15 @@ class MainWindow(QMainWindow):
         display_layout.addWidget(QLabel("Mode:"), 0, 0)
         self.mode_time_radio = QRadioButton("Time")
         self.mode_space_radio = QRadioButton("Space")
-        self.mode_time_space_radio = QRadioButton("Time-space")
+        # Time-space选项移动到Tab2，这里只保留Time和Space
         self.mode_time_radio.setChecked(True)
         mode_group = QButtonGroup(self)
         mode_group.addButton(self.mode_time_radio, 0)
         mode_group.addButton(self.mode_space_radio, 1)
-        mode_group.addButton(self.mode_time_space_radio, 2)
         mode_layout = QHBoxLayout()
         mode_layout.setSpacing(2)
         mode_layout.addWidget(self.mode_time_radio)
         mode_layout.addWidget(self.mode_space_radio)
-        mode_layout.addWidget(self.mode_time_space_radio)
         display_layout.addLayout(mode_layout, 0, 1)
 
         display_layout.addWidget(QLabel("Region:"), 0, 2)
@@ -890,6 +888,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'time_space_widget') and self.time_space_widget is not None:
             self.time_space_widget.parametersChanged.connect(self._on_time_space_params_changed)
             self.time_space_widget.pointCountChanged.connect(self._on_point_count_changed)
+            # 连接PLOT按钮状态变化信号
+            if hasattr(self.time_space_widget, 'plotStateChanged'):
+                self.time_space_widget.plotStateChanged.connect(self._on_plot_state_changed)
             log.debug("Time-space widget signals connected")
 
     def _init_device(self):
@@ -950,10 +951,8 @@ class MainWindow(QMainWindow):
         params.phase_demod.polarization_diversity = self.polar_div_check.isChecked()
 
         # Display params
-        # Display mode selection
-        if self.mode_time_space_radio.isChecked():
-            params.display.mode = DisplayMode.TIME_SPACE
-        elif self.mode_space_radio.isChecked():
+        # Display mode selection (移除TIME_SPACE选项，由PLOT按钮控制)
+        if self.mode_space_radio.isChecked():
             params.display.mode = DisplayMode.SPACE
         else:
             params.display.mode = DisplayMode.TIME
@@ -1339,33 +1338,30 @@ class MainWindow(QMainWindow):
                 for i in range(channel_num, 4):
                     self.plot_curve_1[i].setData([])
 
-        elif self.params.display.mode == DisplayMode.TIME_SPACE:
-            # Time-Space mode: update 2D plot with rolling window
-            if self.time_space_widget is not None:
-                # Use the processed data parameter (already includes rad conversion if enabled)
-                display_data = data
+        # Time-Space plot: 独立于MODE控制，由PLOT按钮控制
+        if (self.time_space_widget is not None and
+            hasattr(self.time_space_widget, 'is_plot_enabled') and
+            self.time_space_widget.is_plot_enabled()):
+            # Use the processed data parameter (already includes rad conversion if enabled)
+            display_data = data
 
-                # Reshape data to frames x points for time-space widget
-                if len(display_data.shape) == 1:
-                    # Single frame data
+            # Reshape data to frames x points for time-space widget
+            if len(display_data.shape) == 1:
+                # Single frame data
+                reshaped_data = display_data.reshape(frame_num, point_num)
+            else:
+                # Multi-channel data - use first channel for now
+                if channel_num == 1:
                     reshaped_data = display_data.reshape(frame_num, point_num)
                 else:
-                    # Multi-channel data - use first channel for now
-                    if channel_num == 1:
-                        reshaped_data = display_data.reshape(frame_num, point_num)
-                    else:
-                        # Take first channel from multi-channel data
-                        channel_data = display_data.reshape(-1, channel_num)[:, 0]
-                        reshaped_data = channel_data.reshape(frame_num, point_num)
+                    # Take first channel from multi-channel data
+                    channel_data = display_data.reshape(-1, channel_num)[:, 0]
+                    reshaped_data = channel_data.reshape(frame_num, point_num)
 
-                # Update the time-space plot
-                success = self.time_space_widget.update_data(reshaped_data)
-                if not success:
-                    log.warning("Failed to update time-space plot")
-
-            # Clear traditional plots in TIME_SPACE mode
-            for i in range(4):
-                self.plot_curve_1[i].setData([])
+            # Update the time-space plot
+            success = self.time_space_widget.update_data(reshaped_data)
+            if not success:
+                log.debug("Time-space plot update skipped (plot disabled)")
 
         else:
             # Time mode: show multiple frames overlay
@@ -1685,6 +1681,15 @@ class MainWindow(QMainWindow):
             log.debug(f"Updated point count display: {point_count}")
         except Exception as e:
             log.warning(f"Error updating point count display: {e}")
+
+    @pyqtSlot(bool)
+    def _on_plot_state_changed(self, enabled: bool):
+        """处理Time-space PLOT按钮状态变化"""
+        try:
+            log.info(f"Time-space plot state changed: {'Enabled' if enabled else 'Disabled'}")
+            # 这里可以添加其他响应逻辑，比如状态栏显示等
+        except Exception as e:
+            log.warning(f"Error handling plot state change: {e}")
 
     def _update_system_status(self):
         """Update system monitoring information (CPU, disk, etc.)"""

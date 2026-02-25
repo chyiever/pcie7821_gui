@@ -85,7 +85,6 @@ class TimeSpacePlotWidget(QWidget):
         self._colormap = "jet"
         self._vmin = -0.1  # Updated default range
         self._vmax = 0.1   # Updated default range
-        self._update_interval_ms = 100  # Update interval in milliseconds
 
         # Current data dimensions
         self._full_point_num = 0
@@ -1096,6 +1095,7 @@ class TimeSpacePlotWidgetV2(QWidget):
     # 信号定义
     parametersChanged = pyqtSignal()
     pointCountChanged = pyqtSignal(int)
+    plotStateChanged = pyqtSignal(bool)  # 新增：绘图状态变化信号
 
     def __init__(self):
         """初始化 PlotWidget 版本的 TimeSpacePlot"""
@@ -1113,16 +1113,15 @@ class TimeSpacePlotWidgetV2(QWidget):
         self._colormap = "jet"
         self._vmin = -0.1
         self._vmax = 0.1
-        self._update_interval_ms = 100
-
         # 显示相关参数
         self._full_point_num = 0
         self._current_frame_count = 0
 
-        # 定时器
-        self._display_timer = QTimer(self)
-        self._display_timer.timeout.connect(self._update_display_v2)
-        self._display_timer.setSingleShot(True)
+        # 绘图状态控制（必须在UI创建之前初始化）
+        self._plot_enabled = False
+
+        # 定时器 - 移除定时器，改为每帧直接更新
+        # 每次update_data调用时直接更新显示，不使用定时器控制
         self._pending_update = False
 
         self._setup_ui_v2()
@@ -1136,7 +1135,7 @@ class TimeSpacePlotWidgetV2(QWidget):
 
         # 控制面板 (重用原来的方法)
         control_panel = self._create_control_panel_v2()
-        control_panel.setMaximumHeight(120)
+        control_panel.setMaximumHeight(140)  # 增加高度，从120调整到140
         layout.addWidget(control_panel)
 
         # 创建水平布局容纳图形和颜色条
@@ -1217,19 +1216,64 @@ class TimeSpacePlotWidgetV2(QWidget):
         self.histogram_widget.setFixedWidth(90)  # 减小宽度，避免与主图重叠
         self.histogram_widget.setMinimumHeight(400)
 
-        # 设置初始颜色范围
+        # 从控制面板获取初始颜色范围，不使用自动更新
+        # 颜色范围完全由前面板控制
         self.histogram_widget.setLevels(self._vmin, self._vmax)
 
         # 应用初始颜色映射
         self._apply_initial_colormap_to_histogram()
 
-        # 连接颜色范围变化信号，实现交互式调整
-        self.histogram_widget.sigLevelsChanged.connect(self._on_histogram_levels_changed)
+        # 注意：不连接sigLevelsChanged信号，避免自动更新vmin/vmax
+        # 颜色范围完全由控制面板的spinbox控制
 
         # 设置背景为白色
         self.histogram_widget.setBackground('w')
 
-        log.debug("HistogramLUTWidget colorbar created with interactive controls")
+        log.debug("HistogramLUTWidget colorbar created (manual control mode)")
+
+    def _on_plot_button_clicked(self, checked: bool):
+        """处理PLOT按钮点击事件"""
+        self._plot_enabled = checked
+        self._update_plot_button_style()
+
+        # 发射信号通知主窗口
+        if hasattr(self, 'plotStateChanged'):
+            self.plotStateChanged.emit(self._plot_enabled)
+
+        log.info(f"Time-space plot {'enabled' if self._plot_enabled else 'disabled'}")
+
+    def _update_plot_button_style(self):
+        """更新PLOT按钮样式"""
+        if self._plot_enabled:
+            # 绿色：正在绘图
+            self.plot_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #4CAF50;
+                    color: white;
+                    border: 1px solid #45a049;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #45a049;
+                }
+            """)
+        else:
+            # 灰色：停止绘图
+            self.plot_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #9E9E9E;
+                    color: white;
+                    border: 1px solid #757575;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #757575;
+                }
+            """)
+
+    def is_plot_enabled(self) -> bool:
+        """返回当前绘图状态"""
+        return self._plot_enabled
 
     def _apply_initial_colormap_to_histogram(self):
         """为HistogramLUTWidget应用初始颜色映射"""
@@ -1271,36 +1315,6 @@ class TimeSpacePlotWidgetV2(QWidget):
         except Exception as e:
             log.warning(f"Error applying initial colormap to histogram: {e}")
 
-    def _on_histogram_levels_changed(self):
-        """处理直方图颜色范围变化"""
-        try:
-            # 获取用户通过直方图调整的新范围
-            levels = self.histogram_widget.getLevels()
-            if levels is not None and len(levels) == 2:
-                new_vmin, new_vmax = levels
-
-                # 更新内部参数
-                self._vmin = new_vmin
-                self._vmax = new_vmax
-
-                # 同步更新控制面板的数值输入框
-                if hasattr(self, 'vmin_spin'):
-                    self.vmin_spin.blockSignals(True)
-                    self.vmin_spin.setValue(new_vmin)
-                    self.vmin_spin.blockSignals(False)
-
-                if hasattr(self, 'vmax_spin'):
-                    self.vmax_spin.blockSignals(True)
-                    self.vmax_spin.setValue(new_vmax)
-                    self.vmax_spin.blockSignals(False)
-
-                # 发射参数变化信号
-                self.parametersChanged.emit()
-
-                log.debug(f"Histogram levels changed: [{new_vmin:.3f}, {new_vmax:.3f}]")
-
-        except Exception as e:
-            log.warning(f"Error handling histogram levels change: {e}")
 
     def _apply_colormap_v2(self):
         """为 PlotWidget 版本应用颜色映射"""
@@ -1356,21 +1370,18 @@ class TimeSpacePlotWidgetV2(QWidget):
 
     def _create_control_panel_v2(self):
         """创建控制面板 - 完整实现"""
-        group = QGroupBox("Time-Space Plot Controls (PlotWidget Version)")
+        group = QGroupBox()  # 移除标题文字
         group.setFont(QFont("Times New Roman", 9))
 
         layout = QGridLayout(group)
         layout.setHorizontalSpacing(15)
         layout.setVerticalSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)  # 减少上边距
 
-        # 添加状态指示标签
-        info_label = QLabel("✓ Using PlotWidget for reliable axis display")
-        info_label.setFont(QFont("Times New Roman", 8))
-        info_label.setStyleSheet("color: blue; font-weight: bold;")
-        layout.addWidget(info_label, 0, 0, 1, -1)
+        # 删除状态指示标签，直接开始第一行控件
 
-        # Row 1: Distance Range + Window Frames + Time Downsample + Space Downsample
-        row = 1
+        # Row 0: Distance Range + Window Frames + Time Downsample + Space Downsample (上移一行)
+        row = 0
 
         # Distance Range controls
         distance_label = QLabel("Distance Range:")
@@ -1451,8 +1462,8 @@ class TimeSpacePlotWidgetV2(QWidget):
         self.space_downsample_spin.valueChanged.connect(self._on_space_downsample_changed_v2)
         layout.addWidget(self.space_downsample_spin, row, 10)
 
-        # Row 2: Color Range + Colormap + Update Interval + Reset Button
-        row = 2
+        # Row 1: Color Range + Colormap + Reset Button + PLOT Button (上移一行)
+        row = 1
 
         # Color Range controls
         color_range_label = QLabel("Color Range:")
@@ -1466,7 +1477,7 @@ class TimeSpacePlotWidgetV2(QWidget):
         layout.addWidget(min_label, row, 1)
 
         self.vmin_spin = QDoubleSpinBox()
-        self.vmin_spin.setRange(-1.0, 1.0)
+        self.vmin_spin.setRange(-10000.0, 10000.0)  # 扩大范围到±10000
         self.vmin_spin.setDecimals(3)
         self.vmin_spin.setSingleStep(0.001)
         self.vmin_spin.setValue(-0.1)
@@ -1482,7 +1493,7 @@ class TimeSpacePlotWidgetV2(QWidget):
         layout.addWidget(max_label, row, 3)
 
         self.vmax_spin = QDoubleSpinBox()
-        self.vmax_spin.setRange(-1.0, 1.0)
+        self.vmax_spin.setRange(-10000.0, 10000.0)  # 扩大范围到±10000
         self.vmax_spin.setDecimals(3)
         self.vmax_spin.setSingleStep(0.001)
         self.vmax_spin.setValue(0.1)
@@ -1508,29 +1519,24 @@ class TimeSpacePlotWidgetV2(QWidget):
         self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed_v2)
         layout.addWidget(self.colormap_combo, row, 6)
 
-        # Update Interval
-        interval_label = QLabel("Update Interval:")
-        interval_label.setFont(QFont("Times New Roman", 8))
-        interval_label.setMinimumHeight(22)
-        layout.addWidget(interval_label, row, 7)
-
-        self.update_interval_spin = QSpinBox()
-        self.update_interval_spin.setRange(50, 5000)
-        self.update_interval_spin.setValue(self._update_interval_ms)
-        self.update_interval_spin.setSuffix(" ms")
-        self.update_interval_spin.setMaximumWidth(80)
-        self.update_interval_spin.setMinimumHeight(22)
-        self.update_interval_spin.setFont(QFont("Times New Roman", 8))
-        self.update_interval_spin.valueChanged.connect(self._on_update_interval_changed_v2)
-        layout.addWidget(self.update_interval_spin, row, 8)
-
         # Reset Button
         reset_btn = QPushButton("Reset to Defaults")
         reset_btn.setFont(QFont("Times New Roman", 8))
         reset_btn.setMaximumWidth(120)
         reset_btn.setMinimumHeight(22)
         reset_btn.clicked.connect(self._reset_to_defaults_v2)
-        layout.addWidget(reset_btn, row, 9, 1, 2)
+        layout.addWidget(reset_btn, row, 7)
+
+        # PLOT Button (替代原来的Time-space模式选择)
+        self.plot_btn = QPushButton("PLOT")
+        self.plot_btn.setFont(QFont("Times New Roman", 8, QFont.Bold))
+        self.plot_btn.setMaximumWidth(60)
+        self.plot_btn.setMinimumHeight(22)
+        self.plot_btn.setCheckable(True)  # 可切换状态
+        self.plot_btn.setChecked(False)   # 初始状态：停止
+        self._update_plot_button_style()
+        self.plot_btn.clicked.connect(self._on_plot_button_clicked)
+        layout.addWidget(self.plot_btn, row, 8)
 
         # 添加弹性空间
         layout.setColumnStretch(11, 1)
@@ -1541,6 +1547,11 @@ class TimeSpacePlotWidgetV2(QWidget):
         """PlotWidget版本的数据更新方法"""
         try:
             log.debug(f"PlotWidget version received data shape: {data.shape}")
+
+            # 检查绘图是否启用
+            if not self._plot_enabled:
+                log.debug("Plot disabled, skipping data update")
+                return False
 
             if data.ndim == 1:
                 data = data.reshape(1, -1)
@@ -1594,12 +1605,9 @@ class TimeSpacePlotWidgetV2(QWidget):
             return None
 
     def _schedule_display_update_v2(self):
-        """调度显示更新"""
-        if not self._display_timer.isActive():
-            self._display_timer.start(self._update_interval_ms)
-            self._pending_update = False
-        else:
-            self._pending_update = True
+        """直接更新显示，不使用定时器控制"""
+        # 改为每帧直接更新，不使用定时器延迟
+        self._update_display_v2()
 
     def _update_display_v2(self):
         """PlotWidget版本的显示更新 - 正确的坐标轴定义"""
@@ -1744,11 +1752,6 @@ class TimeSpacePlotWidgetV2(QWidget):
 
             log.debug("PlotWidget display updated with corrected axes (Y=distance, X=time)")
 
-            # 处理待处理的更新
-            if self._pending_update:
-                self._pending_update = False
-                self._display_timer.start(self._update_interval_ms)
-
         except Exception as e:
             log.error(f"Error updating PlotWidget display: {e}")
             import traceback
@@ -1887,10 +1890,6 @@ class TimeSpacePlotWidgetV2(QWidget):
             self._data_buffer.clear()
         self.parametersChanged.emit()
 
-    def _on_update_interval_changed_v2(self, value: int):
-        """处理更新间隔变化"""
-        self._update_interval_ms = value
-        self.parametersChanged.emit()
         log.debug(f"Update interval changed to {value}ms")
 
     def _on_colormap_changed_v2(self, text: str):
@@ -1905,22 +1904,18 @@ class TimeSpacePlotWidgetV2(QWidget):
     def _on_vmin_changed_v2(self, value: float):
         """处理最小颜色值变化"""
         self._vmin = value
-        # 同步更新HistogramLUTWidget，但阻止信号循环
+        # 更新HistogramLUTWidget显示范围（单向控制）
         if hasattr(self, 'histogram_widget'):
-            self.histogram_widget.sigLevelsChanged.disconnect()
             self.histogram_widget.setLevels(self._vmin, self._vmax)
-            self.histogram_widget.sigLevelsChanged.connect(self._on_histogram_levels_changed)
         self._update_display_v2()
         self.parametersChanged.emit()
 
     def _on_vmax_changed_v2(self, value: float):
         """处理最大颜色值变化"""
         self._vmax = value
-        # 同步更新HistogramLUTWidget，但阻止信号循环
+        # 更新HistogramLUTWidget显示范围（单向控制）
         if hasattr(self, 'histogram_widget'):
-            self.histogram_widget.sigLevelsChanged.disconnect()
             self.histogram_widget.setLevels(self._vmin, self._vmax)
-            self.histogram_widget.sigLevelsChanged.connect(self._on_histogram_levels_changed)
         self._update_display_v2()
         self.parametersChanged.emit()
 
@@ -1934,7 +1929,6 @@ class TimeSpacePlotWidgetV2(QWidget):
         self._colormap = "jet"
         self._vmin = -0.1
         self._vmax = 0.1
-        self._update_interval_ms = 100
 
         # 更新UI控件
         self.window_frames_spin.setValue(self._window_frames)
@@ -1945,7 +1939,6 @@ class TimeSpacePlotWidgetV2(QWidget):
         self.colormap_combo.setCurrentText("Jet")
         self.vmin_spin.setValue(self._vmin)
         self.vmax_spin.setValue(self._vmax)
-        self.update_interval_spin.setValue(self._update_interval_ms)
 
         # 清空缓冲区
         if self._data_buffer is not None:
@@ -1965,8 +1958,7 @@ class TimeSpacePlotWidgetV2(QWidget):
             'space_downsample': self._space_downsample,
             'colormap_type': self._colormap,
             'vmin': self._vmin,
-            'vmax': self._vmax,
-            'update_interval_ms': self._update_interval_ms
+            'vmax': self._vmax
         }
 
     def set_parameters(self, params):
@@ -1990,8 +1982,6 @@ class TimeSpacePlotWidgetV2(QWidget):
             self.vmin_spin.setValue(params['vmin'])
         if 'vmax' in params:
             self.vmax_spin.setValue(params['vmax'])
-        if 'update_interval_ms' in params:
-            self.update_interval_spin.setValue(params['update_interval_ms'])
 
     def update_data(self, data: np.ndarray) -> bool:
         """数据更新接口 - 兼容原接口"""
