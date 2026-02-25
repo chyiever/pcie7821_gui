@@ -1145,6 +1145,10 @@ class TimeSpacePlotWidgetV2(QWidget):
         view_box.setMouseEnabled(x=True, y=True)
         view_box.setAspectLocked(False)
 
+        # 重要：初始化时禁用自动范围，为后续手动控制做准备
+        view_box.enableAutoRange(enable=False)
+        view_box.setAutoVisible(x=False, y=False)
+
         # 创建手动 ColorBar
         self._create_colorbar_v2()
 
@@ -1495,17 +1499,28 @@ class TimeSpacePlotWidgetV2(QWidget):
             return
 
         try:
-            # 合并缓冲区数据
+            # 合并缓冲区数据 - 确保时间顺序正确
             buffer_list = list(self._data_buffer)
             time_space_data = np.concatenate(buffer_list, axis=0)
 
             log.debug(f"PlotWidget updating display with data shape: {time_space_data.shape}")
+            log.debug(f"Data buffer length: {len(self._data_buffer)}, window_frames: {self._window_frames}")
 
-            # 重要：根据用户要求，需要转置数据！
+            # 重要：确保正确的数据方向用于time-space显示
             # 原始数据: (time_frames, space_points)
-            # 显示需求: Y轴=distance, X轴=time
-            # 因此需要转置: (space_points, time_frames)
-            display_data = time_space_data.T  # 转置数据
+            # 显示需求: Y轴=distance, X轴=time (最新数据在右侧)
+
+            # 步骤1: 转置数据 (space_points, time_frames)
+            display_data = time_space_data.T
+
+            # 步骤2: 确保时间方向正确 - 最新数据在右侧
+            # PyQtGraph的图像显示：左下角为原点，向右为X+，向上为Y+
+            # 我们需要确保最新的时间帧在X轴的右侧
+            # 如果数据顺序需要反转，则执行下面的操作
+            # display_data = np.fliplr(display_data)  # 如果需要左右翻转时间轴
+
+            log.debug(f"Time-space data shape after processing: {display_data.shape} (space, time)")
+            log.debug(f"Display data range: [{np.min(display_data):.3f}, {np.max(display_data):.3f}]")
 
             # 设置图像数据
             self.image_item.setImage(display_data, levels=[self._vmin, self._vmax])
@@ -1552,19 +1567,35 @@ class TimeSpacePlotWidgetV2(QWidget):
             # 计算时间长度：帧数 / 扫描频率
             time_duration_s = n_time_points / scan_rate_hz
 
-            # 设置ViewBox范围 - 匹配实际的时间和距离坐标
+            # 设置ViewBox范围 - 强制Y轴从distance_start开始
             view_box = self.plot_widget.getViewBox()
+
+            # 禁用自动缩放，强制使用指定范围
+            view_box.enableAutoRange(enable=False)
+            view_box.setAutoVisible(x=False, y=False)
 
             # X轴：时间范围 [0, time_duration_s]，无冗余
             view_box.setXRange(0, time_duration_s, padding=0)
 
-            # Y轴：距离范围 [distance_start, distance_end]，无冗余
+            # Y轴：距离范围 [distance_start, distance_end]，无冗余 - 强制设置
             view_box.setYRange(distance_start, distance_end, padding=0)
 
-            # 设置自定义刻度标签 - 使用实际坐标值
+            # 额外确保范围设置
+            view_box.setLimits(xMin=0, xMax=time_duration_s,
+                              yMin=distance_start, yMax=distance_end)
+
+            # 设置自定义刻度标签 - 强制使用实际坐标值
             self._setup_custom_ticks_v2_corrected(
                 distance_start, distance_end, time_duration_s
             )
+
+            # 强制禁用自动刻度，确保使用我们的自定义刻度
+            bottom_axis = self.plot_widget.getAxis('bottom')
+            left_axis = self.plot_widget.getAxis('left')
+            if bottom_axis:
+                bottom_axis.enableAutoSIPrefix(False)
+            if left_axis:
+                left_axis.enableAutoSIPrefix(False)
 
             # 更新轴标签 - 正确的定义
             self.plot_widget.setLabel('bottom', f'Time (s, total: {time_duration_s:.1f}s)')
