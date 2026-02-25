@@ -708,53 +708,104 @@ class MainWindow(QMainWindow):
         tab1_layout.setSpacing(10)
         tab1_layout.setContentsMargins(5, 5, 5, 10)
 
-        # Create plots
-        self.plot_widget_1 = pg.PlotWidget(title="Time Domain Data")
-        self.plot_widget_2 = pg.PlotWidget(title="FFT Spectrum")
-        self.plot_widget_3 = pg.PlotWidget(title="Monitor (Fiber End Detection)")
+        # Create plots with custom titles and styling
+        self.plot_widget_1 = pg.PlotWidget()  # Remove title, will set via label
+        self.plot_widget_2 = pg.PlotWidget()
+        self.plot_widget_3 = pg.PlotWidget()
 
-        # Configure plot styles - white background
-        for pw in [self.plot_widget_1, self.plot_widget_2, self.plot_widget_3]:
+        # Configure plot styles - white background and custom title styling
+        plot_titles = ["Time Domain Data", "FFT Spectrum", "Monitor (Fiber End Detection)"]
+        self.plot_widgets = [self.plot_widget_1, self.plot_widget_2, self.plot_widget_3]
+
+        for i, pw in enumerate(self.plot_widgets):
             pw.setBackground('w')  # White background
 
-            # Grid and tick configuration
-            pw.showGrid(x=True, y=True, alpha=0.6)
+            # Set custom title with New Roman font and dark blue color
+            title_label = pw.setLabel('top', plot_titles[i])
 
+            # Force dark blue color for title - multiple methods to ensure it works
+            title_item = pw.getPlotItem().titleLabel.item
+            title_item.setFont(QFont("Times New Roman", 9))
+
+            # Method 1: Set default text color
+            title_item.setDefaultTextColor(QColor(0, 0, 139))  # Dark blue
+
+            # Method 2: Set HTML color (backup method)
+            blue_title = f'<span style="color: rgb(0,0,139); font-family: Times New Roman; font-size: 9pt">{plot_titles[i]}</span>'
+            pw.setLabel('top', blue_title)
+
+            # Method 3: Force color via stylesheet if available
+            try:
+                title_item.document().setDefaultStyleSheet("color: rgb(0,0,139);")
+            except:
+                pass
+
+            # Configure axes - keep top axis for title but hide its ticks
             x_axis = pw.getAxis('bottom')
             y_axis = pw.getAxis('left')
+            top_axis = pw.getAxis('top')
+            right_axis = pw.getAxis('right')
 
-            # Increased bottom offset to prevent label overlap
-            x_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=15)
-            y_axis.setStyle(showValues=True, tickLength=5, tickTextOffset=8)
+            # Show top axis (for title) but hide its ticks and values
+            pw.showAxis('top', show=True)   # Keep for title
+            pw.showAxis('right', show=False) # Hide completely
 
-            pw.getPlotItem().getViewBox().setBackgroundColor('w')
+            # Hide top axis ticks and values but keep the title
+            top_axis.setStyle(showValues=False, tickLength=0)
 
-            # Set axis and title colors for white background
-            pw.getAxis('left').setPen('k')
-            pw.getAxis('bottom').setPen('k')
-            pw.getAxis('left').setTextPen('k')
-            pw.getAxis('bottom').setTextPen('k')
+            # Hide right axis completely
+            # (already done with showAxis above)
 
-            # Set font for axis labels and numbers - Times New Roman, larger size
-            font = QFont("Times New Roman", 12)  # 12pt font
-            pw.getAxis('left').setTickFont(font)
-            pw.getAxis('bottom').setTickFont(font)
+            # Grid and tick configuration with smaller fonts
+            pw.showGrid(x=True, y=True, alpha=0.6)
 
-        # Plot 1 - Time domain
-        self.plot_widget_1.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        self.plot_widget_1.setLabel('bottom', 'Sample', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+            # Set smaller fonts for axes
+            axis_font = QFont("Times New Roman", 8)
+            tick_font = QFont("Times New Roman", 7)
+
+            # Configure tick style with reduced spacing
+            x_axis.setStyle(showValues=True, tickLength=4, tickTextOffset=6)  # Reduced offset
+            y_axis.setStyle(showValues=True, tickLength=4, tickTextOffset=4)  # Reduced offset
+
+            # Set tick fonts (smaller)
+            x_axis.setTickFont(tick_font)
+            y_axis.setTickFont(tick_font)
+
+            # Set axis colors
+            x_axis.setPen('k')
+            y_axis.setPen('k')
+            x_axis.setTextPen('k')
+            y_axis.setTextPen('k')
+
+        # Set specific labels for each plot with smaller fonts
+        # Plot 1: Time Domain
+        self.plot_widget_1.setLabel('bottom', 'Sample Index',
+                                   color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
+        self.plot_widget_1.setLabel('left', 'Amp. (Volts)',
+                                   color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
+
+        # Plot 2: FFT Spectrum
+        self.plot_widget_2.setLabel('bottom', 'Frequency (Hz)',
+                                   color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
+        self.plot_widget_2.setLabel('left', 'Amp. (dB)',
+                                   color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
+
+        # Plot 3: Monitor
+        self.plot_widget_3.setLabel('bottom', 'Point Index',
+                                   color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
+        self.plot_widget_3.setLabel('left', 'Amp.',
+                                   color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
+
+        # Plot curves setup - labels already set above
+        # Plot 1 - Time Domain
         self.plot_curve_1 = []
 
         # Plot 2 - Spectrum
-        self.plot_widget_2.setLabel('left', 'Power', units='dB', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        self.plot_widget_2.setLabel('bottom', 'Frequency', units='Hz', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         # Linear scale for both axes (dB values already in log scale)
         self.plot_widget_2.setLogMode(x=False, y=False)
         self.spectrum_curve = self.plot_widget_2.plot(pen=pg.mkPen('#9467bd', width=1.5))  # Purple
 
         # Plot 3 - Monitor
-        self.plot_widget_3.setLabel('left', 'Amplitude', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-        self.plot_widget_3.setLabel('bottom', 'Position', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
         self.monitor_curves = []
 
         # Add plots to layout with balanced heights and proper scaling
@@ -763,14 +814,21 @@ class MainWindow(QMainWindow):
         self.plot_widget_1.setMaximumHeight(210)  # Controlled height range
         self.plot_widget_1.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        self.plot_widget_2.setMinimumHeight(180)  # FFT Spectrum plot - increased
-        self.plot_widget_2.setMaximumHeight(210)  # Controlled height range
+        # Adjust plot heights - increase since text is smaller
+        self.plot_widget_1.setMinimumHeight(200)  # Time Domain - increased
+        self.plot_widget_1.setMaximumHeight(250)
+        self.plot_widget_1.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        self.plot_widget_2.setMinimumHeight(200)  # FFT Spectrum - increased
+        self.plot_widget_2.setMaximumHeight(250)
         self.plot_widget_2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        self.plot_widget_3.setMinimumHeight(130)  # Monitor plot - increased
-        self.plot_widget_3.setMaximumHeight(160)  # Controlled height range
+        self.plot_widget_3.setMinimumHeight(150)  # Monitor plot - increased
+        self.plot_widget_3.setMaximumHeight(180)
         self.plot_widget_3.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
+        # Reduce spacing between plots
+        tab1_layout.setSpacing(5)  # Reduced from default spacing
         tab1_layout.addWidget(self.plot_widget_1)
         tab1_layout.addWidget(self.plot_widget_2)
         tab1_layout.addWidget(self.plot_widget_3)

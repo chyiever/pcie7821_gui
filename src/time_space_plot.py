@@ -1116,10 +1116,10 @@ class TimeSpacePlotWidgetV2(QWidget):
         self.image_item = pg.ImageItem()
         self.plot_widget.addItem(self.image_item)
 
-        # 完全可靠的轴配置
-        self.plot_widget.setLabel('bottom', 'Distance (points)',
+        # 完全可靠的轴配置 - 正确的坐标轴定义
+        self.plot_widget.setLabel('bottom', 'Time (s)',
                                 color='k', **{'font-size': '10pt', 'font-family': 'Times New Roman'})
-        self.plot_widget.setLabel('left', 'Time (samples)',
+        self.plot_widget.setLabel('left', 'Distance (points)',
                                 color='k', **{'font-size': '10pt', 'font-family': 'Times New Roman'})
 
         # 确保坐标轴显示
@@ -1490,7 +1490,7 @@ class TimeSpacePlotWidgetV2(QWidget):
             self._pending_update = True
 
     def _update_display_v2(self):
-        """PlotWidget版本的显示更新 - 修复坐标和定位问题"""
+        """PlotWidget版本的显示更新 - 正确的坐标轴定义"""
         if not self._data_buffer or len(self._data_buffer) == 0:
             return
 
@@ -1501,40 +1501,55 @@ class TimeSpacePlotWidgetV2(QWidget):
 
             log.debug(f"PlotWidget updating display with data shape: {time_space_data.shape}")
 
+            # 重要：根据用户要求，需要转置数据！
+            # 原始数据: (time_frames, space_points)
+            # 显示需求: Y轴=distance, X轴=time
+            # 因此需要转置: (space_points, time_frames)
+            display_data = time_space_data.T  # 转置数据
+
             # 设置图像数据
-            self.image_item.setImage(time_space_data, levels=[self._vmin, self._vmax])
+            self.image_item.setImage(display_data, levels=[self._vmin, self._vmax])
 
-            # 获取数据维度
-            n_time_points, n_spatial_points = time_space_data.shape
+            # 获取转置后的数据维度
+            n_spatial_points, n_time_points = display_data.shape  # 现在space在Y方向，time在X方向
 
-            # 计算实际的距离范围
-            distance_start = self._distance_start
-            distance_step = self._space_downsample
-            distance_end = distance_start + n_spatial_points * distance_step
-
-            # 重要修复：设置图像的正确坐标范围
-            # 图像应该从(0,0)开始，占据 [0, n_spatial_points] x [0, n_time_points]
-            # 然后通过坐标轴范围映射到实际的距离值
-
-            # 方法1: 使用setRect直接设置图像边界
+            # 设置图像边界 - 从(0,0)开始
             self.image_item.setRect(pg.QtCore.QRectF(
-                0, 0,  # 起始位置 (左下角)
-                n_spatial_points, n_time_points  # 宽度和高度（像素单位）
+                0, 0,  # 起始位置
+                n_time_points, n_spatial_points  # 宽度(时间), 高度(空间)
             ))
 
-            # 方法2: 设置坐标轴的显示范围来映射到实际距离值
+            # 计算实际的坐标范围
+            # Y轴: 距离范围 [distance_start, distance_end]，单位points
+            distance_start = self._distance_start
+            distance_end = self._distance_end
+
+            # X轴: 时间范围 [0, window_frames × (1/scan_rate)]，单位秒
+            # 从配置获取scan_rate，如果没有则使用默认值
+            from config import DASConfig
+            try:
+                config = DASConfig()
+                scan_rate_hz = config.basic.scan_rate  # Hz
+            except:
+                scan_rate_hz = 2000  # 默认值
+
+            # 计算时间长度：帧数 / 扫描频率
+            time_duration_s = n_time_points / scan_rate_hz
+
+            # 设置ViewBox范围
             view_box = self.plot_widget.getViewBox()
+            view_box.setXRange(0, n_time_points, padding=0)  # X轴: 时间像素
+            view_box.setYRange(0, n_spatial_points, padding=0)  # Y轴: 空间像素
 
-            # 设置X轴范围：显示图像的像素坐标范围，但轴标签显示实际距离
-            view_box.setXRange(0, n_spatial_points, padding=0)  # 无padding，紧贴轴
-            view_box.setYRange(0, n_time_points, padding=0)     # 无padding，紧贴轴
+            # 设置自定义刻度标签
+            self._setup_custom_ticks_v2_corrected(
+                distance_start, distance_end, n_spatial_points,
+                time_duration_s, n_time_points
+            )
 
-            # 设置自定义的刻度标签
-            self._setup_custom_ticks_v2(distance_start, distance_step, n_spatial_points, n_time_points)
-
-            # 更新轴标签
-            self.plot_widget.setLabel('bottom', f'Distance (points: {distance_start} to {distance_end-distance_step}, step={distance_step})')
-            self.plot_widget.setLabel('left', f'Time (samples, total: {n_time_points})')
+            # 更新轴标签 - 正确的定义
+            self.plot_widget.setLabel('bottom', f'Time (s, total: {time_duration_s:.1f}s)')
+            self.plot_widget.setLabel('left', f'Distance (points: {distance_start} to {distance_end})')
 
             # 应用颜色映射
             self._apply_colormap_v2()
@@ -1542,7 +1557,7 @@ class TimeSpacePlotWidgetV2(QWidget):
             # 更新颜色条范围
             self._update_colorbar_range()
 
-            log.debug("PlotWidget display updated with corrected coordinates")
+            log.debug("PlotWidget display updated with corrected axes (Y=distance, X=time)")
 
             # 处理待处理的更新
             if self._pending_update:
@@ -1554,56 +1569,71 @@ class TimeSpacePlotWidgetV2(QWidget):
             import traceback
             traceback.print_exc()
 
-    def _setup_custom_ticks_v2(self, distance_start, distance_step, n_spatial_points, n_time_points):
-        """设置自定义的刻度标签"""
+    def _setup_custom_ticks_v2_corrected(self, distance_start, distance_end, n_spatial_points,
+                                         time_duration_s, n_time_points):
+        """设置正确的自定义刻度标签 - Y轴=distance, X轴=time"""
         try:
-            # X轴刻度：显示实际距离值
-            bottom_axis = self.plot_widget.getAxis('bottom')
-            if bottom_axis:
-                # 创建刻度映射：像素位置 -> 实际距离值
-                tick_positions = []
-                tick_labels = []
-
-                # 每10个像素显示一个刻度（可调整）
-                tick_interval = max(1, n_spatial_points // 10)
-                for i in range(0, n_spatial_points, tick_interval):
-                    actual_distance = distance_start + i * distance_step
-                    tick_positions.append(i)
-                    tick_labels.append(str(actual_distance))
-
-                # 确保起始和结束位置有刻度
-                if n_spatial_points - 1 not in [pos for pos in tick_positions]:
-                    tick_positions.append(n_spatial_points - 1)
-                    tick_labels.append(str(distance_start + (n_spatial_points - 1) * distance_step))
-
-                # 设置自定义刻度
-                ticks = list(zip(tick_positions, tick_labels))
-                bottom_axis.setTicks([ticks])
-
-            # Y轴刻度：显示时间采样点
+            # Y轴刻度：显示实际距离值 (distance range, 与降采样无关)
             left_axis = self.plot_widget.getAxis('left')
             if left_axis:
-                # 时间轴每显示几个主要刻度
-                tick_interval = max(1, n_time_points // 8)
+                # 创建距离刻度映射：像素位置 -> 实际距离值
+                # Y轴对应距离范围 [distance_start, distance_end]
                 tick_positions = []
                 tick_labels = []
 
-                for i in range(0, n_time_points, tick_interval):
+                # 计算距离步长
+                distance_range = distance_end - distance_start
+                pixel_to_distance_ratio = distance_range / n_spatial_points
+
+                # 每10-15像素显示一个刻度（可调整）
+                tick_interval = max(1, n_spatial_points // 8)
+                for i in range(0, n_spatial_points, tick_interval):
+                    # 将像素位置映射到实际距离
+                    actual_distance = distance_start + (i * pixel_to_distance_ratio)
                     tick_positions.append(i)
-                    tick_labels.append(str(i))
+                    tick_labels.append(f"{actual_distance:.0f}")
+
+                # 确保起始和结束位置有刻度
+                if 0 not in tick_positions:
+                    tick_positions.insert(0, 0)
+                    tick_labels.insert(0, str(distance_start))
+
+                if n_spatial_points - 1 not in tick_positions:
+                    tick_positions.append(n_spatial_points - 1)
+                    tick_labels.append(str(distance_end))
+
+                # 设置Y轴自定义刻度
+                ticks_y = list(zip(tick_positions, tick_labels))
+                left_axis.setTicks([ticks_y])
+
+            # X轴刻度：显示时间(秒)
+            bottom_axis = self.plot_widget.getAxis('bottom')
+            if bottom_axis:
+                tick_positions = []
+                tick_labels = []
+
+                # 时间轴，每显示几个主要刻度
+                tick_interval = max(1, n_time_points // 10)
+                pixel_to_time_ratio = time_duration_s / n_time_points
+
+                for i in range(0, n_time_points, tick_interval):
+                    # 将像素位置映射到实际时间
+                    actual_time = i * pixel_to_time_ratio
+                    tick_positions.append(i)
+                    tick_labels.append(f"{actual_time:.1f}")
 
                 # 添加最后一个刻度
                 if n_time_points - 1 not in tick_positions:
                     tick_positions.append(n_time_points - 1)
-                    tick_labels.append(str(n_time_points - 1))
+                    tick_labels.append(f"{time_duration_s:.1f}")
 
-                ticks = list(zip(tick_positions, tick_labels))
-                left_axis.setTicks([ticks])
+                ticks_x = list(zip(tick_positions, tick_labels))
+                bottom_axis.setTicks([ticks_x])
 
-            log.debug(f"Set custom ticks: X={len(tick_positions)} ticks, Y={len(tick_positions)} ticks")
+            log.debug(f"Set corrected ticks: Y={len(ticks_y)} distance ticks, X={len(ticks_x)} time ticks")
 
         except Exception as e:
-            log.warning(f"Error setting custom ticks: {e}")
+            log.warning(f"Error setting corrected custom ticks: {e}")
 
     def _update_colorbar_range(self):
         """更新颜色条的范围"""
