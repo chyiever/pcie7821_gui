@@ -1089,9 +1089,20 @@ class TimeSpacePlotWidgetV2(QWidget):
         control_panel.setMaximumHeight(120)
         layout.addWidget(control_panel)
 
+        # 创建水平布局容纳图形和颜色条
+        plot_layout = QHBoxLayout()
+
         # 创建 PlotWidget 替代 ImageView
         self._create_plot_area_v2()
-        layout.addWidget(self.plot_widget, 1)
+        plot_layout.addWidget(self.plot_widget, 1)  # 给图形更大比重
+
+        # 创建颜色条
+        self._create_colorbar_v2()
+        plot_layout.addWidget(self.colorbar_widget)  # 添加颜色条
+
+        plot_widget = QWidget()
+        plot_widget.setLayout(plot_layout)
+        layout.addWidget(plot_widget, 1)
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -1137,16 +1148,55 @@ class TimeSpacePlotWidgetV2(QWidget):
         # 创建手动 ColorBar
         self._create_colorbar_v2()
 
+        # 应用初始colormap
+        self._apply_colormap_v2()
+
         log.info("PlotWidget plot area created with guaranteed axis display")
 
     def _create_colorbar_v2(self):
-        """创建手动的 ColorBar"""
-        # 创建一个简单的颜色条显示
-        # 注意：这需要额外的布局管理
-        self.color_bar = pg.ColorBarItem(interactive=False, width=15)
+        """创建完整的颜色条组件"""
+        # 创建颜色条的 PlotWidget
+        self.colorbar_widget = pg.PlotWidget()
+        self.colorbar_widget.setFixedWidth(80)  # 固定宽度
+        self.colorbar_widget.setMinimumHeight(400)
 
-        # 应用默认colormap
-        self._apply_colormap_v2()
+        # 隐藏颜色条的坐标轴，只保留右侧刻度
+        self.colorbar_widget.showAxis('left', show=False)
+        self.colorbar_widget.showAxis('bottom', show=False)
+        self.colorbar_widget.showAxis('top', show=False)
+        self.colorbar_widget.showAxis('right', show=True)
+
+        # 创建颜色条的数据 - 垂直梯度
+        colorbar_height = 256
+        colorbar_data = np.linspace(self._vmax, self._vmin, colorbar_height).reshape(-1, 1)
+
+        # 创建颜色条的 ImageItem
+        self.colorbar_image = pg.ImageItem(colorbar_data)
+        self.colorbar_widget.addItem(self.colorbar_image)
+
+        # 设置颜色条的坐标范围
+        self.colorbar_image.setRect(0, self._vmin, 1, self._vmax - self._vmin)
+
+        # 配置右侧刻度轴
+        right_axis = self.colorbar_widget.getAxis('right')
+        if right_axis:
+            font = QFont("Times New Roman", 9)
+            right_axis.setTickFont(font)
+            right_axis.setPen('k')
+            right_axis.setTextPen('k')
+            right_axis.setStyle(showValues=True)
+            right_axis.enableAutoSIPrefix(False)
+
+        # 设置ViewBox禁用鼠标交互
+        colorbar_view = self.colorbar_widget.getViewBox()
+        colorbar_view.setMouseEnabled(x=False, y=False)
+        colorbar_view.setXRange(0, 1)
+        colorbar_view.setYRange(self._vmin, self._vmax)
+
+        # 设置背景为白色
+        self.colorbar_widget.setBackground('w')
+
+        log.debug("Colorbar widget created successfully")
 
     def _apply_colormap_v2(self):
         """为 PlotWidget 版本应用颜色映射"""
@@ -1157,14 +1207,35 @@ class TimeSpacePlotWidgetV2(QWidget):
                     (0.0, (0, 0, 128)), (0.25, (0, 0, 255)),
                     (0.5, (0, 255, 255)), (0.75, (255, 255, 0)), (1.0, (255, 0, 0))
                 ]
+            elif self._colormap == "viridis":
+                colors = [
+                    (0.0, (68, 1, 84)), (0.25, (59, 82, 139)),
+                    (0.5, (33, 144, 140)), (0.75, (93, 201, 99)), (1.0, (253, 231, 37))
+                ]
+            elif self._colormap == "plasma":
+                colors = [
+                    (0.0, (13, 8, 135)), (0.25, (126, 3, 168)),
+                    (0.5, (203, 70, 121)), (0.75, (248, 149, 64)), (1.0, (240, 249, 33))
+                ]
+            elif self._colormap == "hot":
+                colors = [
+                    (0.0, (0, 0, 0)), (0.33, (255, 0, 0)),
+                    (0.66, (255, 255, 0)), (1.0, (255, 255, 255))
+                ]
+            elif self._colormap == "gray":
+                colors = [(0.0, (0, 0, 0)), (1.0, (255, 255, 255))]
             else:
                 colors = [(0.0, (0, 0, 255)), (0.5, (0, 255, 0)), (1.0, (255, 0, 0))]
 
             colormap = pg.ColorMap(pos=[c[0] for c in colors], color=[c[1] for c in colors])
 
-            # 设置 ImageItem 的颜色映射
+            # 设置主图像的颜色映射
             lut = colormap.getLookupTable(0.0, 1.0, 256)
             self.image_item.setLookupTable(lut)
+
+            # 同时更新颜色条的颜色映射
+            if hasattr(self, 'colorbar_image'):
+                self.colorbar_image.setLookupTable(lut)
 
             log.debug(f"Applied colormap to PlotWidget version: {self._colormap}")
 
@@ -1419,7 +1490,7 @@ class TimeSpacePlotWidgetV2(QWidget):
             self._pending_update = True
 
     def _update_display_v2(self):
-        """PlotWidget版本的显示更新"""
+        """PlotWidget版本的显示更新 - 修复坐标和定位问题"""
         if not self._data_buffer or len(self._data_buffer) == 0:
             return
 
@@ -1430,32 +1501,48 @@ class TimeSpacePlotWidgetV2(QWidget):
 
             log.debug(f"PlotWidget updating display with data shape: {time_space_data.shape}")
 
-            # 设置图像数据 - 关键: 使用正确的数据范围
+            # 设置图像数据
             self.image_item.setImage(time_space_data, levels=[self._vmin, self._vmax])
 
-            # 设置正确的坐标范围
+            # 获取数据维度
             n_time_points, n_spatial_points = time_space_data.shape
 
-            # 设置图像的几何变换，使其正确映射到坐标轴
+            # 计算实际的距离范围
             distance_start = self._distance_start
             distance_step = self._space_downsample
-
-            # ImageItem 的 transform 设置
-            tr = pg.QtGui.QTransform()
-            tr.translate(distance_start, 0)  # X方向偏移到起始距离
-            tr.scale(distance_step, 1)       # X方向按采样步长缩放
-            self.image_item.setTransform(tr)
-
-            # 更新轴标签以反映实际数据范围
             distance_end = distance_start + n_spatial_points * distance_step
-            self.plot_widget.setLabel('bottom',
-                                    f'Distance (points: {distance_start}:{distance_step}:{distance_end})')
-            self.plot_widget.setLabel('left', f'Time (samples, {n_time_points} total)')
+
+            # 重要修复：设置图像的正确坐标范围
+            # 图像应该从(0,0)开始，占据 [0, n_spatial_points] x [0, n_time_points]
+            # 然后通过坐标轴范围映射到实际的距离值
+
+            # 方法1: 使用setRect直接设置图像边界
+            self.image_item.setRect(pg.QtCore.QRectF(
+                0, 0,  # 起始位置 (左下角)
+                n_spatial_points, n_time_points  # 宽度和高度（像素单位）
+            ))
+
+            # 方法2: 设置坐标轴的显示范围来映射到实际距离值
+            view_box = self.plot_widget.getViewBox()
+
+            # 设置X轴范围：显示图像的像素坐标范围，但轴标签显示实际距离
+            view_box.setXRange(0, n_spatial_points, padding=0)  # 无padding，紧贴轴
+            view_box.setYRange(0, n_time_points, padding=0)     # 无padding，紧贴轴
+
+            # 设置自定义的刻度标签
+            self._setup_custom_ticks_v2(distance_start, distance_step, n_spatial_points, n_time_points)
+
+            # 更新轴标签
+            self.plot_widget.setLabel('bottom', f'Distance (points: {distance_start} to {distance_end-distance_step}, step={distance_step})')
+            self.plot_widget.setLabel('left', f'Time (samples, total: {n_time_points})')
 
             # 应用颜色映射
             self._apply_colormap_v2()
 
-            log.debug("PlotWidget display updated successfully with guaranteed axes")
+            # 更新颜色条范围
+            self._update_colorbar_range()
+
+            log.debug("PlotWidget display updated with corrected coordinates")
 
             # 处理待处理的更新
             if self._pending_update:
@@ -1466,6 +1553,78 @@ class TimeSpacePlotWidgetV2(QWidget):
             log.error(f"Error updating PlotWidget display: {e}")
             import traceback
             traceback.print_exc()
+
+    def _setup_custom_ticks_v2(self, distance_start, distance_step, n_spatial_points, n_time_points):
+        """设置自定义的刻度标签"""
+        try:
+            # X轴刻度：显示实际距离值
+            bottom_axis = self.plot_widget.getAxis('bottom')
+            if bottom_axis:
+                # 创建刻度映射：像素位置 -> 实际距离值
+                tick_positions = []
+                tick_labels = []
+
+                # 每10个像素显示一个刻度（可调整）
+                tick_interval = max(1, n_spatial_points // 10)
+                for i in range(0, n_spatial_points, tick_interval):
+                    actual_distance = distance_start + i * distance_step
+                    tick_positions.append(i)
+                    tick_labels.append(str(actual_distance))
+
+                # 确保起始和结束位置有刻度
+                if n_spatial_points - 1 not in [pos for pos in tick_positions]:
+                    tick_positions.append(n_spatial_points - 1)
+                    tick_labels.append(str(distance_start + (n_spatial_points - 1) * distance_step))
+
+                # 设置自定义刻度
+                ticks = list(zip(tick_positions, tick_labels))
+                bottom_axis.setTicks([ticks])
+
+            # Y轴刻度：显示时间采样点
+            left_axis = self.plot_widget.getAxis('left')
+            if left_axis:
+                # 时间轴每显示几个主要刻度
+                tick_interval = max(1, n_time_points // 8)
+                tick_positions = []
+                tick_labels = []
+
+                for i in range(0, n_time_points, tick_interval):
+                    tick_positions.append(i)
+                    tick_labels.append(str(i))
+
+                # 添加最后一个刻度
+                if n_time_points - 1 not in tick_positions:
+                    tick_positions.append(n_time_points - 1)
+                    tick_labels.append(str(n_time_points - 1))
+
+                ticks = list(zip(tick_positions, tick_labels))
+                left_axis.setTicks([ticks])
+
+            log.debug(f"Set custom ticks: X={len(tick_positions)} ticks, Y={len(tick_positions)} ticks")
+
+        except Exception as e:
+            log.warning(f"Error setting custom ticks: {e}")
+
+    def _update_colorbar_range(self):
+        """更新颜色条的范围"""
+        try:
+            if hasattr(self, 'colorbar_widget') and hasattr(self, 'colorbar_image'):
+                # 更新颜色条数据以反映新的范围
+                colorbar_height = 256
+                colorbar_data = np.linspace(self._vmax, self._vmin, colorbar_height).reshape(-1, 1)
+                self.colorbar_image.setImage(colorbar_data)
+
+                # 更新颜色条的坐标范围
+                self.colorbar_image.setRect(0, self._vmin, 1, self._vmax - self._vmin)
+
+                # 更新右侧刻度轴范围
+                colorbar_view = self.colorbar_widget.getViewBox()
+                colorbar_view.setYRange(self._vmin, self._vmax)
+
+                log.debug(f"Updated colorbar range: [{self._vmin}, {self._vmax}]")
+
+        except Exception as e:
+            log.warning(f"Error updating colorbar range: {e}")
 
     # ========== V2版本的参数变化处理方法 ==========
 
