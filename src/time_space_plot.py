@@ -478,13 +478,13 @@ class TimeSpacePlotWidget(QWidget):
 
             log.debug(f"Concatenated time-space data shape: {time_space_data.shape}")
 
-            # CRITICAL FIX: Transpose data to achieve correct coordinate mapping
-            # User requirement: X-axis = time (horizontal), Y-axis = distance (vertical)
+            # CRITICAL FIX: Keep original data orientation
+            # User feedback: transpose caused issues, use original orientation
             # Original data: (time_points, spatial_points)
-            # After transpose: (spatial_points, time_points) -> Y=distance, X=time
-            display_data = time_space_data.T  # Transpose: X=time, Y=distance
+            # Keep as: (time_points, spatial_points) -> Y=time, X=distance
+            display_data = time_space_data  # No transpose
 
-            log.debug(f"Final display data shape: {display_data.shape} (distance x time)")
+            log.debug(f"Final display data shape: {display_data.shape} (time x distance)")
             log.debug(f"Data range: [{np.min(display_data):.4f}, {np.max(display_data):.4f}]")
 
             # Update image view with proper coordinate mapping
@@ -836,7 +836,7 @@ class TimeSpacePlotWidget(QWidget):
             distance_end_actual = distance_start_actual + original_spatial_points * distance_step
 
             # Set coordinate mapping using setRect to map image coordinates to real coordinates
-            # After transpose: image shape is (spatial_points, time_points)
+            # NO transpose: image shape is (time_points, spatial_points)
             # We want: X=time [0, time_duration_s], Y=distance [distance_start, distance_end]
             image_item = self.image_view.getImageItem()
             if image_item:
