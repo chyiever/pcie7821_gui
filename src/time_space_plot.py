@@ -1229,7 +1229,36 @@ class TimeSpacePlotWidgetV2(QWidget):
         # 设置背景为白色
         self.histogram_widget.setBackground('w')
 
+        # 设置颜色栏刻度字体为Times New Roman
+        self._setup_colorbar_font()
+
         log.debug("HistogramLUTWidget colorbar created (manual control mode)")
+
+    def _setup_colorbar_font(self):
+        """设置颜色栏刻度字体为Times New Roman"""
+        try:
+            if not hasattr(self, 'histogram_widget') or self.histogram_widget is None:
+                return
+
+            # Get the plot item from histogram widget
+            plot_item = getattr(self.histogram_widget, 'plotItem', None)
+            if plot_item is None:
+                return
+
+            # Set Times New Roman font for colorbar axis
+            font = QFont("Times New Roman", 8)
+
+            # Configure the right axis (y-axis of the colorbar)
+            axis = plot_item.getAxis('left')
+            if axis:
+                axis.setTickFont(font)
+                axis.setPen('k')
+                axis.setTextPen('k')
+                axis.setStyle(showValues=True)
+                log.debug("Colorbar font set to Times New Roman")
+
+        except Exception as e:
+            log.debug(f"Could not set colorbar font: {e}")
 
     def _on_plot_button_clicked(self, checked: bool):
         """处理PLOT按钮点击事件"""
@@ -1708,7 +1737,8 @@ class TimeSpacePlotWidgetV2(QWidget):
                 scan_rate_hz = 2000  # 默认值
 
             # 计算时间长度：帧数 / 扫描频率
-            time_duration_s = n_time_points / scan_rate_hz
+            # 重要：使用original_time_points而不是n_time_points，确保时间范围不受降采样影响
+            time_duration_s = original_time_points / scan_rate_hz
 
             # 设置ViewBox范围 - 强制Y轴从distance_start开始
             view_box = self.plot_widget.getViewBox()

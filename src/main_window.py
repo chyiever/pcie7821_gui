@@ -237,7 +237,7 @@ class MainWindow(QMainWindow):
         # Apply stylesheet for fonts - Times New Roman for English text, SimHei for Chinese
         panel.setStyleSheet("""
             QGroupBox {
-                font-family: 'SimHei', 'Microsoft YaHei';
+                font-family: 'Arial';
                 font-size: 12px;
                 font-weight: bold;
             }
@@ -625,6 +625,24 @@ class MainWindow(QMainWindow):
         # Create tab widget
         self.plot_tabs = QTabWidget()
         self.plot_tabs.setTabPosition(QTabWidget.North)
+
+        # Set tab titles font style
+        self.plot_tabs.setStyleSheet("""
+            QTabWidget::tab-bar {
+                alignment: left;
+            }
+            QTabBar::tab {
+                font-family: 'Arial';
+                font-size: 12px;
+                font-weight: normal;
+                padding: 6px 15px;
+                margin: 1px;
+                min-width: 90px;
+            }
+            QTabBar::tab:selected {
+                font-weight: bold;
+            }
+        """)
 
         # Tab 1: Traditional plots (Time/Space + FFT + Monitor)
         self._create_traditional_plots_tab()
@@ -1506,22 +1524,22 @@ class MainWindow(QMainWindow):
                 # Set axis labels with explicit unit text (bypasses pyqtgraph auto-scaling)
                 if data_type == 'int':  # Phase data
                     self.plot_widget_2.setLabel('bottom', 'Frequency (Hz)',
-                                              **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                                              **{'font-family': 'Times New Roman', 'font-size': '8pt'})
                 else:  # Raw data
                     self.plot_widget_2.setLabel('bottom', 'Frequency (MHz)',
-                                              **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                                              **{'font-family': 'Times New Roman', 'font-size': '8pt'})
 
             # Y-axis label depends on PSD mode and data type
             if psd_mode:
                 if data_type == 'int':  # Phase: PSD in dB/Hz
                     self.plot_widget_2.setLabel('left', 'PSD (dB/Hz)',
-                                              **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                                              **{'font-family': 'Times New Roman', 'font-size': '8pt'})
                 else:  # Raw: PSD in dB/MHz
                     self.plot_widget_2.setLabel('left', 'PSD (dB/MHz)',
-                                              **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                                              **{'font-family': 'Times New Roman', 'font-size': '8pt'})
             else:
                 self.plot_widget_2.setLabel('left', 'Power (dB)',
-                                          **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+                                          **{'font-family': 'Times New Roman', 'font-size': '8pt'})
         except Exception as e:
             log.warning(f"Spectrum update error: {e}")
 
