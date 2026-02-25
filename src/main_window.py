@@ -418,13 +418,14 @@ class MainWindow(QMainWindow):
         phase_layout.addWidget(QLabel("Detrend(Hz):"), 2, 0)
         self.detrend_bw_spin = QDoubleSpinBox()
         self.detrend_bw_spin.setRange(0.0, 10000.0)
-        self.detrend_bw_spin.setValue(0.5)
+        self.detrend_bw_spin.setValue(10.0)  # 默认值改为10Hz
         self.detrend_bw_spin.setSingleStep(0.1)
         self.detrend_bw_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.detrend_bw_spin.setMaximumWidth(INPUT_MAX_WIDTH)
         phase_layout.addWidget(self.detrend_bw_spin, 2, 1)
 
         self.polar_div_check = QCheckBox("PolarDiv")
+        self.polar_div_check.setChecked(True)  # 默认勾选偏振分集功能
         phase_layout.addWidget(self.polar_div_check, 2, 2, 1, 2)
 
         layout.addWidget(phase_group)
@@ -883,6 +884,10 @@ class MainWindow(QMainWindow):
         self.frames_per_file_spin.valueChanged.connect(self._update_file_estimates)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
 
+        # 连接模式切换信号
+        self.mode_time_radio.toggled.connect(self._on_mode_changed)
+        self.mode_space_radio.toggled.connect(self._on_mode_changed)
+
     def _connect_time_space_signals(self):
         """Connect time-space widget signals after widget is created"""
         if hasattr(self, 'time_space_widget') and self.time_space_widget is not None:
@@ -1299,6 +1304,9 @@ class MainWindow(QMainWindow):
         frame_num = self.params.display.frame_num
         point_num = self.params.basic.point_num_per_scan // self.params.phase_demod.merge_point_num
 
+        # Debug output to identify mode
+        log.debug(f"Display mode: {self.params.display.mode}, Region index: {self.params.display.region_index}")
+
         if self.params.display.mode == DisplayMode.SPACE:
             # Space mode: extract single region over time
             region_idx = min(self.params.display.region_index, point_num - 1)
@@ -1338,31 +1346,6 @@ class MainWindow(QMainWindow):
                 for i in range(channel_num, 4):
                     self.plot_curve_1[i].setData([])
 
-        # Time-Space plot: 独立于MODE控制，由PLOT按钮控制
-        if (self.time_space_widget is not None and
-            hasattr(self.time_space_widget, 'is_plot_enabled') and
-            self.time_space_widget.is_plot_enabled()):
-            # Use the processed data parameter (already includes rad conversion if enabled)
-            display_data = data
-
-            # Reshape data to frames x points for time-space widget
-            if len(display_data.shape) == 1:
-                # Single frame data
-                reshaped_data = display_data.reshape(frame_num, point_num)
-            else:
-                # Multi-channel data - use first channel for now
-                if channel_num == 1:
-                    reshaped_data = display_data.reshape(frame_num, point_num)
-                else:
-                    # Take first channel from multi-channel data
-                    channel_data = display_data.reshape(-1, channel_num)[:, 0]
-                    reshaped_data = channel_data.reshape(frame_num, point_num)
-
-            # Update the time-space plot
-            success = self.time_space_widget.update_data(reshaped_data)
-            if not success:
-                log.debug("Time-space plot update skipped (plot disabled)")
-
         else:
             # Time mode: show multiple frames overlay
             if channel_num == 1:
@@ -1386,6 +1369,33 @@ class MainWindow(QMainWindow):
                 for ch in range(min(channel_num, 4)):
                     if point_num <= len(data):
                         self.plot_curve_1[ch].setData(data[:point_num, ch])
+
+        # Time-Space plot: 独立于MODE控制，由PLOT按钮控制
+        # 只有当Tab2处于活动状态时才更新time-space plot，避免干扰Tab1
+        if (self.time_space_widget is not None and
+            hasattr(self.time_space_widget, 'is_plot_enabled') and
+            self.time_space_widget.is_plot_enabled() and
+            self.plot_tabs.currentIndex() == 1):  # 只有当Tab2活动时才更新
+            # Use the processed data parameter (already includes rad conversion if enabled)
+            display_data = data
+
+            # Reshape data to frames x points for time-space widget
+            if len(display_data.shape) == 1:
+                # Single frame data
+                reshaped_data = display_data.reshape(frame_num, point_num)
+            else:
+                # Multi-channel data - use first channel for now
+                if channel_num == 1:
+                    reshaped_data = display_data.reshape(frame_num, point_num)
+                else:
+                    # Take first channel from multi-channel data
+                    channel_data = display_data.reshape(-1, channel_num)[:, 0]
+                    reshaped_data = channel_data.reshape(frame_num, point_num)
+
+            # Update the time-space plot
+            success = self.time_space_widget.update_data(reshaped_data)
+            if not success:
+                log.debug("Time-space plot update skipped (plot disabled)")
 
         # Update frame counter
         if self.acq_thread is not None:
@@ -1573,6 +1583,14 @@ class MainWindow(QMainWindow):
         else:
             actual_point_num = point_num
         self._point_num_label.setText(f"Point num: {actual_point_num}")
+
+    @pyqtSlot(bool)
+    def _on_mode_changed(self, checked):
+        """Handle mode radio button changes"""
+        if checked:  # Only respond to the checked button to avoid duplicate calls
+            # Update parameters immediately when mode changes
+            self._update_params()
+            log.debug(f"Display mode changed to: {self.params.display.mode}")
 
     def _on_data_source_changed(self, index: int):
         """Handle data source change"""
