@@ -92,6 +92,12 @@ class TimeSpacePlotWidget(QWidget):
         self._display_timer.setSingleShot(True)  # Single shot timer for controlled updates
         self._pending_update = False
 
+        # Axis monitoring timer for persistent axis visibility
+        self._axis_monitor_timer = QTimer(self)
+        self._axis_monitor_timer.timeout.connect(self._ensure_axes_visible)
+        self._axis_monitor_timer.setSingleShot(False)
+        self._axis_configured = False
+
         self._setup_ui()
         log.debug("TimeSpacePlotWidget initialized")
 
@@ -324,48 +330,22 @@ class TimeSpacePlotWidget(QWidget):
             if hasattr(hist_widget, 'gradient') and hasattr(hist_widget.gradient, 'setBackground'):
                 hist_widget.gradient.setBackground('w')
 
-        # Hide controls that we don't need
-        self.image_view.ui.roiBtn.hide()  # Hide ROI button
-        self.image_view.ui.menuBtn.hide()  # Hide menu button
+        # Set up axes labels - use ImageView's built-in methods
+        # ImageView automatically handles axis display, we just need to ensure it's enabled
+        try:
+            # Hide controls that we don't need
+            self.image_view.ui.roiBtn.hide()  # Hide ROI button
+            self.image_view.ui.menuBtn.hide()  # Hide menu button
 
-        # Set up axes labels and enable ticks
-        # Get the plot item correctly from ImageView through the view
-        view = self.image_view.getView()
-        if view and hasattr(view, 'getPlotItem'):
-            plot_item = view.getPlotItem()
-            if plot_item is not None:
-                plot_item.setLabel('bottom', 'Distance (points)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-                plot_item.setLabel('left', 'Time (samples)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+            # Initialize with empty data first
+            empty_data = np.zeros((10, 10))
+            self.image_view.setImage(empty_data, autoRange=True)
 
-                # Configure axes with ticks - Force show axes and values
-                plot_item.showAxis('bottom', show=True)
-                plot_item.showAxis('left', show=True)
-                plot_item.showAxis('top', show=False)
-                plot_item.showAxis('right', show=False)
+            # Set up proper axes after image is loaded
+            QTimer.singleShot(200, self._setup_axes_simple)
 
-                # Get axes and configure them properly
-                bottom_axis = plot_item.getAxis('bottom')
-                left_axis = plot_item.getAxis('left')
-
-                font = QFont("Times New Roman", 10)
-                if bottom_axis:
-                    bottom_axis.setTickFont(font)
-                    bottom_axis.setPen('k')  # Black axis line
-                    bottom_axis.setTextPen('k')  # Black text
-                    bottom_axis.setStyle(showValues=True)
-                    bottom_axis.enableAutoSIPrefix(False)
-                    bottom_axis.show()  # Explicitly show the axis
-                if left_axis:
-                    left_axis.setTickFont(font)
-                    left_axis.setPen('k')  # Black axis line
-                    left_axis.setTextPen('k')  # Black text
-                    left_axis.setStyle(showValues=True)
-                    left_axis.enableAutoSIPrefix(False)
-                    left_axis.show()  # Explicitly show the axis
-
-        # Initialize with empty data and apply initial colormap
-        empty_data = np.zeros((10, 10))
-        self.image_view.setImage(empty_data, autoRange=True)
+        except Exception as e:
+            log.warning(f"Error in basic plot setup: {e}")
 
         # Apply initial colormap
         self._apply_colormap()
@@ -373,8 +353,8 @@ class TimeSpacePlotWidget(QWidget):
         # Set colorbar background to white
         self._set_colorbar_white_background()
 
-        # Force initial axis configuration after image is set
-        self._configure_initial_axes()
+        # Start axis monitoring timer with longer interval
+        self._axis_monitor_timer.start(5000)  # Check every 5 seconds
 
     def update_data(self, data: np.ndarray) -> bool:
         """
@@ -515,15 +495,8 @@ class TimeSpacePlotWidget(QWidget):
                 view.autoRange()  # Fit to view
                 view.setMouseEnabled(x=True, y=True)  # Enable mouse interaction
 
-                # Ensure the plot item shows axes
-                view = self.image_view.getView()
-                if view and hasattr(view, 'getPlotItem'):
-                    plot_item = view.getPlotItem()
-                    if plot_item:
-                        plot_item.showAxis('bottom', show=True)
-                        plot_item.showAxis('left', show=True)
-                        plot_item.showAxis('top', show=False)
-                        plot_item.showAxis('right', show=False)
+            # Critical: Ensure axes remain visible after setImage
+            self._ensure_axes_after_update()
 
             # Apply colormap
             self._apply_colormap()
@@ -576,50 +549,70 @@ class TimeSpacePlotWidget(QWidget):
         except Exception as e:
             log.debug(f"Could not set colorbar background: {e}")
 
-    def _configure_initial_axes(self):
-        """Configure axes immediately after ImageView is created"""
+    def _setup_axes_simple(self):
+        """简化的轴配置方法 - 使用ImageView的内置特性"""
         try:
+            # 方法1: 直接设置ImageView的轴标签（最简单可靠）
+            if hasattr(self.image_view, 'setLabel'):
+                self.image_view.setLabel('bottom', 'Distance (points)')
+                self.image_view.setLabel('left', 'Time (samples)')
+
+            # 方法2: 通过view访问（备选）
             view = self.image_view.getView()
-            if view and hasattr(view, 'getPlotItem'):
-                plot_item = view.getPlotItem()
-                if plot_item is None:
-                    log.warning("Could not get plot item for initial axis configuration")
-                    return
+            if view is not None:
+                # 简单设置背景色和鼠标交互
+                if hasattr(view, 'setBackgroundColor'):
+                    view.setBackgroundColor('w')
+                if hasattr(view, 'setMouseEnabled'):
+                    view.setMouseEnabled(x=True, y=True)
 
-                # Show axes explicitly
-                plot_item.showAxis('bottom', show=True)
-                plot_item.showAxis('left', show=True)
-                plot_item.showAxis('top', show=False)
-                plot_item.showAxis('right', show=False)
+                # 尝试设置轴标签
+                if hasattr(view, 'setLabel'):
+                    view.setLabel('bottom', 'Distance (points)')
+                    view.setLabel('left', 'Time (samples)')
 
-                # Set initial axis labels
-                plot_item.setLabel('bottom', 'Distance (points)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
-                plot_item.setLabel('left', 'Time (samples)', **{'font-family': 'Times New Roman', 'font-size': '12pt'})
+            # 方法3: 通过ImageView的ui界面（最后尝试）
+            if hasattr(self.image_view, 'ui') and hasattr(self.image_view.ui, 'graphicsView'):
+                graphics_view = self.image_view.ui.graphicsView
+                if hasattr(graphics_view, 'setLabel'):
+                    graphics_view.setLabel('bottom', 'Distance (points)')
+                    graphics_view.setLabel('left', 'Time (samples)')
 
-                # Configure axes
-                bottom_axis = plot_item.getAxis('bottom')
-                left_axis = plot_item.getAxis('left')
-
-                font = QFont("Times New Roman", 10)
-                if bottom_axis:
-                    bottom_axis.setTickFont(font)
-                    bottom_axis.setPen('k')
-                    bottom_axis.setTextPen('k')
-                    bottom_axis.setStyle(showValues=True)
-                    bottom_axis.enableAutoSIPrefix(False)
-                    bottom_axis.show()
-                if left_axis:
-                    left_axis.setTickFont(font)
-                    left_axis.setPen('k')
-                    left_axis.setTextPen('k')
-                    left_axis.setStyle(showValues=True)
-                    left_axis.enableAutoSIPrefix(False)
-                    left_axis.show()
-
-                log.debug("Initial axes configured")
+            log.debug("Simple axis setup completed")
+            self._axis_configured = True
 
         except Exception as e:
-            log.warning(f"Error configuring initial axes: {e}")
+            log.warning(f"Simple axis setup failed: {e}")
+            # 如果所有方法都失败，至少记录状态
+            self._axis_configured = False
+
+    def _ensure_axes_visible(self):
+        """简化的轴可见性检查"""
+        # 如果还没有配置成功，再尝试一次
+        if not self._axis_configured:
+            self._setup_axes_simple()
+
+        # 可选：这里可以添加调试信息输出
+        if hasattr(self, '_debug_counter'):
+            self._debug_counter += 1
+            if self._debug_counter % 10 == 0:  # 每10次检查输出一次调试信息
+                self._debug_axis_state_simple()
+        else:
+            self._debug_counter = 1
+
+    def _debug_axis_state_simple(self):
+        """简化的调试方法"""
+        try:
+            view = self.image_view.getView()
+            log.debug(f"ImageView view: {type(view)} configured: {self._axis_configured}")
+
+        except Exception as e:
+            log.debug(f"Debug failed: {e}")
+
+    def _ensure_axes_after_update(self):
+        """更新后确保坐标轴可见 - 简化版"""
+        # 每次setImage后重新尝试设置轴标签
+        self._setup_axes_simple()
 
     def _apply_colormap(self):
         """Apply the selected colormap to the image view."""
@@ -689,13 +682,11 @@ class TimeSpacePlotWidget(QWidget):
     def _update_axis_labels(self, data_shape: tuple):
         """Update axis labels and scales based on data dimensions."""
         try:
-            # Get the plot item correctly through view
-            view = self.image_view.getView()
-            if view and hasattr(view, 'getPlotItem'):
-                plot_item = view.getPlotItem()
-                if plot_item is None:
-                    log.warning("Could not get plot item for axis update")
-                    return
+            # Get the plot item using robust method
+            plot_item = self._get_plot_item_robust()
+            if plot_item is None:
+                log.warning("Could not get plot item for axis update")
+                return
 
                 # data_shape is (time_points, spatial_points)
                 n_time_points, n_spatial_points = data_shape
@@ -705,41 +696,33 @@ class TimeSpacePlotWidget(QWidget):
                 distance_step = self._space_downsample
                 distance_end_actual = distance_start_actual + n_spatial_points * distance_step
 
+                # Update labels with enhanced visibility settings
                 plot_item.setLabel('bottom', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
-                                 **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+                                 color='k', **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
                 # Y-axis: Time (vertical, bottom=newer, top=older)
                 plot_item.setLabel('left', 'Time (samples, bottom=newer)',
-                                 **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+                                 color='k', **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
-                # Force show axes and configure them properly
+                # Force show axes again (critical after label update)
                 plot_item.showAxis('bottom', show=True)
                 plot_item.showAxis('left', show=True)
 
-                # Get and configure axes
-                bottom_axis = plot_item.getAxis('bottom')
-                left_axis = plot_item.getAxis('left')
-
-                # Set axis fonts and colors with explicit tick configuration
+                # Get and configure axes with enhanced visibility settings
                 font = QFont("Times New Roman", 9)
-                if bottom_axis:
-                    bottom_axis.setTickFont(font)
-                    bottom_axis.setPen('k')
-                    bottom_axis.setTextPen('k')
-                    bottom_axis.setStyle(showValues=True)
-                    bottom_axis.enableAutoSIPrefix(False)
-                    bottom_axis.show()
-                    # Force tick update
-                    bottom_axis.setTickSpacing()
-                if left_axis:
-                    left_axis.setTickFont(font)
-                    left_axis.setPen('k')
-                    left_axis.setTextPen('k')
-                    left_axis.setStyle(showValues=True)
-                    left_axis.enableAutoSIPrefix(False)
-                    left_axis.show()
-                    # Force tick update
-                    left_axis.setTickSpacing()
+                for axis_name in ['bottom', 'left']:
+                    axis = plot_item.getAxis(axis_name)
+                    if axis:
+                        axis.setTickFont(font)
+                        axis.setPen('k')
+                        axis.setTextPen('k')
+                        axis.setStyle(showValues=True)
+                        axis.enableAutoSIPrefix(False)
+                        axis.show()
+
+                        # Force tick redraw
+                        axis.picture = None
+                        axis.update()
 
                 log.debug(f"Updated axis labels: X=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual}), Y=time({n_time_points} samples)")
 
