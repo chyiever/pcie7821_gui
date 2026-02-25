@@ -9,7 +9,7 @@ Features:
 - Rolling window buffer for smooth scrolling effect
 - Configurable downsampling for performance optimization
 - Customizable color mapping and range
-- PyQtGraph ImageView for GPU-accelerated rendering
+- PyQtGraph PlotWidget for reliable axis rendering
 
 Author: eDAS Development Team
 """
@@ -46,64 +46,55 @@ COLORMAP_OPTIONS = [
     ("Cool", "cool")
 ]
 
-# Configuration: Set to True to use PlotWidget version (reliable axes), False for ImageView
-USE_PLOTWIDGET_VERSION = True
-
 
 class TimeSpacePlotWidget(QWidget):
     """
     2D Time-Space plot widget with rolling window functionality.
 
+    Based on PlotWidget + ImageItem for reliable axis display.
+
     Displays phase data as a 2D image where:
-    - X-axis: Time (frames)
+    - X-axis: Time (seconds)
     - Y-axis: Distance (spatial points)
     - Color: Phase value
 
-    Features real-time scrolling with configurable rolling window.
+    Features:
+    - Real-time 2D image display with configurable rolling window
+    - Reliable axis rendering and labeling
+    - Configurable downsampling for performance optimization
+    - Customizable color mapping and range
     """
 
-    # Signal emitted when parameters change
+    # Signals
     parametersChanged = pyqtSignal()
-    # Signal emitted when data point count changes
     pointCountChanged = pyqtSignal(int)
+    plotStateChanged = pyqtSignal(bool)
 
     def __init__(self):
         """Initialize the time-space plot widget."""
         super().__init__()
         log.debug("Initializing TimeSpacePlotWidget")
 
-        # Data buffer for rolling window
-        self._data_buffer = None  # Will be initialized when first data arrives
-        self._max_window_frames = 100  # Increased maximum supported window size
-
-        # Plot parameters
+        # Data buffer and parameters
+        self._data_buffer = None
+        self._max_window_frames = 100
         self._window_frames = 5
-        self._distance_start = 40     # Changed default range
-        self._distance_end = 100      # Changed default range
+        self._distance_start = 40
+        self._distance_end = 100
         self._time_downsample = 50
         self._space_downsample = 2
         self._colormap = "jet"
-        self._vmin = -0.1  # Updated default range
-        self._vmax = 0.1   # Updated default range
+        self._vmin = -0.1
+        self._vmax = 0.1
 
-        # Current data dimensions
+        # Display parameters
         self._full_point_num = 0
         self._current_frame_count = 0
-
-        # Display update timer for controlling refresh rate
-        self._display_timer = QTimer(self)
-        self._display_timer.timeout.connect(self._update_display)
-        self._display_timer.setSingleShot(True)  # Single shot timer for controlled updates
+        self._plot_enabled = False
         self._pending_update = False
 
-        # Axis monitoring timer for persistent axis visibility
-        self._axis_monitor_timer = QTimer(self)
-        self._axis_monitor_timer.timeout.connect(self._ensure_axes_visible)
-        self._axis_monitor_timer.setSingleShot(False)
-        self._axis_configured = False
-
         self._setup_ui()
-        log.debug("TimeSpacePlotWidget initialized")
+        log.debug("TimeSpacePlotWidget initialized successfully")
 
     def _setup_ui(self):
         """Setup the widget UI layout."""
@@ -690,15 +681,6 @@ class TimeSpacePlotWidget(QWidget):
                 self._debug_axis_state_simple()
         else:
             self._debug_counter = 1
-
-    def _debug_axis_state_simple(self):
-        """简化的调试方法"""
-        try:
-            view = self.image_view.getView()
-            log.debug(f"ImageView view: {type(view)} configured: {self._axis_configured}")
-
-        except Exception as e:
-            log.debug(f"Debug failed: {e}")
 
     def _ensure_axes_after_update(self):
         """更新后确保坐标轴可见 - 强化版"""
@@ -2029,45 +2011,16 @@ class TimeSpacePlotWidgetV2(QWidget):
         log.debug("TimeSpacePlotWidgetV2 data cleared")
 
 
-# ========== 使用说明 ==========
-#
-# 要使用 PlotWidget 版本替代现有的 ImageView 版本:
-#
-# 1. 在 main_window.py 中, 将:
-#    self.time_space_widget = TimeSpacePlotWidget()
-#    改为:
-#    self.time_space_widget = TimeSpacePlotWidgetV2()
-#
-# 2. PlotWidget 版本的优点:
-#    - 坐标轴刻度显示完全可靠
-#    - 不受 PyQtGraph 版本影响
-#    - 轴配置API稳定一致
-#
-# 3. PlotWidget 版本的缺点:
-#    - 需要手动管理 ColorBar
-#    - 代码相对复杂一些
-#    - 失去 ImageView 的一些便利特性
-#
-# 4. 建议的迁移策略:
-#    - 先测试修复后的 ImageView 版本
-#    - 如果坐标轴问题仍然存在，再切换到 PlotWidget 版本
-#
-
-
-# ========== 智能版本选择器 ==========
 def create_time_space_widget():
     """
-    智能创建 TimeSpace 组件
-    根据配置自动选择 ImageView 或 PlotWidget 版本
+    Create TimeSpace widget instance.
+
+    Returns:
+        TimeSpacePlotWidget: A time-space plot widget instance
     """
-    if USE_PLOTWIDGET_VERSION:
-        log.info("Using PlotWidget version for guaranteed axis display")
-        return TimeSpacePlotWidgetV2()
-    else:
-        log.info("Using ImageView version (original)")
-        return TimeSpacePlotWidget()
+    log.info("Creating TimeSpacePlotWidget instance")
+    return TimeSpacePlotWidgetV2()
 
 
-# ========== 导出接口 ==========
-# 主要的导出类
-__all__ = ['TimeSpacePlotWidget', 'TimeSpacePlotWidgetV2', 'create_time_space_widget']
+# Module exports
+__all__ = ['TimeSpacePlotWidget', 'create_time_space_widget']
