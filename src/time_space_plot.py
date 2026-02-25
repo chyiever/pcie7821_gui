@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QCheckBox, QSizePolicy
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5 import QtCore
 from PyQt5.QtGui import QFont
 import pyqtgraph as pg
 
@@ -477,18 +478,20 @@ class TimeSpacePlotWidget(QWidget):
 
             log.debug(f"Concatenated time-space data shape: {time_space_data.shape}")
 
-            # Keep original orientation: (time_points, spatial_points)
-            # Y-axis: time (vertical, newer data at bottom), X-axis: distance (horizontal)
-            display_data = time_space_data
+            # CRITICAL FIX: Transpose data to achieve correct coordinate mapping
+            # User requirement: X-axis = time (horizontal), Y-axis = distance (vertical)
+            # Original data: (time_points, spatial_points)
+            # After transpose: (spatial_points, time_points) -> Y=distance, X=time
+            display_data = time_space_data.T  # Transpose: X=time, Y=distance
 
-            log.debug(f"Final display data shape: {display_data.shape} (time x distance)")
+            log.debug(f"Final display data shape: {display_data.shape} (distance x time)")
             log.debug(f"Data range: [{np.min(display_data):.4f}, {np.max(display_data):.4f}]")
 
-            # Update image view with current color range
-            # Set autoRange and autoLevels to False to maintain fixed scaling
+            # Update image view with proper coordinate mapping
+            # After transpose: display_data.shape = (spatial_points, time_points)
             self.image_view.setImage(display_data,
                                    levels=[self._vmin, self._vmax],
-                                   autoRange=True,  # Allow auto range for proper display
+                                   autoRange=False,  # Disable auto range to use our coordinate mapping
                                    autoLevels=False)
 
             # Configure the image view to fill the widget and show axes properly
@@ -816,20 +819,38 @@ class TimeSpacePlotWidget(QWidget):
                 log.warning("Could not get plot item for axis update")
                 return
 
-            # data_shape is (time_points, spatial_points)
-            n_time_points, n_spatial_points = data_shape
+            # CRITICAL: After transpose, display_data.shape = (spatial_points, time_points)
+            # But input data_shape is still from original time_space_data: (time_points, spatial_points)
+            original_time_points, original_spatial_points = data_shape
 
-            # X-axis: Distance (horizontal)
-            distance_start_actual = self._distance_start
-            distance_step = self._space_downsample
-            distance_end_actual = distance_start_actual + n_spatial_points * distance_step
+            # Calculate actual coordinate ranges
+            # X-axis: Time (horizontal) - FIXED to not be affected by time downsampling
+            scan_rate_hz = self._scan_rate if self._scan_rate > 0 else 50000  # Default fallback
 
-            # Update labels with enhanced visibility settings
-            plot_item.setLabel('bottom', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
+            # Time duration should be calculated from ORIGINAL frames, not downsampled
+            time_duration_s = original_time_points / scan_rate_hz
+
+            # Y-axis: Distance (vertical) - using actual distance range
+            distance_start_actual = self._distance_start  # e.g., 40
+            distance_step = self._space_downsample  # e.g., 1
+            distance_end_actual = distance_start_actual + original_spatial_points * distance_step
+
+            # Set coordinate mapping using setRect to map image coordinates to real coordinates
+            # After transpose: image shape is (spatial_points, time_points)
+            # We want: X=time [0, time_duration_s], Y=distance [distance_start, distance_end]
+            image_item = self.image_view.getImageItem()
+            if image_item:
+                # Set rect: (x_start, y_start, width, height) in real coordinates
+                rect = QtCore.QRectF(0, distance_start_actual, time_duration_s,
+                                   distance_end_actual - distance_start_actual)
+                image_item.setRect(rect)
+                log.debug(f"Set image rect: X=[0, {time_duration_s:.3f}]s, Y=[{distance_start_actual}, {distance_end_actual}] points")
+
+            # Update axis labels
+            plot_item.setLabel('bottom', f'Time (s, total: {time_duration_s:.3f}s)',
                              color='k', **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
-            # Y-axis: Time (vertical, bottom=newer, top=older)
-            plot_item.setLabel('left', 'Time (samples, bottom=newer)',
+            plot_item.setLabel('left', f'Distance (points: {distance_start_actual} to {distance_end_actual})',
                              color='k', **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
             # Force show axes again (critical after label update)
@@ -852,10 +873,20 @@ class TimeSpacePlotWidget(QWidget):
                     axis.picture = None
                     axis.update()
 
-            log.debug(f"Updated axis labels: X=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual}), Y=time({n_time_points} samples)")
+            # Set proper view range to match the coordinate mapping
+            view = self.image_view.getView()
+            if view:
+                view.setRange(xRange=[0, time_duration_s],
+                            yRange=[distance_start_actual, distance_end_actual],
+                            padding=0)  # No extra padding
+                view.enableAutoRange(enable=False)  # Disable auto range to maintain fixed scaling
+
+            log.debug(f"Updated axis labels: X=time({time_duration_s:.3f}s, {original_time_points} frames), Y=distance([{distance_start_actual}, {distance_end_actual}] points)")
 
         except Exception as e:
             log.warning(f"Error updating axis labels: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _on_distance_start_changed(self, value: int):
         """Handle distance start change."""
@@ -1506,18 +1537,28 @@ class TimeSpacePlotWidgetV2(QWidget):
             log.debug(f"PlotWidget updating display with data shape: {time_space_data.shape}")
             log.debug(f"Data buffer length: {len(self._data_buffer)}, window_frames: {self._window_frames}")
 
-            # 重要：确保正确的数据方向用于time-space显示
+            # 重要：重新分析坐标轴映射
             # 原始数据: (time_frames, space_points)
-            # 显示需求: Y轴=distance, X轴=time (最新数据在右侧)
+            # 我们的目标: Y轴=distance, X轴=time
+            #
+            # PyQtGraph ImageItem的坐标系统：
+            # - 第一个维度对应Y轴(垂直方向)
+            # - 第二个维度对应X轴(水平方向)
+            #
+            # 所以如果原始数据是 (time_frames, space_points)
+            # 要实现 Y轴=distance, X轴=time，我们需要转置！
 
-            # 步骤1: 转置数据 (space_points, time_frames)
-            display_data = time_space_data.T
+            # 尝试不转置，看看效果
+            # display_data = time_space_data  # 不转置：(time_frames, space_points)
+            # 这样的话：Y轴=time, X轴=space，这不是我们要的
 
-            # 步骤2: 确保时间方向正确 - 最新数据在右侧
-            # PyQtGraph的图像显示：左下角为原点，向右为X+，向上为Y+
-            # 我们需要确保最新的时间帧在X轴的右侧
-            # 如果数据顺序需要反转，则执行下面的操作
-            # display_data = np.fliplr(display_data)  # 如果需要左右翻转时间轴
+            # 正确的应该是转置
+            display_data = time_space_data.T  # 转置：(space_points, time_frames)
+            # 这样：Y轴=space, X轴=time，这是我们要的
+
+            # 但是如果向下滚动，说明Y轴的数据方向有问题
+            # 可能需要翻转Y轴数据，让distance_start在下方
+            display_data = np.flipud(display_data)  # 上下翻转，让距离轴正确
 
             log.debug(f"Time-space data shape after processing: {display_data.shape} (space, time)")
             log.debug(f"Display data range: [{np.min(display_data):.3f}, {np.max(display_data):.3f}]")
@@ -1532,7 +1573,7 @@ class TimeSpacePlotWidgetV2(QWidget):
             distance_start = self._distance_start
             distance_end = self._distance_end
 
-            # X轴: 时间范围计算
+            # X轴: 时间范围计算 - 重要：不受time DS影响
             try:
                 from config import AllParams
                 config = AllParams()
@@ -1540,20 +1581,32 @@ class TimeSpacePlotWidgetV2(QWidget):
             except:
                 scan_rate_hz = 2000  # 默认值
 
-            # 计算时间长度：帧数 / 扫描频率
-            time_duration_s = n_time_points / scan_rate_hz
+            # 计算实际时间长度：应该基于原始帧数，不是降采样后的帧数
+            original_time_points = time_space_data.shape[0]  # 原始时间帧数
+            current_displayed_time_points = display_data.shape[1]  # 当前显示的时间点数
 
-            # 设置图像边界 - 映射到实际坐标范围
-            # 图像应该占据：X轴 [0, time_duration_s], Y轴 [distance_start, distance_end]
-            self.image_item.setRect(pg.QtCore.QRectF(
-                0, distance_start,  # 起始位置: (时间=0, 距离=distance_start)
-                time_duration_s, distance_end - distance_start  # 宽度=时间长度, 高度=距离范围
-            ))
+            # 实际时间长度应该基于缓冲区中的总帧数，不受降采样影响
+            time_duration_s = original_time_points / scan_rate_hz
+
+            log.debug(f"Time calculation: original_frames={original_time_points}, "
+                     f"displayed_frames={current_displayed_time_points}, "
+                     f"time_duration={time_duration_s:.3f}s, scan_rate={scan_rate_hz}Hz")
 
             # 计算实际的坐标范围
-            # Y轴: 距离范围 [distance_start, distance_end]，单位points
             distance_start = self._distance_start
             distance_end = self._distance_end
+
+            # 获取处理后的数据维度
+            n_spatial_points, n_time_points_displayed = display_data.shape
+
+            # 设置图像边界 - 映射到实际坐标范围
+            # 注意：时间轴应该映射到实际时间，空间轴映射到实际距离
+            self.image_item.setRect(pg.QtCore.QRectF(
+                0, distance_start,  # 起始位置: (时间=0, 距离=distance_start)
+                time_duration_s, distance_end - distance_start  # 宽度=实际时间长度, 高度=距离范围
+            ))
+
+            log.debug(f"Image rect set: X=[0, {time_duration_s:.3f}s], Y=[{distance_start}, {distance_end}]")
 
             # X轴: 时间范围 [0, duration]，单位秒
             # 从配置获取scan_rate，如果没有则使用默认值
