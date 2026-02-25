@@ -759,9 +759,9 @@ class MainWindow(QMainWindow):
             # Grid and tick configuration with smaller fonts
             pw.showGrid(x=True, y=True, alpha=0.6)
 
-            # Set smaller fonts for axes
-            axis_font = QFont("Times New Roman", 8)
-            tick_font = QFont("Times New Roman", 7)
+            # Set fonts for axes - increase tick font size by 2 units
+            axis_font = QFont("Times New Roman", 8)      # 轴标签保持8pt
+            tick_font = QFont("Times New Roman", 8)      # 刻度值调大到9pt (从7pt+2)
 
             # Configure tick style with reduced spacing
             x_axis.setStyle(showValues=True, tickLength=4, tickTextOffset=6)  # Reduced offset
@@ -777,20 +777,20 @@ class MainWindow(QMainWindow):
             x_axis.setTextPen('k')
             y_axis.setTextPen('k')
 
-        # Set specific labels for each plot with smaller fonts
-        # Plot 1: Time Domain
+        # Set specific labels for each plot with consistent smaller fonts
+        # Plot 1: Time Domain (remove "Volts" unit)
         self.plot_widget_1.setLabel('bottom', 'Sample Index',
                                    color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
-        self.plot_widget_1.setLabel('left', 'Amp. (Volts)',
+        self.plot_widget_1.setLabel('left', 'Amp.',
                                    color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
 
-        # Plot 2: FFT Spectrum
+        # Plot 2: FFT Spectrum (consistent font size)
         self.plot_widget_2.setLabel('bottom', 'Frequency (Hz)',
                                    color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
         self.plot_widget_2.setLabel('left', 'Amp. (dB)',
                                    color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
 
-        # Plot 3: Monitor
+        # Plot 3: Monitor (consistent font size)
         self.plot_widget_3.setLabel('bottom', 'Point Index',
                                    color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
         self.plot_widget_3.setLabel('left', 'Amp.',

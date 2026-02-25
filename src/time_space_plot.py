@@ -1510,25 +1510,17 @@ class TimeSpacePlotWidgetV2(QWidget):
             # 设置图像数据
             self.image_item.setImage(display_data, levels=[self._vmin, self._vmax])
 
-            # 获取转置后的数据维度
+            # 获取转置后的数据维度和计算实际坐标范围
             n_spatial_points, n_time_points = display_data.shape  # 现在space在Y方向，time在X方向
 
-            # 设置图像边界 - 从(0,0)开始
-            self.image_item.setRect(pg.QtCore.QRectF(
-                0, 0,  # 起始位置
-                n_time_points, n_spatial_points  # 宽度(时间), 高度(空间)
-            ))
-
-            # 计算实际的坐标范围
-            # Y轴: 距离范围 [distance_start, distance_end]，单位points
+            # 计算实际坐标范围
             distance_start = self._distance_start
             distance_end = self._distance_end
 
-            # X轴: 时间范围 [0, window_frames × (1/scan_rate)]，单位秒
-            # 从配置获取scan_rate，如果没有则使用默认值
-            from config import DASConfig
+            # X轴: 时间范围计算
             try:
-                config = DASConfig()
+                from config import AllParams
+                config = AllParams()
                 scan_rate_hz = config.basic.scan_rate  # Hz
             except:
                 scan_rate_hz = 2000  # 默认值
@@ -1536,15 +1528,42 @@ class TimeSpacePlotWidgetV2(QWidget):
             # 计算时间长度：帧数 / 扫描频率
             time_duration_s = n_time_points / scan_rate_hz
 
-            # 设置ViewBox范围
-            view_box = self.plot_widget.getViewBox()
-            view_box.setXRange(0, n_time_points, padding=0)  # X轴: 时间像素
-            view_box.setYRange(0, n_spatial_points, padding=0)  # Y轴: 空间像素
+            # 设置图像边界 - 映射到实际坐标范围
+            # 图像应该占据：X轴 [0, time_duration_s], Y轴 [distance_start, distance_end]
+            self.image_item.setRect(pg.QtCore.QRectF(
+                0, distance_start,  # 起始位置: (时间=0, 距离=distance_start)
+                time_duration_s, distance_end - distance_start  # 宽度=时间长度, 高度=距离范围
+            ))
 
-            # 设置自定义刻度标签
+            # 计算实际的坐标范围
+            # Y轴: 距离范围 [distance_start, distance_end]，单位points
+            distance_start = self._distance_start
+            distance_end = self._distance_end
+
+            # X轴: 时间范围 [0, duration]，单位秒
+            # 从配置获取scan_rate，如果没有则使用默认值
+            try:
+                from config import AllParams
+                config = AllParams()
+                scan_rate_hz = config.basic.scan_rate  # Hz
+            except:
+                scan_rate_hz = 2000  # 默认值
+
+            # 计算时间长度：帧数 / 扫描频率
+            time_duration_s = n_time_points / scan_rate_hz
+
+            # 设置ViewBox范围 - 匹配实际的时间和距离坐标
+            view_box = self.plot_widget.getViewBox()
+
+            # X轴：时间范围 [0, time_duration_s]，无冗余
+            view_box.setXRange(0, time_duration_s, padding=0)
+
+            # Y轴：距离范围 [distance_start, distance_end]，无冗余
+            view_box.setYRange(distance_start, distance_end, padding=0)
+
+            # 设置自定义刻度标签 - 使用实际坐标值
             self._setup_custom_ticks_v2_corrected(
-                distance_start, distance_end, n_spatial_points,
-                time_duration_s, n_time_points
+                distance_start, distance_end, time_duration_s
             )
 
             # 更新轴标签 - 正确的定义
@@ -1569,40 +1588,42 @@ class TimeSpacePlotWidgetV2(QWidget):
             import traceback
             traceback.print_exc()
 
-    def _setup_custom_ticks_v2_corrected(self, distance_start, distance_end, n_spatial_points,
-                                         time_duration_s, n_time_points):
-        """设置正确的自定义刻度标签 - Y轴=distance, X轴=time"""
+    def _setup_custom_ticks_v2_corrected(self, distance_start, distance_end, time_duration_s):
+        """设置正确的自定义刻度标签 - 使用实际坐标值"""
         try:
-            # Y轴刻度：显示实际距离值 (distance range, 与降采样无关)
+            # Y轴刻度：显示实际距离值 (distance range)
             left_axis = self.plot_widget.getAxis('left')
             if left_axis:
-                # 创建距离刻度映射：像素位置 -> 实际距离值
-                # Y轴对应距离范围 [distance_start, distance_end]
+                # 自动生成距离刻度
+                distance_range = distance_end - distance_start
+                # 根据范围大小决定刻度间隔
+                if distance_range <= 20:
+                    tick_step = 2
+                elif distance_range <= 50:
+                    tick_step = 5
+                elif distance_range <= 100:
+                    tick_step = 10
+                else:
+                    tick_step = distance_range // 10
+
                 tick_positions = []
                 tick_labels = []
 
-                # 计算距离步长
-                distance_range = distance_end - distance_start
-                pixel_to_distance_ratio = distance_range / n_spatial_points
-
-                # 每10-15像素显示一个刻度（可调整）
-                tick_interval = max(1, n_spatial_points // 8)
-                for i in range(0, n_spatial_points, tick_interval):
-                    # 将像素位置映射到实际距离
-                    actual_distance = distance_start + (i * pixel_to_distance_ratio)
-                    tick_positions.append(i)
-                    tick_labels.append(f"{actual_distance:.0f}")
+                # 生成从distance_start到distance_end的刻度
+                for dist in range(distance_start, distance_end + 1, tick_step):
+                    if dist <= distance_end:
+                        tick_positions.append(dist)
+                        tick_labels.append(str(dist))
 
                 # 确保起始和结束位置有刻度
-                if 0 not in tick_positions:
-                    tick_positions.insert(0, 0)
+                if distance_start not in tick_positions:
+                    tick_positions.insert(0, distance_start)
                     tick_labels.insert(0, str(distance_start))
-
-                if n_spatial_points - 1 not in tick_positions:
-                    tick_positions.append(n_spatial_points - 1)
+                if distance_end not in tick_positions:
+                    tick_positions.append(distance_end)
                     tick_labels.append(str(distance_end))
 
-                # 设置Y轴自定义刻度
+                # 设置Y轴自定义刻度 - 位置就是实际距离值
                 ticks_y = list(zip(tick_positions, tick_labels))
                 left_axis.setTicks([ticks_y])
 
@@ -1612,25 +1633,32 @@ class TimeSpacePlotWidgetV2(QWidget):
                 tick_positions = []
                 tick_labels = []
 
-                # 时间轴，每显示几个主要刻度
-                tick_interval = max(1, n_time_points // 10)
-                pixel_to_time_ratio = time_duration_s / n_time_points
+                # 根据时间长度决定刻度间隔
+                if time_duration_s <= 1:
+                    tick_step = 0.1  # 0.1秒间隔
+                elif time_duration_s <= 5:
+                    tick_step = 0.5  # 0.5秒间隔
+                elif time_duration_s <= 10:
+                    tick_step = 1.0  # 1秒间隔
+                else:
+                    tick_step = time_duration_s / 10  # 10个刻度
 
-                for i in range(0, n_time_points, tick_interval):
-                    # 将像素位置映射到实际时间
-                    actual_time = i * pixel_to_time_ratio
-                    tick_positions.append(i)
-                    tick_labels.append(f"{actual_time:.1f}")
+                # 生成时间刻度
+                current_time = 0
+                while current_time <= time_duration_s:
+                    tick_positions.append(current_time)
+                    tick_labels.append(f"{current_time:.1f}")
+                    current_time += tick_step
 
-                # 添加最后一个刻度
-                if n_time_points - 1 not in tick_positions:
-                    tick_positions.append(n_time_points - 1)
+                # 确保结束时间有刻度
+                if time_duration_s not in tick_positions:
+                    tick_positions.append(time_duration_s)
                     tick_labels.append(f"{time_duration_s:.1f}")
 
                 ticks_x = list(zip(tick_positions, tick_labels))
                 bottom_axis.setTicks([ticks_x])
 
-            log.debug(f"Set corrected ticks: Y={len(ticks_y)} distance ticks, X={len(ticks_x)} time ticks")
+            log.debug(f"Set corrected ticks: Y={len(ticks_y)} distance ticks [{distance_start}-{distance_end}], X={len(ticks_x)} time ticks [0-{time_duration_s:.1f}s]")
 
         except Exception as e:
             log.warning(f"Error setting corrected custom ticks: {e}")
