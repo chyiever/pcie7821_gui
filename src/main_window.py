@@ -45,7 +45,7 @@ from pcie7821_api import PCIe7821API, PCIe7821Error
 from acquisition_thread import AcquisitionThread, SimulatedAcquisitionThread
 from data_saver import FrameBasedFileSaver
 from spectrum_analyzer import RealTimeSpectrumAnalyzer
-from time_space_plot import TimeSpacePlotWidget
+from time_space_plot import create_time_space_widget
 from logger import get_logger
 
 # Module logger
@@ -73,7 +73,7 @@ class MainWindow(QMainWindow):
         self.acq_thread: Optional[AcquisitionThread] = None
         self.data_saver: Optional[FrameBasedFileSaver] = None
         self.spectrum_analyzer = RealTimeSpectrumAnalyzer()
-        self.time_space_widget: Optional[TimeSpacePlotWidget] = None
+        self.time_space_widget = None
 
         # Parameters
         self.params = AllParams()
@@ -787,8 +787,8 @@ class MainWindow(QMainWindow):
         tab2_layout.setSpacing(5)
         tab2_layout.setContentsMargins(5, 5, 5, 5)
 
-        # Create time-space plot widget
-        self.time_space_widget = TimeSpacePlotWidget()
+        # Create time-space plot widget using intelligent selector
+        self.time_space_widget = create_time_space_widget()
         tab2_layout.addWidget(self.time_space_widget)
 
         self.plot_tabs.addTab(tab2_widget, "Time-Space Plot")

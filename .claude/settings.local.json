@@ -17,7 +17,8 @@
       "Bash(python -c \"import sys; sys.path.insert\\(0, ''src''\\); from main_window import MainWindow; from pcie7821_api import PCIe7821API; print\\(''All core modules imported successfully!''\\)\")",
       "Bash(python -c \"\nimport py_compile\nfiles = [''acquisition_thread.py'', ''data_saver.py'', ''pcie7821_api.py'', ''main_window.py'', ''config.py'', ''logger.py'', ''spectrum_analyzer.py'', ''main.py'']\nfor f in files:\n    try:\n        py_compile.compile\\(f, doraise=True\\)\n        print\\(f''{f}: OK''\\)\n    except py_compile.PyCompileError as e:\n        print\\(f''{f}: ERROR - {e}''\\)\n\")",
       "Bash(cd D:\\\\OneDrive - EVER\\\\00_KY\\\\DAS-器件测试、上位机开发\\\\BX\\\\PCIe-7821\\\\pcie7821_gui:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(cd:*)"
     ]
   }
 }

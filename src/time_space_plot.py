@@ -44,6 +44,9 @@ COLORMAP_OPTIONS = [
     ("Cool", "cool")
 ]
 
+# Configuration: Set to True to use PlotWidget version (reliable axes), False for ImageView
+USE_PLOTWIDGET_VERSION = True
+
 
 class TimeSpacePlotWidget(QWidget):
     """
@@ -1169,24 +1172,185 @@ class TimeSpacePlotWidgetV2(QWidget):
             log.warning(f"Error applying colormap in PlotWidget version: {e}")
 
     def _create_control_panel_v2(self):
-        """创建控制面板 - 重用原有逻辑但适配新的信号"""
+        """创建控制面板 - 完整实现"""
         group = QGroupBox("Time-Space Plot Controls (PlotWidget Version)")
         group.setFont(QFont("Times New Roman", 9))
 
-        # 这里可以重用原来的控制面板创建逻辑
-        # 为了简化，仅展示核心控件
         layout = QGridLayout(group)
         layout.setHorizontalSpacing(15)
         layout.setVerticalSpacing(8)
 
-        # 添加说明标签
-        info_label = QLabel("NOTE: Using PlotWidget for reliable axis display")
+        # 添加状态指示标签
+        info_label = QLabel("✓ Using PlotWidget for reliable axis display")
         info_label.setFont(QFont("Times New Roman", 8))
-        info_label.setStyleSheet("color: blue;")
+        info_label.setStyleSheet("color: blue; font-weight: bold;")
         layout.addWidget(info_label, 0, 0, 1, -1)
 
-        # 可以添加关键的控制控件，或者重用原来的 _create_control_panel 方法
-        # 这里简化处理，实际使用时可以完全复制原有的控件创建逻辑
+        # Row 1: Distance Range + Window Frames + Time Downsample + Space Downsample
+        row = 1
+
+        # Distance Range controls
+        distance_label = QLabel("Distance Range:")
+        distance_label.setFont(QFont("Times New Roman", 8))
+        distance_label.setMinimumHeight(22)
+        layout.addWidget(distance_label, row, 0)
+
+        from_label = QLabel("From:")
+        from_label.setFont(QFont("Times New Roman", 8))
+        from_label.setMinimumHeight(22)
+        layout.addWidget(from_label, row, 1)
+
+        self.distance_start_spin = QSpinBox()
+        self.distance_start_spin.setRange(0, 1000000)
+        self.distance_start_spin.setValue(40)
+        self.distance_start_spin.setMaximumWidth(60)
+        self.distance_start_spin.setMinimumHeight(22)
+        self.distance_start_spin.setFont(QFont("Times New Roman", 8))
+        self.distance_start_spin.valueChanged.connect(self._on_distance_start_changed_v2)
+        layout.addWidget(self.distance_start_spin, row, 2)
+
+        to_label = QLabel("To:")
+        to_label.setFont(QFont("Times New Roman", 8))
+        to_label.setMinimumHeight(22)
+        layout.addWidget(to_label, row, 3)
+
+        self.distance_end_spin = QSpinBox()
+        self.distance_end_spin.setRange(1, 1000000)
+        self.distance_end_spin.setValue(100)
+        self.distance_end_spin.setMaximumWidth(60)
+        self.distance_end_spin.setMinimumHeight(22)
+        self.distance_end_spin.setFont(QFont("Times New Roman", 8))
+        self.distance_end_spin.valueChanged.connect(self._on_distance_end_changed_v2)
+        layout.addWidget(self.distance_end_spin, row, 4)
+
+        # Window Frames
+        window_label = QLabel("Window Frames:")
+        window_label.setFont(QFont("Times New Roman", 8))
+        window_label.setMinimumHeight(22)
+        layout.addWidget(window_label, row, 5)
+
+        self.window_frames_spin = QSpinBox()
+        self.window_frames_spin.setRange(1, self._max_window_frames)
+        self.window_frames_spin.setValue(self._window_frames)
+        self.window_frames_spin.setMaximumWidth(50)
+        self.window_frames_spin.setMinimumHeight(22)
+        self.window_frames_spin.setFont(QFont("Times New Roman", 8))
+        self.window_frames_spin.valueChanged.connect(self._on_window_frames_changed_v2)
+        layout.addWidget(self.window_frames_spin, row, 6)
+
+        # Time Downsample
+        time_ds_label = QLabel("Time DS:")
+        time_ds_label.setFont(QFont("Times New Roman", 8))
+        time_ds_label.setMinimumHeight(22)
+        layout.addWidget(time_ds_label, row, 7)
+
+        self.time_downsample_spin = QSpinBox()
+        self.time_downsample_spin.setRange(1, 1000)
+        self.time_downsample_spin.setValue(self._time_downsample)
+        self.time_downsample_spin.setMaximumWidth(50)
+        self.time_downsample_spin.setMinimumHeight(22)
+        self.time_downsample_spin.setFont(QFont("Times New Roman", 8))
+        self.time_downsample_spin.valueChanged.connect(self._on_time_downsample_changed_v2)
+        layout.addWidget(self.time_downsample_spin, row, 8)
+
+        # Space Downsample
+        space_ds_label = QLabel("Space DS:")
+        space_ds_label.setFont(QFont("Times New Roman", 8))
+        space_ds_label.setMinimumHeight(22)
+        layout.addWidget(space_ds_label, row, 9)
+
+        self.space_downsample_spin = QSpinBox()
+        self.space_downsample_spin.setRange(1, 100)
+        self.space_downsample_spin.setValue(self._space_downsample)
+        self.space_downsample_spin.setMaximumWidth(50)
+        self.space_downsample_spin.setMinimumHeight(22)
+        self.space_downsample_spin.setFont(QFont("Times New Roman", 8))
+        self.space_downsample_spin.valueChanged.connect(self._on_space_downsample_changed_v2)
+        layout.addWidget(self.space_downsample_spin, row, 10)
+
+        # Row 2: Color Range + Colormap + Update Interval + Reset Button
+        row = 2
+
+        # Color Range controls
+        color_range_label = QLabel("Color Range:")
+        color_range_label.setFont(QFont("Times New Roman", 8))
+        color_range_label.setMinimumHeight(22)
+        layout.addWidget(color_range_label, row, 0)
+
+        min_label = QLabel("Min:")
+        min_label.setFont(QFont("Times New Roman", 8))
+        min_label.setMinimumHeight(22)
+        layout.addWidget(min_label, row, 1)
+
+        self.vmin_spin = QDoubleSpinBox()
+        self.vmin_spin.setRange(-1.0, 1.0)
+        self.vmin_spin.setDecimals(3)
+        self.vmin_spin.setSingleStep(0.001)
+        self.vmin_spin.setValue(-0.1)
+        self.vmin_spin.setMaximumWidth(60)
+        self.vmin_spin.setMinimumHeight(22)
+        self.vmin_spin.setFont(QFont("Times New Roman", 8))
+        self.vmin_spin.valueChanged.connect(self._on_vmin_changed_v2)
+        layout.addWidget(self.vmin_spin, row, 2)
+
+        max_label = QLabel("Max:")
+        max_label.setFont(QFont("Times New Roman", 8))
+        max_label.setMinimumHeight(22)
+        layout.addWidget(max_label, row, 3)
+
+        self.vmax_spin = QDoubleSpinBox()
+        self.vmax_spin.setRange(-1.0, 1.0)
+        self.vmax_spin.setDecimals(3)
+        self.vmax_spin.setSingleStep(0.001)
+        self.vmax_spin.setValue(0.1)
+        self.vmax_spin.setMaximumWidth(60)
+        self.vmax_spin.setMinimumHeight(22)
+        self.vmax_spin.setFont(QFont("Times New Roman", 8))
+        self.vmax_spin.valueChanged.connect(self._on_vmax_changed_v2)
+        layout.addWidget(self.vmax_spin, row, 4)
+
+        # Colormap
+        colormap_label = QLabel("Colormap:")
+        colormap_label.setFont(QFont("Times New Roman", 8))
+        colormap_label.setMinimumHeight(22)
+        layout.addWidget(colormap_label, row, 5)
+
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.setMaximumWidth(80)
+        self.colormap_combo.setMinimumHeight(22)
+        self.colormap_combo.setFont(QFont("Times New Roman", 8))
+        for name, value in COLORMAP_OPTIONS:
+            self.colormap_combo.addItem(name, value)
+        self.colormap_combo.setCurrentText("Jet")
+        self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed_v2)
+        layout.addWidget(self.colormap_combo, row, 6)
+
+        # Update Interval
+        interval_label = QLabel("Update Interval:")
+        interval_label.setFont(QFont("Times New Roman", 8))
+        interval_label.setMinimumHeight(22)
+        layout.addWidget(interval_label, row, 7)
+
+        self.update_interval_spin = QSpinBox()
+        self.update_interval_spin.setRange(50, 5000)
+        self.update_interval_spin.setValue(self._update_interval_ms)
+        self.update_interval_spin.setSuffix(" ms")
+        self.update_interval_spin.setMaximumWidth(80)
+        self.update_interval_spin.setMinimumHeight(22)
+        self.update_interval_spin.setFont(QFont("Times New Roman", 8))
+        self.update_interval_spin.valueChanged.connect(self._on_update_interval_changed_v2)
+        layout.addWidget(self.update_interval_spin, row, 8)
+
+        # Reset Button
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.setFont(QFont("Times New Roman", 8))
+        reset_btn.setMaximumWidth(120)
+        reset_btn.setMinimumHeight(22)
+        reset_btn.clicked.connect(self._reset_to_defaults_v2)
+        layout.addWidget(reset_btn, row, 9, 1, 2)
+
+        # 添加弹性空间
+        layout.setColumnStretch(11, 1)
 
         return group
 
@@ -1303,6 +1467,163 @@ class TimeSpacePlotWidgetV2(QWidget):
             import traceback
             traceback.print_exc()
 
+    # ========== V2版本的参数变化处理方法 ==========
+
+    def _on_distance_start_changed_v2(self, value: int):
+        """处理距离起始值变化"""
+        if value < self._distance_end:
+            self._distance_start = value
+            self._update_distance_range_v2()
+            self.parametersChanged.emit()
+
+    def _on_distance_end_changed_v2(self, value: int):
+        """处理距离结束值变化"""
+        if value > self._distance_start:
+            self._distance_end = value
+            self._update_distance_range_v2()
+            self.parametersChanged.emit()
+
+    def _update_distance_range_v2(self):
+        """更新距离范围约束"""
+        self.distance_start_spin.setMaximum(self._distance_end - 1)
+        self.distance_end_spin.setMinimum(self._distance_start + 1)
+        if self._full_point_num > 0:
+            self.distance_end_spin.setMaximum(self._full_point_num)
+
+    def _on_window_frames_changed_v2(self, value: int):
+        """处理窗口帧数变化"""
+        self._window_frames = value
+        if self._data_buffer is not None:
+            old_data = list(self._data_buffer)
+            self._data_buffer = deque(old_data, maxlen=value)
+            self._update_display_v2()
+        self.parametersChanged.emit()
+
+    def _on_space_downsample_changed_v2(self, value: int):
+        """处理空间降采样变化"""
+        self._space_downsample = value
+        if self._data_buffer is not None:
+            self._data_buffer.clear()
+        self.parametersChanged.emit()
+
+    def _on_time_downsample_changed_v2(self, value: int):
+        """处理时间降采样变化"""
+        self._time_downsample = value
+        if self._data_buffer is not None:
+            self._data_buffer.clear()
+        self.parametersChanged.emit()
+
+    def _on_update_interval_changed_v2(self, value: int):
+        """处理更新间隔变化"""
+        self._update_interval_ms = value
+        self.parametersChanged.emit()
+        log.debug(f"Update interval changed to {value}ms")
+
+    def _on_colormap_changed_v2(self, text: str):
+        """处理颜色映射变化"""
+        for name, value in COLORMAP_OPTIONS:
+            if name == text:
+                self._colormap = value
+                break
+        self._apply_colormap_v2()
+        self.parametersChanged.emit()
+
+    def _on_vmin_changed_v2(self, value: float):
+        """处理最小颜色值变化"""
+        self._vmin = value
+        self._update_display_v2()
+        self.parametersChanged.emit()
+
+    def _on_vmax_changed_v2(self, value: float):
+        """处理最大颜色值变化"""
+        self._vmax = value
+        self._update_display_v2()
+        self.parametersChanged.emit()
+
+    def _reset_to_defaults_v2(self):
+        """重置为默认值"""
+        self._window_frames = 5
+        self._distance_start = 40
+        self._distance_end = 100
+        self._time_downsample = 50
+        self._space_downsample = 2
+        self._colormap = "jet"
+        self._vmin = -0.1
+        self._vmax = 0.1
+        self._update_interval_ms = 100
+
+        # 更新UI控件
+        self.window_frames_spin.setValue(self._window_frames)
+        self.distance_start_spin.setValue(self._distance_start)
+        self.distance_end_spin.setValue(self._distance_end)
+        self.time_downsample_spin.setValue(self._time_downsample)
+        self.space_downsample_spin.setValue(self._space_downsample)
+        self.colormap_combo.setCurrentText("Jet")
+        self.vmin_spin.setValue(self._vmin)
+        self.vmax_spin.setValue(self._vmax)
+        self.update_interval_spin.setValue(self._update_interval_ms)
+
+        # 清空缓冲区
+        if self._data_buffer is not None:
+            self._data_buffer = deque(maxlen=self._window_frames)
+
+        self.parametersChanged.emit()
+
+    # ========== V2版本的接口兼容性方法 ==========
+
+    def get_parameters(self):
+        """获取当前参数 - 兼容原接口"""
+        return {
+            'window_frames': self._window_frames,
+            'distance_range_start': self._distance_start,
+            'distance_range_end': self._distance_end,
+            'time_downsample': self._time_downsample,
+            'space_downsample': self._space_downsample,
+            'colormap_type': self._colormap,
+            'vmin': self._vmin,
+            'vmax': self._vmax,
+            'update_interval_ms': self._update_interval_ms
+        }
+
+    def set_parameters(self, params):
+        """设置参数 - 兼容原接口"""
+        if 'window_frames' in params:
+            self.window_frames_spin.setValue(params['window_frames'])
+        if 'distance_range_start' in params:
+            self.distance_start_spin.setValue(params['distance_range_start'])
+        if 'distance_range_end' in params:
+            self.distance_end_spin.setValue(params['distance_range_end'])
+        if 'time_downsample' in params:
+            self.time_downsample_spin.setValue(params['time_downsample'])
+        if 'space_downsample' in params:
+            self.space_downsample_spin.setValue(params['space_downsample'])
+        if 'colormap_type' in params:
+            for name, value in COLORMAP_OPTIONS:
+                if value == params['colormap_type']:
+                    self.colormap_combo.setCurrentText(name)
+                    break
+        if 'vmin' in params:
+            self.vmin_spin.setValue(params['vmin'])
+        if 'vmax' in params:
+            self.vmax_spin.setValue(params['vmax'])
+        if 'update_interval_ms' in params:
+            self.update_interval_spin.setValue(params['update_interval_ms'])
+
+    def update_data(self, data: np.ndarray) -> bool:
+        """数据更新接口 - 兼容原接口"""
+        return self.update_data_v2(data)
+
+    def clear_data(self):
+        """清空数据接口 - 兼容原接口"""
+        if self._data_buffer is not None:
+            self._data_buffer.clear()
+
+        # 重置到空显示
+        empty_data = np.zeros((10, 10))
+        self.image_item.setImage(empty_data, levels=[self._vmin, self._vmax])
+        self._current_frame_count = 0
+        log.debug("TimeSpacePlotWidgetV2 data cleared")
+
 
 # ========== 使用说明 ==========
 #
@@ -1327,3 +1648,22 @@ class TimeSpacePlotWidgetV2(QWidget):
 #    - 先测试修复后的 ImageView 版本
 #    - 如果坐标轴问题仍然存在，再切换到 PlotWidget 版本
 #
+
+
+# ========== 智能版本选择器 ==========
+def create_time_space_widget():
+    """
+    智能创建 TimeSpace 组件
+    根据配置自动选择 ImageView 或 PlotWidget 版本
+    """
+    if USE_PLOTWIDGET_VERSION:
+        log.info("Using PlotWidget version for guaranteed axis display")
+        return TimeSpacePlotWidgetV2()
+    else:
+        log.info("Using ImageView version (original)")
+        return TimeSpacePlotWidget()
+
+
+# ========== 导出接口 ==========
+# 主要的导出类
+__all__ = ['TimeSpacePlotWidget', 'TimeSpacePlotWidgetV2', 'create_time_space_widget']
