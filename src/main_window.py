@@ -888,6 +888,9 @@ class MainWindow(QMainWindow):
         self.mode_time_radio.toggled.connect(self._on_mode_changed)
         self.mode_space_radio.toggled.connect(self._on_mode_changed)
 
+        # 连接region index变化信号
+        self.region_index_spin.valueChanged.connect(self._on_region_changed)
+
     def _connect_time_space_signals(self):
         """Connect time-space widget signals after widget is created"""
         if hasattr(self, 'time_space_widget') and self.time_space_widget is not None:
@@ -1588,9 +1591,33 @@ class MainWindow(QMainWindow):
     def _on_mode_changed(self, checked):
         """Handle mode radio button changes"""
         if checked:  # Only respond to the checked button to avoid duplicate calls
-            # Update parameters immediately when mode changes
-            self._update_params()
-            log.debug(f"Display mode changed to: {self.params.display.mode}")
+            # 安全地更新显示模式参数，避免在运行时重新收集所有参数
+            try:
+                if hasattr(self, 'params') and self.params is not None:
+                    # 只更新显示模式相关参数
+                    if self.mode_space_radio.isChecked():
+                        self.params.display.mode = DisplayMode.SPACE
+                        log.debug("Display mode changed to SPACE")
+                    else:
+                        self.params.display.mode = DisplayMode.TIME
+                        log.debug("Display mode changed to TIME")
+
+                    # 更新region index
+                    self.params.display.region_index = self.region_index_spin.value()
+                else:
+                    log.warning("Params not initialized, mode change ignored")
+            except Exception as e:
+                log.warning(f"Error updating mode parameters: {e}")
+
+    @pyqtSlot(int)
+    def _on_region_changed(self, value):
+        """Handle region index changes"""
+        try:
+            if hasattr(self, 'params') and self.params is not None:
+                self.params.display.region_index = value
+                log.debug(f"Region index changed to: {value}")
+        except Exception as e:
+            log.warning(f"Error updating region index: {e}")
 
     def _on_data_source_changed(self, index: int):
         """Handle data source change"""
