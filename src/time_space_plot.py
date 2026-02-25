@@ -341,8 +341,8 @@ class TimeSpacePlotWidget(QWidget):
             empty_data = np.zeros((10, 10))
             self.image_view.setImage(empty_data, autoRange=True)
 
-            # Set up proper axes after image is loaded
-            QTimer.singleShot(200, self._setup_axes_simple)
+            # Set up proper axes after image is loaded - use robust method
+            QTimer.singleShot(200, self._setup_axes_robust)
 
         except Exception as e:
             log.warning(f"Error in basic plot setup: {e}")
@@ -549,6 +549,80 @@ class TimeSpacePlotWidget(QWidget):
         except Exception as e:
             log.debug(f"Could not set colorbar background: {e}")
 
+    def _setup_axes_robust(self):
+        """
+        强化的轴配置方法 - 结合多种方法确保坐标轴显示
+        """
+        try:
+            log.debug("Setting up axes with robust method")
+
+            # 1. 首先尝试通过 _get_plot_item_robust 获取 PlotItem
+            plot_item = self._get_plot_item_robust()
+
+            if plot_item is not None:
+                log.debug("Got PlotItem, configuring axes...")
+
+                # 强制显示坐标轴
+                plot_item.showAxis('bottom', show=True)
+                plot_item.showAxis('left', show=True)
+                plot_item.showAxis('top', show=False)
+                plot_item.showAxis('right', show=False)
+
+                # 设置轴标签
+                plot_item.setLabel('bottom', 'Distance (points)',
+                                 color='k', **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+                plot_item.setLabel('left', 'Time (samples)',
+                                 color='k', **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+
+                # 配置轴属性
+                font = QFont("Times New Roman", 9)
+                for axis_name in ['bottom', 'left']:
+                    axis = plot_item.getAxis(axis_name)
+                    if axis:
+                        axis.setTickFont(font)
+                        axis.setPen('k')
+                        axis.setTextPen('k')
+                        axis.setStyle(showValues=True)  # 强制显示数值
+                        axis.enableAutoSIPrefix(False)
+                        axis.show()
+                        # 清除缓存强制重绘
+                        axis.picture = None
+                        axis.update()
+
+                self._axis_configured = True
+                log.info("Robust axis setup completed successfully")
+                return True
+
+            # 2. 如果 PlotItem 方法失败，尝试直接通过 ImageView 设置
+            log.debug("PlotItem method failed, trying ImageView direct methods")
+
+            # 方法2a: 直接通过ImageView设置标签（如果支持）
+            if hasattr(self.image_view, 'setLabel'):
+                self.image_view.setLabel('bottom', 'Distance (points)')
+                self.image_view.setLabel('left', 'Time (samples)')
+                log.debug("Set labels via ImageView.setLabel")
+
+            # 方法2b: 通过view设置
+            view = self.image_view.getView()
+            if view is not None:
+                if hasattr(view, 'setBackgroundColor'):
+                    view.setBackgroundColor('w')
+                if hasattr(view, 'setMouseEnabled'):
+                    view.setMouseEnabled(x=True, y=True)
+                if hasattr(view, 'setLabel'):
+                    view.setLabel('bottom', 'Distance (points)')
+                    view.setLabel('left', 'Time (samples)')
+                    log.debug("Set labels via view.setLabel")
+
+            self._axis_configured = True
+            log.warning("Partial axis setup completed - may not show full ticks")
+            return True
+
+        except Exception as e:
+            log.error(f"Robust axis setup failed: {e}")
+            self._axis_configured = False
+            return False
+
     def _setup_axes_simple(self):
         """简化的轴配置方法 - 使用ImageView的内置特性"""
         try:
@@ -587,15 +661,16 @@ class TimeSpacePlotWidget(QWidget):
             self._axis_configured = False
 
     def _ensure_axes_visible(self):
-        """简化的轴可见性检查"""
-        # 如果还没有配置成功，再尝试一次
+        """强化的轴可见性检查和恢复"""
+        # 如果还没有配置成功，使用强化方法再尝试一次
         if not self._axis_configured:
-            self._setup_axes_simple()
+            log.debug("Axis not configured, attempting robust setup")
+            self._setup_axes_robust()
 
-        # 可选：这里可以添加调试信息输出
+        # 可选：添加调试信息输出
         if hasattr(self, '_debug_counter'):
             self._debug_counter += 1
-            if self._debug_counter % 10 == 0:  # 每10次检查输出一次调试信息
+            if self._debug_counter % 5 == 0:  # 每5次检查输出一次调试信息
                 self._debug_axis_state_simple()
         else:
             self._debug_counter = 1
@@ -610,9 +685,9 @@ class TimeSpacePlotWidget(QWidget):
             log.debug(f"Debug failed: {e}")
 
     def _ensure_axes_after_update(self):
-        """更新后确保坐标轴可见 - 简化版"""
-        # 每次setImage后重新尝试设置轴标签
-        self._setup_axes_simple()
+        """更新后确保坐标轴可见 - 强化版"""
+        # 每次setImage后重新尝试设置轴标签，使用强化方法
+        self._setup_axes_robust()
 
     def _apply_colormap(self):
         """Apply the selected colormap to the image view."""
@@ -679,6 +754,56 @@ class TimeSpacePlotWidget(QWidget):
             import traceback
             traceback.print_exc()
 
+    def _get_plot_item_robust(self):
+        """
+        Robustly get PlotItem from ImageView across different PyQtGraph versions.
+
+        Returns:
+            PlotItem or None if not accessible
+        """
+        plot_item = None
+
+        try:
+            # Method 1: Direct view access (newer versions)
+            view = self.image_view.getView()
+            if view and hasattr(view, 'showAxis'):
+                plot_item = view
+                log.debug("Got PlotItem via direct view access")
+            elif view and hasattr(view, 'getPlotItem'):
+                plot_item = view.getPlotItem()
+                log.debug("Got PlotItem via view.getPlotItem()")
+
+            # Method 2: UI interface access (fallback)
+            if plot_item is None and hasattr(self.image_view, 'ui'):
+                graphics_view = getattr(self.image_view.ui, 'graphicsView', None)
+                if graphics_view and hasattr(graphics_view, 'getPlotItem'):
+                    plot_item = graphics_view.getPlotItem()
+                    log.debug("Got PlotItem via UI interface")
+
+            # Method 3: ImageItem parent access (last resort)
+            if plot_item is None:
+                try:
+                    image_item = self.image_view.getImageItem()
+                    if image_item and hasattr(image_item, 'getViewBox'):
+                        view_box = image_item.getViewBox()
+                        if view_box and hasattr(view_box, 'parent'):
+                            parent = view_box.parent()
+                            if parent and hasattr(parent, 'showAxis'):
+                                plot_item = parent
+                                log.debug("Got PlotItem via ImageItem parent")
+                except Exception as e:
+                    log.debug(f"ImageItem parent method failed: {e}")
+
+        except Exception as e:
+            log.warning(f"Error getting PlotItem: {e}")
+
+        if plot_item is None:
+            log.warning("All methods to get PlotItem failed")
+        else:
+            log.debug(f"Successfully got PlotItem: {type(plot_item)}")
+
+        return plot_item
+
     def _update_axis_labels(self, data_shape: tuple):
         """Update axis labels and scales based on data dimensions."""
         try:
@@ -688,43 +813,43 @@ class TimeSpacePlotWidget(QWidget):
                 log.warning("Could not get plot item for axis update")
                 return
 
-                # data_shape is (time_points, spatial_points)
-                n_time_points, n_spatial_points = data_shape
+            # data_shape is (time_points, spatial_points)
+            n_time_points, n_spatial_points = data_shape
 
-                # X-axis: Distance (horizontal)
-                distance_start_actual = self._distance_start
-                distance_step = self._space_downsample
-                distance_end_actual = distance_start_actual + n_spatial_points * distance_step
+            # X-axis: Distance (horizontal)
+            distance_start_actual = self._distance_start
+            distance_step = self._space_downsample
+            distance_end_actual = distance_start_actual + n_spatial_points * distance_step
 
-                # Update labels with enhanced visibility settings
-                plot_item.setLabel('bottom', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
-                                 color='k', **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+            # Update labels with enhanced visibility settings
+            plot_item.setLabel('bottom', f'Distance (points: {distance_start_actual}:{distance_step}:{distance_end_actual})',
+                             color='k', **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
-                # Y-axis: Time (vertical, bottom=newer, top=older)
-                plot_item.setLabel('left', 'Time (samples, bottom=newer)',
-                                 color='k', **{'font-family': 'Times New Roman', 'font-size': '10pt'})
+            # Y-axis: Time (vertical, bottom=newer, top=older)
+            plot_item.setLabel('left', 'Time (samples, bottom=newer)',
+                             color='k', **{'font-family': 'Times New Roman', 'font-size': '10pt'})
 
-                # Force show axes again (critical after label update)
-                plot_item.showAxis('bottom', show=True)
-                plot_item.showAxis('left', show=True)
+            # Force show axes again (critical after label update)
+            plot_item.showAxis('bottom', show=True)
+            plot_item.showAxis('left', show=True)
 
-                # Get and configure axes with enhanced visibility settings
-                font = QFont("Times New Roman", 9)
-                for axis_name in ['bottom', 'left']:
-                    axis = plot_item.getAxis(axis_name)
-                    if axis:
-                        axis.setTickFont(font)
-                        axis.setPen('k')
-                        axis.setTextPen('k')
-                        axis.setStyle(showValues=True)
-                        axis.enableAutoSIPrefix(False)
-                        axis.show()
+            # Get and configure axes with enhanced visibility settings
+            font = QFont("Times New Roman", 9)
+            for axis_name in ['bottom', 'left']:
+                axis = plot_item.getAxis(axis_name)
+                if axis:
+                    axis.setTickFont(font)
+                    axis.setPen('k')
+                    axis.setTextPen('k')
+                    axis.setStyle(showValues=True)
+                    axis.enableAutoSIPrefix(False)
+                    axis.show()
 
-                        # Force tick redraw
-                        axis.picture = None
-                        axis.update()
+                    # Force tick redraw
+                    axis.picture = None
+                    axis.update()
 
-                log.debug(f"Updated axis labels: X=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual}), Y=time({n_time_points} samples)")
+            log.debug(f"Updated axis labels: X=distance({n_spatial_points} points, {distance_start_actual}:{distance_step}:{distance_end_actual}), Y=time({n_time_points} samples)")
 
         except Exception as e:
             log.warning(f"Error updating axis labels: {e}")
@@ -899,3 +1024,306 @@ class TimeSpacePlotWidget(QWidget):
 
         self._current_frame_count = 0
         log.debug("TimeSpacePlotWidget data cleared")
+
+
+# ========== ALTERNATIVE IMPLEMENTATION USING PLOTWIDGET ==========
+#
+# 如果 ImageView 的坐标轴问题仍然无法解决，可以使用以下基于 PlotWidget 的实现
+# 这个实现保证坐标轴刻度的完全可靠显示
+#
+
+class TimeSpacePlotWidgetV2(QWidget):
+    """
+    基于 PlotWidget + ImageItem 的 Time-Space 图实现
+
+    完全替代 ImageView，确保坐标轴刻度的可靠显示
+    这个版本牺牲了 ImageView 的便利性，但提供了完全的轴控制
+    """
+
+    # 信号定义
+    parametersChanged = pyqtSignal()
+    pointCountChanged = pyqtSignal(int)
+
+    def __init__(self):
+        """初始化 PlotWidget 版本的 TimeSpacePlot"""
+        super().__init__()
+        log.debug("Initializing TimeSpacePlotWidgetV2 (PlotWidget-based)")
+
+        # 数据相关参数 (与原版本相同)
+        self._data_buffer = None
+        self._max_window_frames = 100
+        self._window_frames = 5
+        self._distance_start = 40
+        self._distance_end = 100
+        self._time_downsample = 50
+        self._space_downsample = 2
+        self._colormap = "jet"
+        self._vmin = -0.1
+        self._vmax = 0.1
+        self._update_interval_ms = 100
+
+        # 显示相关参数
+        self._full_point_num = 0
+        self._current_frame_count = 0
+
+        # 定时器
+        self._display_timer = QTimer(self)
+        self._display_timer.timeout.connect(self._update_display_v2)
+        self._display_timer.setSingleShot(True)
+        self._pending_update = False
+
+        self._setup_ui_v2()
+        log.debug("TimeSpacePlotWidgetV2 initialized successfully")
+
+    def _setup_ui_v2(self):
+        """设置基于 PlotWidget 的UI"""
+        layout = QVBoxLayout(self)
+        layout.setSpacing(5)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        # 控制面板 (重用原来的方法)
+        control_panel = self._create_control_panel_v2()
+        control_panel.setMaximumHeight(120)
+        layout.addWidget(control_panel)
+
+        # 创建 PlotWidget 替代 ImageView
+        self._create_plot_area_v2()
+        layout.addWidget(self.plot_widget, 1)
+
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def _create_plot_area_v2(self):
+        """创建基于 PlotWidget 的绘图区域"""
+        # 创建 PlotWidget (完整轴支持)
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setMinimumSize(800, 400)
+
+        # 添加 ImageItem 用于2D数据显示
+        self.image_item = pg.ImageItem()
+        self.plot_widget.addItem(self.image_item)
+
+        # 完全可靠的轴配置
+        self.plot_widget.setLabel('bottom', 'Distance (points)',
+                                color='k', **{'font-size': '10pt', 'font-family': 'Times New Roman'})
+        self.plot_widget.setLabel('left', 'Time (samples)',
+                                color='k', **{'font-size': '10pt', 'font-family': 'Times New Roman'})
+
+        # 确保坐标轴显示
+        self.plot_widget.showAxis('bottom', show=True)
+        self.plot_widget.showAxis('left', show=True)
+        self.plot_widget.showAxis('top', show=False)
+        self.plot_widget.showAxis('right', show=False)
+
+        # 轴字体设置
+        font = QFont("Times New Roman", 9)
+        for axis_name in ['bottom', 'left']:
+            axis = self.plot_widget.getAxis(axis_name)
+            if axis:
+                axis.setTickFont(font)
+                axis.setPen('k')
+                axis.setTextPen('k')
+                axis.setStyle(showValues=True)
+                axis.enableAutoSIPrefix(False)
+
+        # 设置背景和鼠标交互
+        self.plot_widget.setBackground('w')
+        view_box = self.plot_widget.getViewBox()
+        view_box.setMouseEnabled(x=True, y=True)
+        view_box.setAspectLocked(False)
+
+        # 创建手动 ColorBar
+        self._create_colorbar_v2()
+
+        log.info("PlotWidget plot area created with guaranteed axis display")
+
+    def _create_colorbar_v2(self):
+        """创建手动的 ColorBar"""
+        # 创建一个简单的颜色条显示
+        # 注意：这需要额外的布局管理
+        self.color_bar = pg.ColorBarItem(interactive=False, width=15)
+
+        # 应用默认colormap
+        self._apply_colormap_v2()
+
+    def _apply_colormap_v2(self):
+        """为 PlotWidget 版本应用颜色映射"""
+        try:
+            # 创建颜色映射 (复用原有逻辑)
+            if self._colormap == "jet":
+                colors = [
+                    (0.0, (0, 0, 128)), (0.25, (0, 0, 255)),
+                    (0.5, (0, 255, 255)), (0.75, (255, 255, 0)), (1.0, (255, 0, 0))
+                ]
+            else:
+                colors = [(0.0, (0, 0, 255)), (0.5, (0, 255, 0)), (1.0, (255, 0, 0))]
+
+            colormap = pg.ColorMap(pos=[c[0] for c in colors], color=[c[1] for c in colors])
+
+            # 设置 ImageItem 的颜色映射
+            lut = colormap.getLookupTable(0.0, 1.0, 256)
+            self.image_item.setLookupTable(lut)
+
+            log.debug(f"Applied colormap to PlotWidget version: {self._colormap}")
+
+        except Exception as e:
+            log.warning(f"Error applying colormap in PlotWidget version: {e}")
+
+    def _create_control_panel_v2(self):
+        """创建控制面板 - 重用原有逻辑但适配新的信号"""
+        group = QGroupBox("Time-Space Plot Controls (PlotWidget Version)")
+        group.setFont(QFont("Times New Roman", 9))
+
+        # 这里可以重用原来的控制面板创建逻辑
+        # 为了简化，仅展示核心控件
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(15)
+        layout.setVerticalSpacing(8)
+
+        # 添加说明标签
+        info_label = QLabel("NOTE: Using PlotWidget for reliable axis display")
+        info_label.setFont(QFont("Times New Roman", 8))
+        info_label.setStyleSheet("color: blue;")
+        layout.addWidget(info_label, 0, 0, 1, -1)
+
+        # 可以添加关键的控制控件，或者重用原来的 _create_control_panel 方法
+        # 这里简化处理，实际使用时可以完全复制原有的控件创建逻辑
+
+        return group
+
+    def update_data_v2(self, data: np.ndarray) -> bool:
+        """PlotWidget版本的数据更新方法"""
+        try:
+            log.debug(f"PlotWidget version received data shape: {data.shape}")
+
+            if data.ndim == 1:
+                data = data.reshape(1, -1)
+
+            frame_count, point_count = data.shape
+            if self._full_point_num != point_count:
+                self._full_point_num = point_count
+                self.pointCountChanged.emit(point_count)
+
+            # 数据处理 (重用原有逻辑)
+            if self._data_buffer is None:
+                self._data_buffer = deque(maxlen=self._window_frames)
+
+            processed_data_block = self._process_data_block_v2(data)
+            if processed_data_block is not None:
+                self._data_buffer.append(processed_data_block)
+
+            # 调度显示更新
+            self._schedule_display_update_v2()
+            return True
+
+        except Exception as e:
+            log.error(f"Error in PlotWidget version update_data: {e}")
+            return False
+
+    def _process_data_block_v2(self, data_block: np.ndarray) -> Optional[np.ndarray]:
+        """处理数据块 - 重用原有逻辑"""
+        try:
+            frame_count, point_count = data_block.shape
+
+            # 应用距离范围
+            start_idx = max(0, self._distance_start)
+            end_idx = min(point_count, self._distance_end)
+
+            if start_idx >= end_idx:
+                return None
+
+            range_data = data_block[:, start_idx:end_idx]
+
+            # 应用降采样
+            if self._space_downsample > 1:
+                range_data = range_data[:, ::self._space_downsample]
+
+            if self._time_downsample > 1 and frame_count > self._time_downsample:
+                range_data = range_data[::self._time_downsample, :]
+
+            return range_data
+
+        except Exception as e:
+            log.error(f"Error processing data block in PlotWidget version: {e}")
+            return None
+
+    def _schedule_display_update_v2(self):
+        """调度显示更新"""
+        if not self._display_timer.isActive():
+            self._display_timer.start(self._update_interval_ms)
+            self._pending_update = False
+        else:
+            self._pending_update = True
+
+    def _update_display_v2(self):
+        """PlotWidget版本的显示更新"""
+        if not self._data_buffer or len(self._data_buffer) == 0:
+            return
+
+        try:
+            # 合并缓冲区数据
+            buffer_list = list(self._data_buffer)
+            time_space_data = np.concatenate(buffer_list, axis=0)
+
+            log.debug(f"PlotWidget updating display with data shape: {time_space_data.shape}")
+
+            # 设置图像数据 - 关键: 使用正确的数据范围
+            self.image_item.setImage(time_space_data, levels=[self._vmin, self._vmax])
+
+            # 设置正确的坐标范围
+            n_time_points, n_spatial_points = time_space_data.shape
+
+            # 设置图像的几何变换，使其正确映射到坐标轴
+            distance_start = self._distance_start
+            distance_step = self._space_downsample
+
+            # ImageItem 的 transform 设置
+            tr = pg.QtGui.QTransform()
+            tr.translate(distance_start, 0)  # X方向偏移到起始距离
+            tr.scale(distance_step, 1)       # X方向按采样步长缩放
+            self.image_item.setTransform(tr)
+
+            # 更新轴标签以反映实际数据范围
+            distance_end = distance_start + n_spatial_points * distance_step
+            self.plot_widget.setLabel('bottom',
+                                    f'Distance (points: {distance_start}:{distance_step}:{distance_end})')
+            self.plot_widget.setLabel('left', f'Time (samples, {n_time_points} total)')
+
+            # 应用颜色映射
+            self._apply_colormap_v2()
+
+            log.debug("PlotWidget display updated successfully with guaranteed axes")
+
+            # 处理待处理的更新
+            if self._pending_update:
+                self._pending_update = False
+                self._display_timer.start(self._update_interval_ms)
+
+        except Exception as e:
+            log.error(f"Error updating PlotWidget display: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+# ========== 使用说明 ==========
+#
+# 要使用 PlotWidget 版本替代现有的 ImageView 版本:
+#
+# 1. 在 main_window.py 中, 将:
+#    self.time_space_widget = TimeSpacePlotWidget()
+#    改为:
+#    self.time_space_widget = TimeSpacePlotWidgetV2()
+#
+# 2. PlotWidget 版本的优点:
+#    - 坐标轴刻度显示完全可靠
+#    - 不受 PyQtGraph 版本影响
+#    - 轴配置API稳定一致
+#
+# 3. PlotWidget 版本的缺点:
+#    - 需要手动管理 ColorBar
+#    - 代码相对复杂一些
+#    - 失去 ImageView 的一些便利特性
+#
+# 4. 建议的迁移策略:
+#    - 先测试修复后的 ImageView 版本
+#    - 如果坐标轴问题仍然存在，再切换到 PlotWidget 版本
+#
