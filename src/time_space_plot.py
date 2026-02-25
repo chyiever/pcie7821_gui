@@ -478,17 +478,27 @@ class TimeSpacePlotWidget(QWidget):
 
             log.debug(f"Concatenated time-space data shape: {time_space_data.shape}")
 
-            # CRITICAL FIX: Keep original data orientation
-            # User feedback: transpose caused issues, use original orientation
-            # Original data: (time_points, spatial_points)
-            # Keep as: (time_points, spatial_points) -> Y=time, X=distance
-            display_data = time_space_data  # No transpose
+            # CRITICAL FIX: 根据日志分析，数据已经是(space, time)形状
+            # 但坐标映射期望X=time, Y=distance，需要转置以匹配PyQtGraph约定
+            # PyQtGraph约定：第一维(行)→Y轴，第二维(列)→X轴
 
-            log.debug(f"Final display data shape: {display_data.shape} (time x distance)")
+            # 打印转置前的形状
+            log.debug(f"Before transpose: time_space_data.shape = {time_space_data.shape}")
+
+            # 当前：time_space_data.shape = (space, time)
+            # 需要：display_data.shape = (time, space) 以实现X=time, Y=space的正确映射
+            display_data = time_space_data.T  # 转置: (space,time) → (time,space)
+
+            # 打印转置后的形状
+            log.debug(f"After transpose: display_data.shape = {display_data.shape}")
+            log.debug(f"Transpose verification: original={time_space_data.shape} -> transposed={display_data.shape}")
+
+            log.debug(f"Final display data shape: {display_data.shape} (time x space for correct scrolling)")
             log.debug(f"Data range: [{np.min(display_data):.4f}, {np.max(display_data):.4f}]")
 
             # Update image view with proper coordinate mapping
-            # After transpose: display_data.shape = (spatial_points, time_points)
+            # After transpose: display_data.shape = (time_points, spatial_points)
+            # PyQtGraph映射：第一维→Y轴(时间)，第二维→X轴(空间)，但我们用setRect重新定义坐标
             self.image_view.setImage(display_data,
                                    levels=[self._vmin, self._vmax],
                                    autoRange=False,  # Disable auto range to use our coordinate mapping
@@ -1552,22 +1562,21 @@ class TimeSpacePlotWidgetV2(QWidget):
             # display_data = time_space_data  # 不转置：(time_frames, space_points)
             # 这样的话：Y轴=time, X轴=space，这不是我们要的
 
-            # 正确的应该是转置
-            display_data = time_space_data.T  # 转置：(space_points, time_frames)
-            # 这样：Y轴=space, X轴=time，这是我们要的
+            # 不需要转置！因为在_update_display中已经转置过了
+            # time_space_data已经经过第一次转置，现在应该是(time, space)形状
+            display_data = time_space_data  # 直接使用，不再转置
 
-            # 但是如果向下滚动，说明Y轴的数据方向有问题
-            # 可能需要翻转Y轴数据，让distance_start在下方
-            display_data = np.flipud(display_data)  # 上下翻转，让距离轴正确
+            log.debug(f"PlotWidget V2: received data shape: {time_space_data.shape}")
+            log.debug(f"PlotWidget V2: using data without additional transpose")
 
-            log.debug(f"Time-space data shape after processing: {display_data.shape} (space, time)")
+            log.debug(f"Time-space data shape after processing: {display_data.shape} (should be time x space)")
             log.debug(f"Display data range: [{np.min(display_data):.3f}, {np.max(display_data):.3f}]")
 
             # 设置图像数据
             self.image_item.setImage(display_data, levels=[self._vmin, self._vmax])
 
-            # 获取转置后的数据维度和计算实际坐标范围
-            n_spatial_points, n_time_points = display_data.shape  # 现在space在Y方向，time在X方向
+            # 获取数据维度 - 现在应该是(time, space)
+            n_time_points, n_spatial_points = display_data.shape  # time在Y方向，space在X方向
 
             # 计算实际坐标范围
             distance_start = self._distance_start

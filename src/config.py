@@ -169,8 +169,8 @@ class PhaseDemodParams:
     space_avg_order: int = 25                # Spatial averaging points
     merge_point_num: int = 25                # Spatial merging factor
     diff_order: int = 1                      # Differential processing order
-    detrend_bw: float = 0.5                  # Hz - high-pass cutoff frequency
-    polarization_diversity: bool = False     # Advanced polarization processing
+    detrend_bw: float = 10                  # Hz - high-pass cutoff frequency
+    polarization_diversity: bool = True     # Advanced polarization processing
 
 
 @dataclass
