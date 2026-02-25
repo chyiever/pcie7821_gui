@@ -40,6 +40,7 @@ COLORMAP_OPTIONS = [
     ("Plasma", "plasma"),
     ("Inferno", "inferno"),
     ("Magma", "magma"),
+    ("Seismic", "seismic"),
     ("Gray", "gray"),
     ("Hot", "hot"),
     ("Cool", "cool")
@@ -741,6 +742,14 @@ class TimeSpacePlotWidget(QWidget):
                     (0.66, (255, 255, 0)),   # yellow
                     (1.0, (255, 255, 255))   # white
                 ]
+            elif self._colormap == "seismic":
+                colors = [
+                    (0.0, (0, 0, 139)),      # 深蓝色 (负值)
+                    (0.25, (0, 100, 255)),   # 蓝色
+                    (0.5, (255, 255, 255)),  # 白色 (零值)
+                    (0.75, (255, 100, 100)), # 粉红色
+                    (1.0, (139, 0, 0))       # 深红色 (正值)
+                ]
             elif self._colormap == "gray":
                 colors = [
                     (0.0, (0, 0, 0)),        # black
@@ -1139,7 +1148,7 @@ class TimeSpacePlotWidgetV2(QWidget):
 
         # 创建颜色条
         self._create_colorbar_v2()
-        plot_layout.addWidget(self.colorbar_widget)  # 添加颜色条
+        plot_layout.addWidget(self.histogram_widget)  # 添加HistogramLUTWidget
 
         plot_widget = QWidget()
         plot_widget.setLayout(plot_layout)
@@ -1199,49 +1208,99 @@ class TimeSpacePlotWidgetV2(QWidget):
         log.info("PlotWidget plot area created with guaranteed axis display")
 
     def _create_colorbar_v2(self):
-        """创建完整的颜色条组件"""
-        # 创建颜色条的 PlotWidget
-        self.colorbar_widget = pg.PlotWidget()
-        self.colorbar_widget.setFixedWidth(80)  # 固定宽度
-        self.colorbar_widget.setMinimumHeight(400)
+        """创建包含直方图和亮度/对比度控制的复合颜色条组件"""
+        # 使用PyQtGraph的HistogramLUTWidget，它包含：
+        # 1. 颜色渐变条（垂直方向）
+        # 2. 数据直方图分布
+        # 3. 亮度/对比度滑块控制
+        self.histogram_widget = pg.HistogramLUTWidget()
+        self.histogram_widget.setFixedWidth(90)  # 减小宽度，避免与主图重叠
+        self.histogram_widget.setMinimumHeight(400)
 
-        # 隐藏颜色条的坐标轴，只保留右侧刻度
-        self.colorbar_widget.showAxis('left', show=False)
-        self.colorbar_widget.showAxis('bottom', show=False)
-        self.colorbar_widget.showAxis('top', show=False)
-        self.colorbar_widget.showAxis('right', show=True)
+        # 设置初始颜色范围
+        self.histogram_widget.setLevels(self._vmin, self._vmax)
 
-        # 创建颜色条的数据 - 垂直梯度
-        colorbar_height = 256
-        colorbar_data = np.linspace(self._vmax, self._vmin, colorbar_height).reshape(-1, 1)
+        # 应用初始颜色映射
+        self._apply_initial_colormap_to_histogram()
 
-        # 创建颜色条的 ImageItem
-        self.colorbar_image = pg.ImageItem(colorbar_data)
-        self.colorbar_widget.addItem(self.colorbar_image)
-
-        # 设置颜色条的坐标范围
-        self.colorbar_image.setRect(0, self._vmin, 1, self._vmax - self._vmin)
-
-        # 配置右侧刻度轴
-        right_axis = self.colorbar_widget.getAxis('right')
-        if right_axis:
-            font = QFont("Times New Roman", 9)
-            right_axis.setTickFont(font)
-            right_axis.setPen('k')
-            right_axis.setTextPen('k')
-            right_axis.setStyle(showValues=True)
-            right_axis.enableAutoSIPrefix(False)
-
-        # 设置ViewBox禁用鼠标交互
-        colorbar_view = self.colorbar_widget.getViewBox()
-        colorbar_view.setMouseEnabled(x=False, y=False)
-        colorbar_view.setXRange(0, 1)
-        colorbar_view.setYRange(self._vmin, self._vmax)
+        # 连接颜色范围变化信号，实现交互式调整
+        self.histogram_widget.sigLevelsChanged.connect(self._on_histogram_levels_changed)
 
         # 设置背景为白色
-        self.colorbar_widget.setBackground('w')
+        self.histogram_widget.setBackground('w')
 
-        log.debug("Colorbar widget created successfully")
+        log.debug("HistogramLUTWidget colorbar created with interactive controls")
+
+    def _apply_initial_colormap_to_histogram(self):
+        """为HistogramLUTWidget应用初始颜色映射"""
+        try:
+            # 创建颜色映射数组
+            if self._colormap == "jet":
+                colors = [
+                    (0.0, (0, 0, 128)), (0.25, (0, 0, 255)),
+                    (0.5, (0, 255, 255)), (0.75, (255, 255, 0)), (1.0, (255, 0, 0))
+                ]
+            elif self._colormap == "viridis":
+                colors = [
+                    (0.0, (68, 1, 84)), (0.25, (59, 82, 139)),
+                    (0.5, (33, 144, 140)), (0.75, (93, 201, 99)), (1.0, (253, 231, 37))
+                ]
+            elif self._colormap == "plasma":
+                colors = [
+                    (0.0, (13, 8, 135)), (0.25, (126, 3, 168)),
+                    (0.5, (203, 70, 121)), (0.75, (249, 142, 93)), (1.0, (240, 249, 33))
+                ]
+            elif self._colormap == "seismic":
+                colors = [
+                    (0.0, (0, 0, 139)),      # 深蓝色 (负值)
+                    (0.25, (0, 100, 255)),   # 蓝色
+                    (0.5, (255, 255, 255)),  # 白色 (零值)
+                    (0.75, (255, 100, 100)), # 粉红色
+                    (1.0, (139, 0, 0))       # 深红色 (正值)
+                ]
+            else:  # grayscale
+                colors = [(0.0, (0, 0, 0)), (1.0, (255, 255, 255))]
+
+            # 设置渐变颜色
+            gradient = self.histogram_widget.gradient
+            gradient.setColorMap(pg.ColorMap(pos=[c[0] for c in colors],
+                                           color=[c[1] for c in colors]))
+
+            log.debug(f"Applied {self._colormap} colormap to histogram widget")
+
+        except Exception as e:
+            log.warning(f"Error applying initial colormap to histogram: {e}")
+
+    def _on_histogram_levels_changed(self):
+        """处理直方图颜色范围变化"""
+        try:
+            # 获取用户通过直方图调整的新范围
+            levels = self.histogram_widget.getLevels()
+            if levels is not None and len(levels) == 2:
+                new_vmin, new_vmax = levels
+
+                # 更新内部参数
+                self._vmin = new_vmin
+                self._vmax = new_vmax
+
+                # 同步更新控制面板的数值输入框
+                if hasattr(self, 'vmin_spin'):
+                    self.vmin_spin.blockSignals(True)
+                    self.vmin_spin.setValue(new_vmin)
+                    self.vmin_spin.blockSignals(False)
+
+                if hasattr(self, 'vmax_spin'):
+                    self.vmax_spin.blockSignals(True)
+                    self.vmax_spin.setValue(new_vmax)
+                    self.vmax_spin.blockSignals(False)
+
+                # 发射参数变化信号
+                self.parametersChanged.emit()
+
+                log.debug(f"Histogram levels changed: [{new_vmin:.3f}, {new_vmax:.3f}]")
+
+        except Exception as e:
+            log.warning(f"Error handling histogram levels change: {e}")
 
     def _apply_colormap_v2(self):
         """为 PlotWidget 版本应用颜色映射"""
@@ -1267,6 +1326,14 @@ class TimeSpacePlotWidgetV2(QWidget):
                     (0.0, (0, 0, 0)), (0.33, (255, 0, 0)),
                     (0.66, (255, 255, 0)), (1.0, (255, 255, 255))
                 ]
+            elif self._colormap == "seismic":
+                colors = [
+                    (0.0, (0, 0, 139)),      # 深蓝色 (负值)
+                    (0.25, (0, 100, 255)),   # 蓝色
+                    (0.5, (255, 255, 255)),  # 白色 (零值)
+                    (0.75, (255, 100, 100)), # 粉红色
+                    (1.0, (139, 0, 0))       # 深红色 (正值)
+                ]
             elif self._colormap == "gray":
                 colors = [(0.0, (0, 0, 0)), (1.0, (255, 255, 255))]
             else:
@@ -1278,9 +1345,9 @@ class TimeSpacePlotWidgetV2(QWidget):
             lut = colormap.getLookupTable(0.0, 1.0, 256)
             self.image_item.setLookupTable(lut)
 
-            # 同时更新颜色条的颜色映射
-            if hasattr(self, 'colorbar_image'):
-                self.colorbar_image.setLookupTable(lut)
+            # 更新HistogramLUTWidget的颜色映射
+            if hasattr(self, 'histogram_widget'):
+                self.histogram_widget.gradient.setColorMap(colormap)
 
             log.debug(f"Applied colormap to PlotWidget version: {self._colormap}")
 
@@ -1575,6 +1642,12 @@ class TimeSpacePlotWidgetV2(QWidget):
             # 设置图像数据
             self.image_item.setImage(display_data, levels=[self._vmin, self._vmax])
 
+            # 连接数据到HistogramLUTWidget以显示直方图分布
+            if hasattr(self, 'histogram_widget'):
+                self.histogram_widget.setImageItem(self.image_item)
+                # 设置颜色范围，这会更新直方图的显示范围
+                self.histogram_widget.setLevels(self._vmin, self._vmax)
+
             # 获取数据维度 - 现在应该是(time, space)
             n_time_points, n_spatial_points = display_data.shape  # time在Y方向，space在X方向
 
@@ -1757,25 +1830,16 @@ class TimeSpacePlotWidgetV2(QWidget):
             log.warning(f"Error setting corrected custom ticks: {e}")
 
     def _update_colorbar_range(self):
-        """更新颜色条的范围"""
+        """更新HistogramLUTWidget的颜色范围"""
         try:
-            if hasattr(self, 'colorbar_widget') and hasattr(self, 'colorbar_image'):
-                # 更新颜色条数据以反映新的范围
-                colorbar_height = 256
-                colorbar_data = np.linspace(self._vmax, self._vmin, colorbar_height).reshape(-1, 1)
-                self.colorbar_image.setImage(colorbar_data)
+            if hasattr(self, 'histogram_widget'):
+                # 更新HistogramLUTWidget的颜色范围
+                self.histogram_widget.setLevels(self._vmin, self._vmax)
 
-                # 更新颜色条的坐标范围
-                self.colorbar_image.setRect(0, self._vmin, 1, self._vmax - self._vmin)
-
-                # 更新右侧刻度轴范围
-                colorbar_view = self.colorbar_widget.getViewBox()
-                colorbar_view.setYRange(self._vmin, self._vmax)
-
-                log.debug(f"Updated colorbar range: [{self._vmin}, {self._vmax}]")
+                log.debug(f"Updated histogram widget range: [{self._vmin}, {self._vmax}]")
 
         except Exception as e:
-            log.warning(f"Error updating colorbar range: {e}")
+            log.warning(f"Error updating histogram widget range: {e}")
 
     # ========== V2版本的参数变化处理方法 ==========
 
@@ -1841,12 +1905,22 @@ class TimeSpacePlotWidgetV2(QWidget):
     def _on_vmin_changed_v2(self, value: float):
         """处理最小颜色值变化"""
         self._vmin = value
+        # 同步更新HistogramLUTWidget，但阻止信号循环
+        if hasattr(self, 'histogram_widget'):
+            self.histogram_widget.sigLevelsChanged.disconnect()
+            self.histogram_widget.setLevels(self._vmin, self._vmax)
+            self.histogram_widget.sigLevelsChanged.connect(self._on_histogram_levels_changed)
         self._update_display_v2()
         self.parametersChanged.emit()
 
     def _on_vmax_changed_v2(self, value: float):
         """处理最大颜色值变化"""
         self._vmax = value
+        # 同步更新HistogramLUTWidget，但阻止信号循环
+        if hasattr(self, 'histogram_widget'):
+            self.histogram_widget.sigLevelsChanged.disconnect()
+            self.histogram_widget.setLevels(self._vmin, self._vmax)
+            self.histogram_widget.sigLevelsChanged.connect(self._on_histogram_levels_changed)
         self._update_display_v2()
         self.parametersChanged.emit()
 
