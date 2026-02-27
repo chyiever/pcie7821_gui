@@ -40,42 +40,78 @@ def _create_custom_colormaps():
     try:
         import numpy as np
 
-        # Jet colormap (经典科学可视化)
+        # Jet colormap (经典科学可视化) - 使用0-255范围
         jet_colors = np.array([
-            [0, 0, 0.5], [0, 0, 1], [0, 0.5, 1], [0, 1, 1],
-            [0.5, 1, 0.5], [1, 1, 0], [1, 0.5, 0], [1, 0, 0], [0.5, 0, 0]
+            [0, 0, 127],      # 深蓝
+            [0, 0, 255],      # 蓝色
+            [0, 127, 255],    # 青蓝
+            [0, 255, 255],    # 青色
+            [127, 255, 127],  # 浅绿
+            [255, 255, 0],    # 黄色
+            [255, 127, 0],    # 橙色
+            [255, 0, 0],      # 红色
+            [127, 0, 0]       # 深红
         ])
         custom_maps['jet'] = pg.ColorMap(np.linspace(0, 1, len(jet_colors)), jet_colors)
 
-        # HSV colormap (色相环)
+        # HSV colormap (色相环) - 使用0-255范围
         hsv_colors = np.array([
-            [1, 0, 0], [1, 0.5, 0], [1, 1, 0], [0.5, 1, 0],
-            [0, 1, 0], [0, 1, 0.5], [0, 1, 1], [0, 0.5, 1],
-            [0, 0, 1], [0.5, 0, 1], [1, 0, 1], [1, 0, 0.5]
+            [255, 0, 0],      # 红色
+            [255, 127, 0],    # 橙色
+            [255, 255, 0],    # 黄色
+            [127, 255, 0],    # 黄绿
+            [0, 255, 0],      # 绿色
+            [0, 255, 127],    # 青绿
+            [0, 255, 255],    # 青色
+            [0, 127, 255],    # 青蓝
+            [0, 0, 255],      # 蓝色
+            [127, 0, 255],    # 蓝紫
+            [255, 0, 255],    # 紫色
+            [255, 0, 127]     # 紫红
         ])
         custom_maps['hsv'] = pg.ColorMap(np.linspace(0, 1, len(hsv_colors)), hsv_colors)
 
-        # Hot colormap (热度图)
+        # Hot colormap (热度图) - 使用0-255范围
         hot_colors = np.array([
-            [0, 0, 0], [0.4, 0, 0], [0.8, 0, 0], [1, 0, 0],
-            [1, 0.4, 0], [1, 0.8, 0], [1, 1, 0], [1, 1, 0.5], [1, 1, 1]
+            [0, 0, 0],        # 黑色
+            [100, 0, 0],      # 深红
+            [200, 0, 0],      # 红色
+            [255, 0, 0],      # 亮红
+            [255, 100, 0],    # 红橙
+            [255, 200, 0],    # 橙黄
+            [255, 255, 0],    # 黄色
+            [255, 255, 127],  # 浅黄
+            [255, 255, 255]   # 白色
         ])
         custom_maps['hot'] = pg.ColorMap(np.linspace(0, 1, len(hot_colors)), hot_colors)
 
-        # Cool colormap (冷色调)
+        # Cool colormap (冷色调) - 使用0-255范围
         cool_colors = np.array([
-            [0, 1, 1], [0.2, 0.8, 1], [0.4, 0.6, 1], [0.6, 0.4, 1], [0.8, 0.2, 1], [1, 0, 1]
+            [0, 255, 255],    # 青色
+            [50, 200, 255],   # 浅青
+            [100, 150, 255],  # 蓝青
+            [150, 100, 255],  # 紫蓝
+            [200, 50, 255],   # 紫色
+            [255, 0, 255]     # 洋红
         ])
         custom_maps['cool'] = pg.ColorMap(np.linspace(0, 1, len(cool_colors)), cool_colors)
 
-        # Gray colormap (灰度)
-        gray_colors = np.array([[0, 0, 0], [1, 1, 1]])
+        # Gray colormap (灰度) - 使用0-255范围
+        gray_colors = np.array([
+            [0, 0, 0],        # 黑色
+            [255, 255, 255]   # 白色
+        ])
         custom_maps['gray'] = pg.ColorMap(np.linspace(0, 1, len(gray_colors)), gray_colors)
 
-        # Seismic colormap (地震数据专用)
+        # Seismic colormap (地震数据专用) - 使用0-255范围
         seismic_colors = np.array([
-            [0, 0, 0.3], [0, 0, 1], [0.5, 0.5, 1], [1, 1, 1],
-            [1, 0.5, 0.5], [1, 0, 0], [0.3, 0, 0]
+            [0, 0, 75],       # 深蓝
+            [0, 0, 255],      # 蓝色
+            [127, 127, 255],  # 浅蓝
+            [255, 255, 255],  # 白色
+            [255, 127, 127],  # 浅红
+            [255, 0, 0],      # 红色
+            [75, 0, 0]        # 深红
         ])
         custom_maps['seismic'] = pg.ColorMap(np.linspace(0, 1, len(seismic_colors)), seismic_colors)
 
