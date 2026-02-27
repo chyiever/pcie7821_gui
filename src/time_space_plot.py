@@ -32,6 +32,63 @@ from logger import get_logger
 # Module logger
 log = get_logger("time_space_plot")
 
+# Custom colormap creation for missing PyQtGraph colormaps
+def _create_custom_colormaps():
+    """创建自定义colormap来替代缺失的PyQtGraph文件"""
+    custom_maps = {}
+
+    try:
+        import numpy as np
+
+        # Jet colormap (经典科学可视化)
+        jet_colors = np.array([
+            [0, 0, 0.5], [0, 0, 1], [0, 0.5, 1], [0, 1, 1],
+            [0.5, 1, 0.5], [1, 1, 0], [1, 0.5, 0], [1, 0, 0], [0.5, 0, 0]
+        ])
+        custom_maps['jet'] = pg.ColorMap(np.linspace(0, 1, len(jet_colors)), jet_colors)
+
+        # HSV colormap (色相环)
+        hsv_colors = np.array([
+            [1, 0, 0], [1, 0.5, 0], [1, 1, 0], [0.5, 1, 0],
+            [0, 1, 0], [0, 1, 0.5], [0, 1, 1], [0, 0.5, 1],
+            [0, 0, 1], [0.5, 0, 1], [1, 0, 1], [1, 0, 0.5]
+        ])
+        custom_maps['hsv'] = pg.ColorMap(np.linspace(0, 1, len(hsv_colors)), hsv_colors)
+
+        # Hot colormap (热度图)
+        hot_colors = np.array([
+            [0, 0, 0], [0.4, 0, 0], [0.8, 0, 0], [1, 0, 0],
+            [1, 0.4, 0], [1, 0.8, 0], [1, 1, 0], [1, 1, 0.5], [1, 1, 1]
+        ])
+        custom_maps['hot'] = pg.ColorMap(np.linspace(0, 1, len(hot_colors)), hot_colors)
+
+        # Cool colormap (冷色调)
+        cool_colors = np.array([
+            [0, 1, 1], [0.2, 0.8, 1], [0.4, 0.6, 1], [0.6, 0.4, 1], [0.8, 0.2, 1], [1, 0, 1]
+        ])
+        custom_maps['cool'] = pg.ColorMap(np.linspace(0, 1, len(cool_colors)), cool_colors)
+
+        # Gray colormap (灰度)
+        gray_colors = np.array([[0, 0, 0], [1, 1, 1]])
+        custom_maps['gray'] = pg.ColorMap(np.linspace(0, 1, len(gray_colors)), gray_colors)
+
+        # Seismic colormap (地震数据专用)
+        seismic_colors = np.array([
+            [0, 0, 0.3], [0, 0, 1], [0.5, 0.5, 1], [1, 1, 1],
+            [1, 0.5, 0.5], [1, 0, 0], [0.3, 0, 0]
+        ])
+        custom_maps['seismic'] = pg.ColorMap(np.linspace(0, 1, len(seismic_colors)), seismic_colors)
+
+        log.info(f"Created {len(custom_maps)} custom colormaps")
+
+    except Exception as e:
+        log.warning(f"Failed to create custom colormaps: {e}")
+
+    return custom_maps
+
+# 全局存储自定义colormap
+_CUSTOM_COLORMAPS = _create_custom_colormaps()
+
 # Available colormap options for PyQtGraph
 COLORMAP_OPTIONS = [
     ("Jet", "jet"),
@@ -222,27 +279,48 @@ class TimeSpacePlotWidget(QWidget):
     def _apply_initial_colormap_to_histogram(self):
         """为HistogramLUTWidget应用初始颜色映射"""
         try:
-            # 获取当前选择的colormap
-            colormap_name = self._colormap
+            # 获取当前选择的colormap（使用改进的获取方法）
+            colormap_obj = self._get_colormap(self._colormap)
 
-            # 获取PyQtGraph的colormap对象
-            colormap_obj = pg.colormap.get(colormap_name)
+            if colormap_obj is None:
+                log.warning(f"Could not get colormap '{self._colormap}' for histogram")
+                return
 
             # 应用到HistogramLUTWidget
             if hasattr(self.histogram_widget, 'gradient'):
                 self.histogram_widget.gradient.setColorMap(colormap_obj)
-                log.debug(f"Applied initial colormap '{colormap_name}' to HistogramLUTWidget")
+                log.debug(f"Applied initial colormap '{self._colormap}' to HistogramLUTWidget")
 
         except Exception as e:
             log.warning(f"Could not apply initial colormap to HistogramLUTWidget: {e}")
             # 如果失败，使用默认的viridis
             try:
-                default_colormap = pg.colormap.get('viridis')
-                if hasattr(self.histogram_widget, 'gradient'):
+                default_colormap = self._get_colormap('viridis')
+                if default_colormap and hasattr(self.histogram_widget, 'gradient'):
                     self.histogram_widget.gradient.setColorMap(default_colormap)
-                    log.debug("Applied fallback 'viridis' colormap to HistogramLUTWidget")
+                    log.debug("Applied fallback colormap to HistogramLUTWidget")
             except Exception as e2:
                 log.warning(f"Could not apply fallback colormap: {e2}")
+
+    def _get_colormap(self, colormap_name):
+        """获取颜色映射对象，优先使用PyQtGraph内置，回退到自定义"""
+        try:
+            # 首先尝试PyQtGraph内置colormap
+            return pg.colormap.get(colormap_name)
+        except Exception as e:
+            log.debug(f"PyQtGraph colormap '{colormap_name}' not found: {e}")
+            # 使用自定义colormap
+            if colormap_name in _CUSTOM_COLORMAPS:
+                log.debug(f"Using custom colormap: {colormap_name}")
+                return _CUSTOM_COLORMAPS[colormap_name]
+            else:
+                # 最后回退到viridis
+                log.warning(f"Colormap '{colormap_name}' not found, falling back to viridis")
+                try:
+                    return pg.colormap.get('viridis')
+                except:
+                    # 如果viridis也没有，使用自定义gray
+                    return _CUSTOM_COLORMAPS.get('gray', None)
 
     def _apply_colormap(self):
         """应用颜色映射到图像项和HistogramLUTWidget"""
@@ -250,8 +328,12 @@ class TimeSpacePlotWidget(QWidget):
             # 获取当前选择的colormap
             colormap_name = self._colormap
 
-            # 获取PyQtGraph的colormap对象
-            colormap_obj = pg.colormap.get(colormap_name)
+            # 获取colormap对象（内置或自定义）
+            colormap_obj = self._get_colormap(colormap_name)
+
+            if colormap_obj is None:
+                log.error(f"Could not get any colormap for '{colormap_name}'")
+                return
 
             # 应用到ImageItem
             if hasattr(self, 'image_item'):
@@ -265,14 +347,14 @@ class TimeSpacePlotWidget(QWidget):
 
         except Exception as e:
             log.warning(f"Could not apply colormap '{self._colormap}': {e}")
-            # 如果失败，使用默认的viridis
+            # 最后的错误处理：使用viridis
             try:
-                default_colormap = pg.colormap.get('viridis')
-                if hasattr(self, 'image_item'):
+                default_colormap = self._get_colormap('viridis')
+                if default_colormap and hasattr(self, 'image_item'):
                     self.image_item.setColorMap(default_colormap)
-                if hasattr(self, 'histogram_widget') and hasattr(self.histogram_widget, 'gradient'):
+                if default_colormap and hasattr(self, 'histogram_widget') and hasattr(self.histogram_widget, 'gradient'):
                     self.histogram_widget.gradient.setColorMap(default_colormap)
-                log.debug("Applied fallback 'viridis' colormap")
+                log.debug("Applied fallback colormap")
             except Exception as e2:
                 log.warning(f"Could not apply fallback colormap: {e2}")
 
