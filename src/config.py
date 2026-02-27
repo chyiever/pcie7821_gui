@@ -217,8 +217,11 @@ class DisplayParams:
         region_index: Spatial position for SPACE mode display
         frame_num: Number of frames to process/display
         spectrum_enable: Enable FFT spectrum analysis display
-        psd_enable: Show Power Spectral Density instead of Power Spectrum
         rad_enable: Convert phase data to radians for display (storage unaffected)
+
+    Note: Analysis type (Power Spectrum vs PSD) is now automatically determined:
+          - Raw data: Power Spectrum
+          - Phase data: PSD using scipy.welch
 
     Performance: Large frame_num values may impact GUI responsiveness
     """
@@ -226,7 +229,6 @@ class DisplayParams:
     region_index: int = 0                    # Spatial position index for SPACE mode
     frame_num: int = 1024                    # Frames to display/analyze
     spectrum_enable: bool = True             # Enable frequency domain analysis
-    psd_enable: bool = False                 # Power Spectral Density vs Power Spectrum
     rad_enable: bool = True                  # Display-only radian conversion (default enabled)
 
 

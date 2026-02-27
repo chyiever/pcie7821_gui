@@ -472,8 +472,11 @@ class MainWindow(QMainWindow):
         self.spectrum_enable_check.setChecked(True)
         display_layout.addWidget(self.spectrum_enable_check, 1, 2)
 
-        self.psd_check = QCheckBox("PSD")
-        display_layout.addWidget(self.psd_check, 1, 3)
+        # Analysis type info label (shows Power/PSD based on data type)
+        self.analysis_type_label = QLabel("Power")
+        self.analysis_type_label.setStyleSheet("QLabel { color: blue; font-weight: bold; }")
+        self.analysis_type_label.setToolTip("Analysis type: Raw data → Power Spectrum, Phase data → PSD")
+        display_layout.addWidget(self.analysis_type_label, 1, 3)
 
         # Row 2: rad checkbox
         self.rad_check = QCheckBox("rad")
@@ -909,6 +912,22 @@ class MainWindow(QMainWindow):
         # 连接region index变化信号
         self.region_index_spin.valueChanged.connect(self._on_region_changed)
 
+        # 初始化分析类型标签
+        self._initialize_analysis_type_label()
+
+    def _initialize_analysis_type_label(self):
+        """初始化分析类型标签显示"""
+        # 根据当前数据源设置分析类型标签
+        data_source = self.data_source_combo.currentData() or DataSource.PHASE
+        is_phase = (data_source == DataSource.PHASE)
+
+        if is_phase:
+            self.analysis_type_label.setText("PSD")
+            self.analysis_type_label.setToolTip("Phase data: PSD analysis using scipy.welch")
+        else:
+            self.analysis_type_label.setText("Power")
+            self.analysis_type_label.setToolTip("Raw data: Power spectrum analysis")
+
     def _connect_time_space_signals(self):
         """Connect time-space widget signals after widget is created"""
         if hasattr(self, 'time_space_widget') and self.time_space_widget is not None:
@@ -986,7 +1005,7 @@ class MainWindow(QMainWindow):
         params.display.region_index = self.region_index_spin.value()
         params.display.frame_num = self.frame_num_spin.value()
         params.display.spectrum_enable = self.spectrum_enable_check.isChecked()
-        params.display.psd_enable = self.psd_check.isChecked()
+        # Note: PSD mode now automatically determined by data_type (removed psd_enable)
         params.display.rad_enable = self.rad_check.isChecked()
 
         # Time-Space parameters (get from widget if available)
@@ -1347,10 +1366,10 @@ class MainWindow(QMainWindow):
                 for i in range(1, 4):
                     self.plot_curve_1[i].setData([])
 
-                # Update spectrum
+                # Update spectrum (Phase data: automatically uses PSD)
                 if self.params.display.spectrum_enable and len(space_data) > 0:
                     self._update_spectrum(space_data, self.params.basic.scan_rate,
-                                         self.params.display.psd_enable, 'int')
+                                         psd_mode=False, data_type='int')  # psd_mode ignored for phase data
             else:
                 # Multi-channel space mode
                 if len(data.shape) == 1:
@@ -1378,10 +1397,10 @@ class MainWindow(QMainWindow):
                     else:
                         self.plot_curve_1[i].setData([])
 
-                # Spectrum of first frame
+                # Spectrum of first frame (Phase data: automatically uses PSD)
                 if self.params.display.spectrum_enable and point_num <= len(data):
                     self._update_spectrum(data[:point_num], self.params.basic.scan_rate,
-                                         self.params.display.psd_enable, 'int')
+                                         psd_mode=False, data_type='int')  # psd_mode ignored for phase data
             else:
                 if len(data.shape) == 1:
                     data = data.reshape(-1, channel_num)
@@ -1441,11 +1460,11 @@ class MainWindow(QMainWindow):
                 else:
                     self.plot_curve_1[i].setData([])
 
-            # Spectrum: use full-resolution data (no downsampling) for accuracy
+            # Spectrum: use full-resolution data (Raw data: automatically uses Power Spectrum)
             if self.params.display.spectrum_enable and point_num <= len(data):
                 sample_rate = 1e9 / self.params.upload.data_rate
                 self._update_spectrum(data[:point_num], sample_rate,
-                                     self.params.display.psd_enable, 'short')
+                                     psd_mode=False, data_type='short')  # psd_mode ignored for raw data
         else:
             if len(data.shape) == 1:
                 data = data.reshape(-1, channel_num)
@@ -1457,12 +1476,12 @@ class MainWindow(QMainWindow):
                     downsampled_data = raw_channel_data[::10]
                     self.plot_curve_1[ch].setData(downsampled_data)
 
-            # Spectrum: full-resolution data (no downsampling) for accuracy
+            # Spectrum: full-resolution data (Raw data: automatically uses Power Spectrum)
             if self.params.display.spectrum_enable and point_num <= len(data):
                 sample_rate = 1e9 / self.params.upload.data_rate
                 # Use first channel for spectrum computation
                 self._update_spectrum(data[:point_num, 0], sample_rate,
-                                     self.params.display.psd_enable, 'short')
+                                     psd_mode=False, data_type='short')  # psd_mode ignored for raw data
 
         if self.acq_thread is not None:
             self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
@@ -1529,15 +1548,11 @@ class MainWindow(QMainWindow):
                     self.plot_widget_2.setLabel('bottom', 'Frequency (MHz)',
                                               **{'font-family': 'Times New Roman', 'font-size': '8pt'})
 
-            # Y-axis label depends on PSD mode and data type
-            if psd_mode:
-                if data_type == 'int':  # Phase: PSD in dB/Hz
-                    self.plot_widget_2.setLabel('left', 'PSD (dB/Hz)',
-                                              **{'font-family': 'Times New Roman', 'font-size': '8pt'})
-                else:  # Raw: PSD in dB/MHz
-                    self.plot_widget_2.setLabel('left', 'PSD (dB/MHz)',
-                                              **{'font-family': 'Times New Roman', 'font-size': '8pt'})
-            else:
+            # Y-axis label: Raw data = Power (dB), Phase data = PSD (dB)
+            if data_type == 'int':  # Phase data: Always PSD
+                self.plot_widget_2.setLabel('left', 'PSD (dB)',
+                                          **{'font-family': 'Times New Roman', 'font-size': '8pt'})
+            else:  # Raw data: Always Power Spectrum
                 self.plot_widget_2.setLabel('left', 'Power (dB)',
                                           **{'font-family': 'Times New Roman', 'font-size': '8pt'})
         except Exception as e:
@@ -1645,6 +1660,14 @@ class MainWindow(QMainWindow):
         # Enable/disable phase-specific controls
         self.plot_widget_3.setEnabled(is_phase)
         self.mode_space_radio.setEnabled(is_phase)
+
+        # Update analysis type label
+        if is_phase:
+            self.analysis_type_label.setText("PSD")
+            self.analysis_type_label.setToolTip("Phase data: PSD analysis using scipy.welch")
+        else:
+            self.analysis_type_label.setText("Power")
+            self.analysis_type_label.setToolTip("Raw data: Power spectrum analysis")
 
         if not is_phase:
             self.mode_time_radio.setChecked(True)

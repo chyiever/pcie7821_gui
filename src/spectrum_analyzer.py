@@ -41,6 +41,7 @@ Note: Window correction factors are calibrated for accurate power measurements.
 import numpy as np
 from typing import Tuple, Optional
 from enum import IntEnum
+from scipy import signal
 
 
 # ----- WINDOW FUNCTION DEFINITIONS -----
@@ -247,6 +248,63 @@ class SpectrumAnalyzer:
         data_d = data.astype(np.float64)
         return self._analyze(data_d, sample_rate, psd_mode)
 
+    # ----- PHASE DATA PSD USING SCIPY WELCH -----
+    # New method for phase data analysis using scipy.signal.welch
+
+    def _analyze_phase_psd_welch(self, data: np.ndarray, sample_rate: float) -> Tuple[np.ndarray, np.ndarray, float]:
+        """
+        Analyze phase data using scipy.signal.welch for PSD calculation.
+
+        Uses scipy.welch with window length = signal length (no overlap) for
+        maximum frequency resolution and density-type output in dB scale.
+
+        Args:
+            data: Phase data as int32 (arbitrary phase units)
+            sample_rate: Sample rate in Hz
+
+        Returns:
+            Tuple of (frequency_axis, psd_db, frequency_resolution)
+            - frequency_axis: Frequency bins in Hz (0 to Nyquist)
+            - psd_db: Power spectral density in dB (density type)
+            - frequency_resolution: Frequency bin spacing in Hz
+        """
+        # Convert to double precision for phase data (no voltage scaling)
+        data_d = data.astype(np.float64)
+        n = len(data_d)
+
+        # Get window function for scipy welch
+        # Convert WindowType enum to scipy window string
+        window_map = {
+            WindowType.RECTANGULAR: 'boxcar',
+            WindowType.HANNING: 'hann',
+            WindowType.HAMMING: 'hamming',
+            WindowType.BLACKMAN: 'blackman',
+            WindowType.FLATTOP: 'flattop'
+        }
+        window_name = window_map.get(self.window_type, 'hann')
+
+        # Calculate PSD using scipy.welch
+        # nperseg = signal length (no windowing), noverlap = 0
+        freq_axis, psd_linear = signal.welch(
+            data_d,
+            fs=sample_rate,
+            window=window_name,
+            nperseg=n,  # Window length = signal length
+            noverlap=0,  # No overlap since nperseg = signal length
+            nfft=n,  # FFT length = signal length
+            return_onesided=True,  # Single-sided spectrum
+            scaling='density',  # PSD in units²/Hz
+            detrend='constant'  # Remove DC component
+        )
+
+        # Convert linear PSD to dB scale with numerical stability
+        psd_db = 10.0 * np.log10(psd_linear + 1e-20)
+
+        # Calculate frequency resolution
+        df = sample_rate / n
+
+        return freq_axis, psd_db, df
+
     # ----- CORE FFT ANALYSIS ENGINE -----
     # Internal implementation of the complete spectrum analysis pipeline
 
@@ -354,42 +412,32 @@ class SpectrumAnalyzer:
         """
         Analyze data with automatic type detection and routing.
 
-        This is the primary public interface for spectrum analysis, providing
-        automatic data type detection and routing to appropriate analysis methods.
-        Supports both explicit type specification and automatic dtype detection.
+        New Logic:
+        - Raw data (data_type='short'): Only compute power spectrum (ignore psd_mode)
+        - Phase data (data_type='int'): Only compute PSD using scipy.welch (ignore psd_mode)
 
         Args:
             data: Input time-domain data (any numeric type)
             sample_rate: Sample rate in Hz (determines frequency scaling)
-            psd_mode: If True, return PSD (dB/Hz); if False, return power spectrum (dB)
-            data_type: Explicit type hint - 'short' for raw ADC, 'int' for phase data
+            psd_mode: Deprecated - analysis type now determined by data_type
+            data_type: 'short' for raw ADC data → power spectrum, 'int' for phase data → PSD
 
         Returns:
             Tuple of (frequency_axis, spectrum_db, frequency_resolution)
             - frequency_axis: Frequency bins in Hz (0 to Nyquist)
-            - spectrum_db: Spectrum in dB or dB/Hz depending on psd_mode
+            - spectrum_db: Power spectrum (dB) for raw data, PSD (dB) for phase data
             - frequency_resolution: Frequency bin spacing in Hz
 
-        Type Detection Logic:
-            1. If data_type='short' or numpy dtype is int16 → use ADC voltage scaling
-            2. Otherwise → treat as processed data (phase, etc.) without voltage scaling
-
-        Usage Examples:
-            # Raw ADC data
-            freq, power, df = analyzer.analyze(adc_data, 1e6, data_type='short')
-
-            # Phase data
-            freq, psd, df = analyzer.analyze(phase_data, 2000, psd_mode=True, data_type='int')
-
-            # Automatic detection
-            freq, spectrum, df = analyzer.analyze(data, sample_rate)
+        Analysis Methods:
+            Raw data: Custom FFT-based power spectrum calculation
+            Phase data: scipy.signal.welch PSD calculation with window length = signal length
         """
         if data_type == 'short' or data.dtype == np.int16:
-            # Route to ADC data analysis with voltage scaling
-            return self.analyze_short(data, sample_rate, psd_mode)
+            # Raw data: Always compute power spectrum (ignore psd_mode)
+            return self.analyze_short(data, sample_rate, psd_mode=False)
         else:
-            # Route to processed data analysis without voltage scaling
-            return self.analyze_int(data, sample_rate, psd_mode)
+            # Phase data: Always compute PSD using scipy welch
+            return self._analyze_phase_psd_welch(data, sample_rate)
 
     def set_window(self, window_type: WindowType):
         """
@@ -485,8 +533,12 @@ class RealTimeSpectrumAnalyzer(SpectrumAnalyzer):
         """
         Update spectrum with new data and return averaged result.
 
+        New Logic:
+        - Raw data (data_type='short'): Always compute power spectrum
+        - Phase data (data_type='int'): Always compute PSD using scipy.welch
+
         This is the primary method for real-time operation. Each call:
-        1. Computes spectrum of new data
+        1. Computes spectrum of new data (method depends on data_type)
         2. Adds to averaging buffer
         3. Maintains buffer size (circular queue behavior)
         4. Computes average in linear domain
@@ -495,30 +547,24 @@ class RealTimeSpectrumAnalyzer(SpectrumAnalyzer):
         Args:
             data: New time-domain data frame
             sample_rate: Sample rate in Hz
-            psd_mode: If True, return averaged PSD; if False, averaged power spectrum
-            data_type: Data type hint ('short' or 'int')
+            psd_mode: Deprecated - analysis type determined by data_type
+            data_type: 'short' for raw data → power spectrum, 'int' for phase data → PSD
 
         Returns:
             Tuple of (frequency_axis, averaged_spectrum_db, frequency_resolution)
             - frequency_axis: Frequency bins (cached for performance)
-            - averaged_spectrum_db: Temporally averaged spectrum in dB or dB/Hz
+            - averaged_spectrum_db: Temporally averaged spectrum in dB (power) or dB (PSD density)
             - frequency_resolution: Frequency bin spacing (cached for performance)
 
         Averaging Algorithm:
-            1. Convert each spectrum from dB to linear power: P = 10^(dB/10)
-            2. Accumulate linear powers: sum(P_i) for i in buffer
+            1. Convert each spectrum from dB to linear: P = 10^(dB/10)
+            2. Accumulate linear values: sum(P_i) for i in buffer
             3. Compute average: avg_power = sum(P_i) / N
             4. Convert back to dB: dB = 10 * log10(avg_power)
 
-        Performance Optimizations:
-            - Frequency axis cached to avoid recomputation
-            - Buffer management uses list operations (optimized in Python)
-            - Linear-domain calculations minimize transcendental function calls
-
-        Statistical Properties:
-            - Proper averaging of random noise (preserves noise statistics)
-            - Coherent signals maintain amplitude after averaging
-            - Noise floor improves by ~10*log10(N) dB where N = averaging_count
+        Analysis Methods:
+            Raw data: Custom FFT-based power spectrum (same as before)
+            Phase data: scipy.signal.welch PSD with density scaling
         """
         # Analyze new data frame using parent class methods
         freq_axis, spectrum_db, df = self.analyze(data, sample_rate, psd_mode, data_type)
