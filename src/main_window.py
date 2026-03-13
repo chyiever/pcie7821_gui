@@ -22,7 +22,7 @@ import time
 import numpy as np
 import psutil  # For CPU and disk monitoring
 import shutil  # For disk space monitoring
-from typing import Optional
+from typing import Any, Dict, Optional
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QPushButton, QCheckBox,
@@ -46,6 +46,7 @@ from acquisition_thread import AcquisitionThread, SimulatedAcquisitionThread
 from data_saver import FrameBasedFileSaver
 from spectrum_analyzer import RealTimeSpectrumAnalyzer
 from time_space_plot import create_time_space_widget
+from tcp_tab3 import TCPTab3Manager
 from logger import get_logger
 
 # Module logger
@@ -74,6 +75,7 @@ class MainWindow(QMainWindow):
         self.data_saver: Optional[FrameBasedFileSaver] = None
         self.spectrum_analyzer = RealTimeSpectrumAnalyzer()
         self.time_space_widget = None
+        self.tcp_tab3_manager = TCPTab3Manager()
 
         # Parameters
         self.params = AllParams()
@@ -103,6 +105,8 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._setup_plots()
         self._connect_signals()
+        self._connect_tcp_tab3_manager()
+        self._sync_tcp_tab3_availability()
 
         # Status timers
         self._status_timer = QTimer(self)
@@ -653,6 +657,9 @@ class MainWindow(QMainWindow):
         # Tab 2: Time-Space plot
         self._create_time_space_tab()
 
+        # Tab 3: TCP communication
+        self._create_tcp_comm_tab()
+
         layout.addWidget(self.plot_tabs)
 
         # System Monitoring Panel - Single row layout
@@ -874,6 +881,117 @@ class MainWindow(QMainWindow):
         # Connect signals after widget creation
         self._connect_time_space_signals()
 
+    def _create_tcp_comm_tab(self):
+        """Create the communication-only Tab3."""
+        tab3_widget = QWidget()
+        tab3_layout = QVBoxLayout(tab3_widget)
+        tab3_layout.setSpacing(10)
+        tab3_layout.setContentsMargins(10, 10, 10, 10)
+
+        settings_group = QGroupBox("TCP Communication")
+        settings_layout = QGridLayout(settings_group)
+        settings_layout.setContentsMargins(10, 12, 10, 10)
+        settings_layout.setHorizontalSpacing(10)
+        settings_layout.setVerticalSpacing(6)
+
+        self.tab3_comm_enable_check = QCheckBox("Enable communication")
+        self.tab3_comm_enable_check.setChecked(True)
+        settings_layout.addWidget(self.tab3_comm_enable_check, 0, 0, 1, 2)
+
+        settings_layout.addWidget(QLabel("Server IP:"), 1, 0)
+        self.tab3_server_ip_edit = QLineEdit("169.255.1.2")
+        settings_layout.addWidget(self.tab3_server_ip_edit, 1, 1)
+
+        settings_layout.addWidget(QLabel("Server Port:"), 2, 0)
+        self.tab3_server_port_spin = QSpinBox()
+        self.tab3_server_port_spin.setRange(1, 65535)
+        self.tab3_server_port_spin.setValue(3678)
+        settings_layout.addWidget(self.tab3_server_port_spin, 2, 1)
+
+        settings_layout.addWidget(QLabel("Channel Start:"), 3, 0)
+        self.tab3_channel_start_spin = QSpinBox()
+        self.tab3_channel_start_spin.setRange(0, 1000000)
+        self.tab3_channel_start_spin.setValue(50)
+        settings_layout.addWidget(self.tab3_channel_start_spin, 3, 1)
+
+        settings_layout.addWidget(QLabel("Channel End:"), 4, 0)
+        self.tab3_channel_end_spin = QSpinBox()
+        self.tab3_channel_end_spin.setRange(0, 1000000)
+        self.tab3_channel_end_spin.setValue(100)
+        settings_layout.addWidget(self.tab3_channel_end_spin, 4, 1)
+
+        settings_layout.addWidget(QLabel("Time Downsample:"), 5, 0)
+        self.tab3_time_downsample_spin = QSpinBox()
+        self.tab3_time_downsample_spin.setRange(1, 100000)
+        self.tab3_time_downsample_spin.setValue(1)
+        settings_layout.addWidget(self.tab3_time_downsample_spin, 5, 1)
+
+        settings_layout.addWidget(QLabel("Space Downsample:"), 6, 0)
+        self.tab3_space_downsample_spin = QSpinBox()
+        self.tab3_space_downsample_spin.setRange(1, 100000)
+        self.tab3_space_downsample_spin.setValue(1)
+        settings_layout.addWidget(self.tab3_space_downsample_spin, 6, 1)
+
+        tab3_layout.addWidget(settings_group)
+
+        status_group = QGroupBox("Communication Status")
+        status_layout = QGridLayout(status_group)
+        status_layout.setContentsMargins(10, 12, 10, 10)
+        status_layout.setHorizontalSpacing(10)
+        status_layout.setVerticalSpacing(6)
+
+        self.tab3_availability_label = QLabel("Waiting for acquisition parameters")
+        self.tab3_comm_state_label = QLabel("Idle")
+        self.tab3_comm_state_label.setStyleSheet("color: #555; font-weight: bold;")
+        self.tab3_comm_message_label = QLabel("-")
+        self.tab3_comm_message_label.setWordWrap(True)
+        self.tab3_comm_last_error_label = QLabel("-")
+        self.tab3_comm_last_error_label.setWordWrap(True)
+        self.tab3_acquired_packets_label = QLabel("0")
+        self.tab3_queued_packets_label = QLabel("0")
+        self.tab3_sent_packets_label = QLabel("0")
+        self.tab3_dropped_packets_label = QLabel("0")
+        self.tab3_last_comm_count_label = QLabel("-")
+        self.tab3_bytes_sent_label = QLabel("0")
+        self.tab3_comm_channel_count_label = QLabel("-")
+        self.tab3_comm_sample_rate_label = QLabel("-")
+        self.tab3_comm_duration_label = QLabel("-")
+        self.tab3_comm_data_bytes_label = QLabel("-")
+
+        status_layout.addWidget(QLabel("Availability:"), 0, 0)
+        status_layout.addWidget(self.tab3_availability_label, 0, 1, 1, 3)
+        status_layout.addWidget(QLabel("State:"), 1, 0)
+        status_layout.addWidget(self.tab3_comm_state_label, 1, 1)
+        status_layout.addWidget(QLabel("Message:"), 2, 0)
+        status_layout.addWidget(self.tab3_comm_message_label, 2, 1, 1, 3)
+        status_layout.addWidget(QLabel("Last Error:"), 3, 0)
+        status_layout.addWidget(self.tab3_comm_last_error_label, 3, 1, 1, 3)
+        status_layout.addWidget(QLabel("Acquired:"), 4, 0)
+        status_layout.addWidget(self.tab3_acquired_packets_label, 4, 1)
+        status_layout.addWidget(QLabel("Queued:"), 4, 2)
+        status_layout.addWidget(self.tab3_queued_packets_label, 4, 3)
+        status_layout.addWidget(QLabel("Sent:"), 5, 0)
+        status_layout.addWidget(self.tab3_sent_packets_label, 5, 1)
+        status_layout.addWidget(QLabel("Dropped:"), 5, 2)
+        status_layout.addWidget(self.tab3_dropped_packets_label, 5, 3)
+        status_layout.addWidget(QLabel("Last Comm:"), 6, 0)
+        status_layout.addWidget(self.tab3_last_comm_count_label, 6, 1)
+        status_layout.addWidget(QLabel("Bytes Sent:"), 6, 2)
+        status_layout.addWidget(self.tab3_bytes_sent_label, 6, 3)
+        status_layout.addWidget(QLabel("Channels:"), 7, 0)
+        status_layout.addWidget(self.tab3_comm_channel_count_label, 7, 1)
+        status_layout.addWidget(QLabel("Sample Rate:"), 7, 2)
+        status_layout.addWidget(self.tab3_comm_sample_rate_label, 7, 3)
+        status_layout.addWidget(QLabel("Packet Duration:"), 8, 0)
+        status_layout.addWidget(self.tab3_comm_duration_label, 8, 1)
+        status_layout.addWidget(QLabel("Data Bytes:"), 8, 2)
+        status_layout.addWidget(self.tab3_comm_data_bytes_label, 8, 3)
+
+        tab3_layout.addWidget(status_group)
+        tab3_layout.addStretch(1)
+
+        self.plot_tabs.addTab(tab3_widget, "TCP Comm")
+
     def _setup_plots(self):
         """Initialize plot curves"""
         # Colors suitable for white background
@@ -904,6 +1022,12 @@ class MainWindow(QMainWindow):
         self.rate2phase_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.frames_per_file_spin.valueChanged.connect(self._update_file_estimates)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
+        self.data_source_combo.currentIndexChanged.connect(self._sync_tcp_tab3_availability)
+        self.channel_combo.currentIndexChanged.connect(self._sync_tcp_tab3_availability)
+        self.point_num_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
+        self.scan_rate_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
+        self.merge_points_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
+        self.frame_num_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
 
         # 连接模式切换信号
         self.mode_time_radio.toggled.connect(self._on_mode_changed)
@@ -914,6 +1038,20 @@ class MainWindow(QMainWindow):
 
         # 初始化分析类型标签
         self._initialize_analysis_type_label()
+        self.tab3_comm_enable_check.toggled.connect(self._on_tcp_tab3_settings_changed)
+        self.tab3_server_ip_edit.textChanged.connect(self._on_tcp_tab3_settings_changed)
+        self.tab3_server_port_spin.valueChanged.connect(self._on_tcp_tab3_settings_changed)
+        self.tab3_channel_start_spin.valueChanged.connect(self._on_tcp_tab3_settings_changed)
+        self.tab3_channel_end_spin.valueChanged.connect(self._on_tcp_tab3_settings_changed)
+        self.tab3_time_downsample_spin.valueChanged.connect(self._on_tcp_tab3_settings_changed)
+        self.tab3_space_downsample_spin.valueChanged.connect(self._on_tcp_tab3_settings_changed)
+
+    def _connect_tcp_tab3_manager(self):
+        """Connect the communication manager to the Tab3 UI."""
+        self.tcp_tab3_manager.status_changed.connect(self.update_tab3_comm_status)
+        self.tcp_tab3_manager.statistics_changed.connect(self.update_tab3_comm_statistics)
+        self.tcp_tab3_manager.availability_changed.connect(self.update_tab3_comm_availability)
+        self.tcp_tab3_manager.error_occurred.connect(self._on_tcp_tab3_error)
 
     def _initialize_analysis_type_label(self):
         """初始化分析类型标签显示"""
@@ -1043,6 +1181,101 @@ class MainWindow(QMainWindow):
 
         return True, ""
 
+    def get_tab3_comm_settings(self) -> Dict[str, Any]:
+        """Return the current TCP communication settings."""
+        return {
+            "enabled": self.tab3_comm_enable_check.isChecked(),
+            "server_ip": self.tab3_server_ip_edit.text().strip(),
+            "server_port": self.tab3_server_port_spin.value(),
+            "channel_start": self.tab3_channel_start_spin.value(),
+            "channel_end": self.tab3_channel_end_spin.value(),
+            "time_downsample": self.tab3_time_downsample_spin.value(),
+            "space_downsample": self.tab3_space_downsample_spin.value(),
+            "reconnect_interval_s": 1.0,
+            "queue_max_packets": 8,
+        }
+
+    def _on_tcp_tab3_settings_changed(self, *_args):
+        """Refresh Tab3 availability and static field hints after one setting change."""
+        self._sync_tcp_tab3_availability()
+
+    def _sync_tcp_tab3_availability(self, *_args):
+        """Publish current communication availability using the latest acquisition params."""
+        try:
+            params = self._collect_params()
+        except Exception:
+            return
+        self.tcp_tab3_manager.update_enabled(self.tab3_comm_enable_check.isChecked(), params)
+        self._update_tab3_comm_hints(params)
+
+    def _update_tab3_comm_hints(self, params: AllParams):
+        """Update read-only protocol hints shown on Tab3."""
+        point_num_after_merge = max(1, params.basic.point_num_per_scan // max(1, params.phase_demod.merge_point_num))
+        channel_start = max(0, min(self.tab3_channel_start_spin.value(), point_num_after_merge - 1))
+        channel_end = max(channel_start, min(self.tab3_channel_end_spin.value(), point_num_after_merge - 1))
+        selected_count = len(range(channel_start, channel_end + 1, max(1, self.tab3_space_downsample_spin.value())))
+
+        sample_rate_text = "Invalid"
+        duration_text = "-"
+        data_bytes_text = "-"
+        if params.basic.scan_rate > 0 and params.basic.scan_rate % max(1, self.tab3_time_downsample_spin.value()) == 0:
+            sample_rate_hz = params.basic.scan_rate // self.tab3_time_downsample_spin.value()
+            samples_per_channel = len(range(0, params.display.frame_num, max(1, self.tab3_time_downsample_spin.value())))
+            sample_rate_text = f"{sample_rate_hz} Hz"
+            packet_duration = samples_per_channel / float(sample_rate_hz)
+            duration_text = f"{packet_duration:.6f} s"
+            data_bytes = selected_count * samples_per_channel * 8
+            data_bytes_text = str(data_bytes)
+
+        self.tab3_comm_channel_count_label.setText(str(selected_count))
+        self.tab3_comm_sample_rate_label.setText(sample_rate_text)
+        self.tab3_comm_duration_label.setText(duration_text)
+        self.tab3_comm_data_bytes_label.setText(data_bytes_text)
+
+    def update_tab3_comm_availability(self, payload: Dict[str, Any]):
+        """Update whether communication is currently allowed."""
+        available = bool(payload.get("available", False))
+        reason = str(payload.get("reason", ""))
+        self.tab3_availability_label.setText(reason)
+        self.tab3_availability_label.setStyleSheet(
+            "color: green; font-weight: bold;" if available else "color: #b36b00; font-weight: bold;"
+        )
+
+    def update_tab3_comm_status(self, payload: Dict[str, Any]):
+        """Update connection state and human-readable status text."""
+        state = str(payload.get("state", "idle")).capitalize()
+        connected = bool(payload.get("connected", False))
+        self.tab3_comm_state_label.setText(state)
+        self.tab3_comm_state_label.setStyleSheet(
+            "color: green; font-weight: bold;" if connected else "color: #555; font-weight: bold;"
+        )
+        self.tab3_comm_message_label.setText(str(payload.get("message", "-")))
+
+    def update_tab3_comm_statistics(self, payload: Dict[str, Any]):
+        """Update Tab3 packet counters and the latest outgoing header summary."""
+        self.tab3_acquired_packets_label.setText(str(payload.get("acquired_packets", 0)))
+        self.tab3_queued_packets_label.setText(str(payload.get("queued_packets", 0)))
+        self.tab3_sent_packets_label.setText(str(payload.get("sent_packets", 0)))
+        self.tab3_dropped_packets_label.setText(str(payload.get("dropped_packets", 0)))
+        last_comm = payload.get("last_comm_count", -1)
+        self.tab3_last_comm_count_label.setText("-" if int(last_comm) < 0 else str(last_comm))
+        self.tab3_bytes_sent_label.setText(str(payload.get("bytes_sent", 0)))
+        self.tab3_comm_channel_count_label.setText(str(payload.get("channel_count", self.tab3_comm_channel_count_label.text())))
+        sample_rate = payload.get("sample_rate_hz", 0)
+        self.tab3_comm_sample_rate_label.setText("-" if not sample_rate else f"{sample_rate} Hz")
+        duration = float(payload.get("packet_duration_seconds", 0.0))
+        self.tab3_comm_duration_label.setText("-" if duration <= 0 else f"{duration:.6f} s")
+        data_bytes = int(payload.get("data_bytes", 0))
+        self.tab3_comm_data_bytes_label.setText("-" if data_bytes <= 0 else str(data_bytes))
+        last_error = str(payload.get("last_error", "")).strip()
+        if last_error:
+            self.tab3_comm_last_error_label.setText(last_error)
+
+    def _on_tcp_tab3_error(self, message: str):
+        """Show the latest communication error without interrupting acquisition."""
+        self.tab3_comm_last_error_label.setText(message)
+        self.statusBar.showMessage(f"TCP Comm: {message}", 5000)
+
     def _configure_device(self, params: AllParams) -> bool:
         """Configure device with parameters"""
         if self.api is None:
@@ -1167,6 +1400,8 @@ class MainWindow(QMainWindow):
         self.acq_thread.error_occurred.connect(self._on_error)
         self.acq_thread.acquisition_stopped.connect(self._on_acquisition_stopped)
 
+        self.tcp_tab3_manager.start_session(params)
+
         log.info("Starting acquisition thread...")
         self.acq_thread.start()
 
@@ -1210,6 +1445,8 @@ class MainWindow(QMainWindow):
                 log.warning(f"Error stopping data saver: {e}")
             self.data_saver = None
 
+        self.tcp_tab3_manager.stop_session()
+
         self.save_status_label.setText("Save: Off")
         log.info(f"Stopped. Total data callbacks: {self._data_count}, GUI updates: {self._gui_update_count}")
 
@@ -1248,6 +1485,8 @@ class MainWindow(QMainWindow):
 
         if self._data_count % 10 == 0:
             log.debug(f"Phase data received #{self._data_count}: shape={data.shape}, channels={channel_num}")
+
+        self.tcp_tab3_manager.enqueue_phase_data(data, self.params, self.get_tab3_comm_settings())
 
         # Save original data if enabled (always save raw int32 data, regardless of rad option)
         if self.data_saver is not None and self.data_saver.is_running:
@@ -1714,6 +1953,11 @@ class MainWindow(QMainWindow):
                 self.data_saver.stop()
             except Exception as e:
                 log.warning(f"Error stopping data saver: {e}")
+
+        try:
+            self.tcp_tab3_manager.shutdown()
+        except Exception as e:
+            log.warning(f"Error stopping TCP Tab3 manager: {e}")
 
         # Close device
         if self.api is not None:
