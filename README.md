@@ -179,7 +179,7 @@ The application uses a multi-threaded architecture to ensure responsive GUI perf
   - **Frame-based File Splitting**: Automatic file creation every N frames
 - **File Management**:
   - Filename format: `{seq}-eDAS-{rate}Hz-{points}pt-{timestamp}.{ms}.bin`
-  - Example: `00001-eDAS-1000Hz-0162pt-20260126T014051.256.bin`
+  - Example: `000001-eDAS-1000Hz-0162pt-20260126T014051.256.bin`
   - Default storage location: `D:/eDAS_DATA/`
   - Configurable frames per file (default: 10 frames)
 - **Data Format**:

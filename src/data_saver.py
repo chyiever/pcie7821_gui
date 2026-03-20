@@ -260,7 +260,7 @@ class FrameBasedFileSaver(DataSaver):
     Each frame is treated as one data package.
 
     Filename format: {seq}-eDAS-{rate}Hz-{points}pt-{timestamp}.{ms}.bin
-    Example: 00001-eDAS-1000Hz-0162pt-20260126T014051.256.bin
+    Example: 000001-eDAS-1000Hz-0162pt-20260126T014051.256.bin
     """
 
     def __init__(self, save_path: str = "D:/eDAS_DATA",
@@ -362,7 +362,7 @@ class FrameBasedFileSaver(DataSaver):
         timestamp_str = now.strftime("%Y%m%dT%H%M%S")
         milliseconds = int((now.timestamp() % 1) * 1000)
 
-        filename = (f"{self._file_no:05d}-eDAS-{self._scan_rate:04d}Hz-"
+        filename = (f"{self._file_no:06d}-eDAS-{self._scan_rate:04d}Hz-"
                    f"{self._points_per_frame:04d}pt-{timestamp_str}.{milliseconds:03d}.bin")
 
         return filename
