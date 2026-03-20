@@ -50,6 +50,7 @@ class DataSaver:
         self.buffer_size = buffer_size
 
         self._data_queue: queue.Queue = queue.Queue(maxsize=buffer_size)
+        self._split_marker = object()
         self._save_thread: Optional[threading.Thread] = None
         self._running = False
         self._file_handle = None
@@ -124,28 +125,20 @@ class DataSaver:
 
         self._running = False
 
-        # Wait for save thread to finish
+        # Wait for save thread to drain queued data and exit.
         if self._save_thread is not None:
-            # Put sentinel to wake up thread
             try:
-                self._data_queue.put(None, timeout=0.1)
+                self._data_queue.put(None, timeout=1.0)
             except queue.Full:
-                pass
+                log.warning("Save queue full while stopping; waiting to enqueue sentinel")
+                self._data_queue.put(None)
 
-            self._save_thread.join(timeout=2.0)
+            self._save_thread.join(timeout=5.0)
             self._save_thread = None
 
-        # Flush remaining data
-        while not self._data_queue.empty():
-            try:
-                data = self._data_queue.get_nowait()
-                if data is not None and self._file_handle is not None:
-                    self._write_data(data)
-            except queue.Empty:
-                break
-
-        # Close file
+        # Close file after the save thread has finished all pending writes.
         if self._file_handle is not None:
+            self._file_handle.flush()
             self._file_handle.close()
             self._file_handle = None
 
@@ -178,16 +171,28 @@ class DataSaver:
 
     def _save_loop(self):
         """Background thread for saving data"""
-        while self._running:
+        while True:
             try:
-                data = self._data_queue.get(timeout=0.1)
-                if data is None:  # Sentinel
-                    continue
-                self._write_data(data)
+                item = self._data_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
             except Exception as e:
                 log.error(f"DataSaver error: {e}")
+                continue
+
+            try:
+                if item is None:  # Sentinel
+                    break
+                if item is self._split_marker:
+                    self._handle_split_request()
+                    continue
+                self._write_data(item)
+            except Exception as e:
+                log.error(f"DataSaver error: {e}")
+
+    def _handle_split_request(self):
+        """Handle a queued split request. Base saver does not split files."""
+        return
 
     def _write_data(self, data: bytes):
         """Write data to file"""
@@ -339,16 +344,15 @@ class FrameBasedFileSaver(DataSaver):
         if not self._running:
             return False
 
-        # Save the frame
         success = self.save(frame_data)
 
         if success:
             self._frame_count += 1
             log.debug(f"Saved frame {self._frame_count}/{self.frames_per_file}")
 
-            # Check if need to create new file
             if self._frame_count >= self.frames_per_file:
-                self._split_file()
+                if self._split_file():
+                    self._frame_count = 0
 
         return success
 
@@ -363,24 +367,29 @@ class FrameBasedFileSaver(DataSaver):
 
         return filename
 
-    def _split_file(self):
-        """Close current file and open new one"""
-        # Update total bytes
+    def _split_file(self) -> bool:
+        """Queue a split request so rotation happens in the save thread after pending writes."""
+        try:
+            self._data_queue.put(self._split_marker, timeout=1.0)
+            return True
+        except queue.Full:
+            log.error("Failed to queue file split request because save queue is full")
+            return False
+
+    def _handle_split_request(self):
+        """Close current file and open new one in the save thread."""
         self._total_bytes_all_files += self._bytes_written
 
-        # Close current file
         if self._file_handle is not None:
             self._file_handle.flush()
             self._file_handle.close()
 
-        # Increment file number and create new file
         self._file_no += 1
         self._current_filename = self._generate_filename()
 
         filepath = self.save_path / self._current_filename
         self._file_handle = open(filepath, 'wb')
         self._bytes_written = 0
-        self._frame_count = 0
         self._total_files_created += 1
 
         log.info(f"Split to new file: {self._current_filename} (File #{self._total_files_created})")

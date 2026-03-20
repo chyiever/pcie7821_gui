@@ -72,6 +72,39 @@ def test_frame_based_saver():
         if saver.is_running:
             saver.stop()
 
+def test_no_frame_loss_on_file_split():
+    """Verify split files keep every queued frame without losing the boundary frame."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(dir='.') as temp_dir:
+        saver = FrameBasedFileSaver(
+            save_path=temp_dir,
+            frames_per_file=3,
+            buffer_size=20,
+        )
+        saver.start(file_no=1, scan_rate=2000, points_per_frame=4)
+
+        frames = [np.full((4,), i, dtype=np.int32) for i in range(7)]
+        for frame in frames:
+            assert saver.save_frame(frame)
+
+        saver.stop()
+
+        files = sorted(Path(temp_dir).glob('*.bin'))
+        assert len(files) == 3, files
+
+        sizes = [np.fromfile(file, dtype=np.int32).size for file in files]
+        assert sizes == [12, 12, 4], sizes
+
+        file0 = np.fromfile(files[0], dtype=np.int32).reshape(3, 4)
+        file1 = np.fromfile(files[1], dtype=np.int32).reshape(3, 4)
+        file2 = np.fromfile(files[2], dtype=np.int32).reshape(1, 4)
+
+        assert np.all(file0[:, 0] == np.array([0, 1, 2]))
+        assert np.all(file1[:, 0] == np.array([3, 4, 5]))
+        assert np.all(file2[:, 0] == np.array([6]))
+
+
 def test_filename_format():
     """Test the new filename format"""
     print("\n📝 Testing filename format...")
