@@ -6,7 +6,7 @@ from typing import Dict
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
-from config import AllParams, DataSource
+from config import AllParams, DataSource, calculate_cropped_point_count, calculate_phase_point_num
 
 from .tcp_sender_worker import TCPSenderWorker
 from .tcp_types import AcquisitionContext, CommSettings, PhaseQueueItem
@@ -117,7 +117,14 @@ class TCPTab3Manager(QObject):
         context = AcquisitionContext(
             scan_rate_hz=int(params.basic.scan_rate),
             frame_num=int(params.display.frame_num),
-            point_num_after_merge=int(params.basic.point_num_per_scan // params.phase_demod.merge_point_num),
+            point_num_after_merge=calculate_cropped_point_count(
+                calculate_phase_point_num(
+                    params.basic.point_num_per_scan,
+                    params.phase_demod.merge_point_num,
+                ),
+                params.phase_demod.crop_distance_start,
+                params.phase_demod.crop_distance_end,
+            ),
         )
         item = PhaseQueueItem(phase_data=phase_data.copy(), settings=settings, context=context)
         self._worker.enqueue(item)

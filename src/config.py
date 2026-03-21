@@ -159,6 +159,8 @@ class PhaseDemodParams:
         rate2phase: Decimation factor (1,2,3,4,5,10) - affects final data rate
         space_avg_order: Spatial averaging kernel size (reduces noise)
         merge_point_num: Spatial point merging factor (reduces data volume)
+        crop_distance_start: Spatial crop start index for single-channel PHASE
+        crop_distance_end: Spatial crop end index (exclusive); 0 disables crop
         diff_order: Differential order (0=absolute, 1=first derivative, etc)
         detrend_bw: High-pass filter bandwidth in Hz (removes DC drift)
         polarization_diversity: Enable polarization diversity processing
@@ -168,6 +170,8 @@ class PhaseDemodParams:
     rate2phase: int = 1                      # 250MHz base / rate2phase = final rate
     space_avg_order: int = 25                # Spatial averaging points
     merge_point_num: int = 25                # Spatial merging factor
+    crop_distance_start: int = 0             # Single-channel PHASE crop start (inclusive)
+    crop_distance_end: int = 0               # Single-channel PHASE crop end (exclusive), 0=disabled
     diff_order: int = 1                      # Differential processing order
     detrend_bw: float = 10                  # Hz - high-pass cutoff frequency
     polarization_diversity: bool = True     # Advanced polarization processing
@@ -414,6 +418,43 @@ def validate_point_num(point_num: int, channel_num: int) -> Tuple[bool, str]:
             return False, f"Quad channel mode: point_num must be multiple of {POINT_NUM_ALIGN_4CH}"
 
     return True, ""
+
+
+def calculate_phase_point_num(point_num: int, merge_point_num: int) -> int:
+    """Return the number of PHASE points per frame after FPGA merge."""
+    return max(0, int(point_num) // max(1, int(merge_point_num)))
+
+
+def resolve_phase_crop_bounds(total_points: int, crop_start: int, crop_end: int) -> Tuple[int, int]:
+    """
+    Resolve the effective PHASE spatial crop range.
+
+    Rules:
+    - crop_start == 0 and crop_end == 0 means no crop, keep the full range
+    - start is inclusive
+    - end is exclusive
+    - end <= 0 means use total_points
+    - end larger than total_points is clamped to total_points
+    """
+    total = max(0, int(total_points))
+    start = max(0, int(crop_start))
+    end = int(crop_end)
+
+    if start == 0 and end == 0:
+        return 0, total
+
+    start = min(start, total)
+    end = total if end <= 0 else min(end, total)
+    if end < start:
+        end = start
+
+    return start, end
+
+
+def calculate_cropped_point_count(total_points: int, crop_start: int, crop_end: int) -> int:
+    """Return the point count after applying the PHASE spatial crop."""
+    start, end = resolve_phase_crop_bounds(total_points, crop_start, crop_end)
+    return max(0, end - start)
 
 
 def calculate_fiber_length(point_num: int, data_rate: int, data_source: int, rate2phase: int) -> float:

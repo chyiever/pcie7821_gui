@@ -39,6 +39,7 @@ from config import (
     ClockSource, TriggerDirection, DataSource, DisplayMode,
     CHANNEL_NUM_OPTIONS, DATA_SOURCE_OPTIONS, DATA_RATE_OPTIONS, RATE2PHASE_OPTIONS,
     validate_point_num, calculate_fiber_length, calculate_data_rate_mbps,
+    calculate_phase_point_num, calculate_cropped_point_count,
     OPTIMIZED_BUFFER_SIZES, MONITOR_UPDATE_INTERVALS
 )
 from pcie7821_api import PCIe7821API, PCIe7821Error
@@ -107,6 +108,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._connect_tcp_tab3_manager()
         self._sync_tcp_tab3_availability()
+        self._update_phase_crop_controls()
 
         # Status timers
         self._status_timer = QTimer(self)
@@ -303,7 +305,7 @@ class MainWindow(QMainWindow):
         # Row 1: Scan Rate | Pulse Width
         basic_layout.addWidget(QLabel("Scan(Hz):"), 1, 0)
         self.scan_rate_spin = QSpinBox()
-        self.scan_rate_spin.setRange(1, 100000)
+        self.scan_rate_spin.setRange(1, 1000000)
         self.scan_rate_spin.setValue(2000)
         self.scan_rate_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.scan_rate_spin.setMaximumWidth(INPUT_MAX_WIDTH)
@@ -311,7 +313,7 @@ class MainWindow(QMainWindow):
 
         basic_layout.addWidget(QLabel("Pulse(ns):"), 1, 2)
         self.pulse_width_spin = QSpinBox()
-        self.pulse_width_spin.setRange(10, 1000)
+        self.pulse_width_spin.setRange(10, 1000000)
         self.pulse_width_spin.setValue(100)
         self.pulse_width_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.pulse_width_spin.setMaximumWidth(INPUT_MAX_WIDTH)
@@ -320,7 +322,7 @@ class MainWindow(QMainWindow):
         # Row 2: Points/Scan | Bypass
         basic_layout.addWidget(QLabel("Points:"), 2, 0)
         self.point_num_spin = QSpinBox()
-        self.point_num_spin.setRange(512, 262144)
+        self.point_num_spin.setRange(512, 10000000)
         self.point_num_spin.setValue(20480)
         self.point_num_spin.setSingleStep(512)
         self.point_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
@@ -329,7 +331,7 @@ class MainWindow(QMainWindow):
 
         basic_layout.addWidget(QLabel("Bypass:"), 2, 2)
         self.bypass_spin = QSpinBox()
-        self.bypass_spin.setRange(0, 65535)
+        self.bypass_spin.setRange(0, 10000000)
         self.bypass_spin.setValue(60)
         self.bypass_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.bypass_spin.setMaximumWidth(INPUT_MAX_WIDTH)
@@ -338,7 +340,7 @@ class MainWindow(QMainWindow):
         # Row 3: Center Freq (spans full width for clarity)
         basic_layout.addWidget(QLabel("CenterFreq(MHz):"), 3, 0, 1, 2)
         self.center_freq_spin = QSpinBox()
-        self.center_freq_spin.setRange(50, 500)
+        self.center_freq_spin.setRange(1, 100000)
         self.center_freq_spin.setValue(200)
         self.center_freq_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.center_freq_spin.setMaximumWidth(INPUT_MAX_WIDTH)
@@ -421,7 +423,7 @@ class MainWindow(QMainWindow):
         # Row 2: Detrend BW | Polarization
         phase_layout.addWidget(QLabel("Detrend(Hz):"), 2, 0)
         self.detrend_bw_spin = QDoubleSpinBox()
-        self.detrend_bw_spin.setRange(0.0, 10000.0)
+        self.detrend_bw_spin.setRange(0.0, 1000000.0)
         self.detrend_bw_spin.setValue(10.0)  # 默认值改为10Hz
         self.detrend_bw_spin.setSingleStep(0.1)
         self.detrend_bw_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
@@ -431,6 +433,24 @@ class MainWindow(QMainWindow):
         self.polar_div_check = QCheckBox("PolarDiv")
         self.polar_div_check.setChecked(True)  # 默认勾选偏振分集功能
         phase_layout.addWidget(self.polar_div_check, 2, 2, 1, 2)
+
+        phase_layout.addWidget(QLabel("CropStart:"), 3, 0)
+        self.crop_distance_start_spin = QSpinBox()
+        self.crop_distance_start_spin.setRange(0, 10000000)
+        self.crop_distance_start_spin.setValue(0)
+        self.crop_distance_start_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.crop_distance_start_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        self.crop_distance_start_spin.setToolTip("Single-channel PHASE only. 0 with CropEnd=0 keeps the full range.")
+        phase_layout.addWidget(self.crop_distance_start_spin, 3, 1)
+
+        phase_layout.addWidget(QLabel("CropEnd:"), 3, 2)
+        self.crop_distance_end_spin = QSpinBox()
+        self.crop_distance_end_spin.setRange(0, 10000000)
+        self.crop_distance_end_spin.setValue(0)
+        self.crop_distance_end_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.crop_distance_end_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        self.crop_distance_end_spin.setToolTip("Single-channel PHASE only. End is exclusive; values above total points are clamped.")
+        phase_layout.addWidget(self.crop_distance_end_spin, 3, 3)
 
         layout.addWidget(phase_group)
 
@@ -457,7 +477,7 @@ class MainWindow(QMainWindow):
 
         display_layout.addWidget(QLabel("Region:"), 0, 2)
         self.region_index_spin = QSpinBox()
-        self.region_index_spin.setRange(0, 65535)
+        self.region_index_spin.setRange(0, 10000000)
         self.region_index_spin.setValue(0)
         self.region_index_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.region_index_spin.setMaximumWidth(60)  # 缩小Region输入框宽度
@@ -466,7 +486,7 @@ class MainWindow(QMainWindow):
         # Row 1: Frames | Spectrum/PSD
         display_layout.addWidget(QLabel("Frames:"), 1, 0)
         self.frame_num_spin = QSpinBox()
-        self.frame_num_spin.setRange(1, 10000)
+        self.frame_num_spin.setRange(1, 1000000)
         self.frame_num_spin.setValue(1024)
         self.frame_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.frame_num_spin.setMaximumWidth(INPUT_MAX_WIDTH)
@@ -516,7 +536,7 @@ class MainWindow(QMainWindow):
         # Row 1: Frames per File | File Size Estimate
         save_layout.addWidget(QLabel("Frames/File:"), 1, 0)
         self.frames_per_file_spin = QSpinBox()
-        self.frames_per_file_spin.setRange(1, 100)
+        self.frames_per_file_spin.setRange(1, 100000)
         self.frames_per_file_spin.setValue(self.params.save.frames_per_file)
         self.frames_per_file_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.frames_per_file_spin.setMaximumWidth(INPUT_MAX_WIDTH)
@@ -1019,6 +1039,8 @@ class MainWindow(QMainWindow):
         self.point_num_spin.valueChanged.connect(self._update_calculated_values)
         self.scan_rate_spin.valueChanged.connect(self._update_calculated_values)
         self.merge_points_spin.valueChanged.connect(self._update_calculated_values)
+        self.crop_distance_start_spin.valueChanged.connect(self._update_calculated_values)
+        self.crop_distance_end_spin.valueChanged.connect(self._update_calculated_values)
         self.rate2phase_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.frames_per_file_spin.valueChanged.connect(self._update_file_estimates)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
@@ -1027,6 +1049,8 @@ class MainWindow(QMainWindow):
         self.point_num_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
         self.scan_rate_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
         self.merge_points_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
+        self.crop_distance_start_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
+        self.crop_distance_end_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
         self.frame_num_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
 
         # 连接模式切换信号
@@ -1129,6 +1153,8 @@ class MainWindow(QMainWindow):
         params.phase_demod.rate2phase = self.rate2phase_combo.currentData()
         params.phase_demod.space_avg_order = self.space_avg_spin.value()
         params.phase_demod.merge_point_num = self.merge_points_spin.value()
+        params.phase_demod.crop_distance_start = self.crop_distance_start_spin.value()
+        params.phase_demod.crop_distance_end = self.crop_distance_end_spin.value()
         params.phase_demod.diff_order = self.diff_order_spin.value()
         params.phase_demod.detrend_bw = self.detrend_bw_spin.value()
         params.phase_demod.polarization_diversity = self.polar_div_check.isChecked()
@@ -1179,7 +1205,49 @@ class MainWindow(QMainWindow):
         if params.upload.data_source != DataSource.PHASE and params.upload.channel_num == 4:
             return False, "Raw data source does not support 4 channels"
 
+        if params.upload.data_source == DataSource.PHASE and params.upload.channel_num == 1:
+            total_points = calculate_phase_point_num(
+                params.basic.point_num_per_scan,
+                params.phase_demod.merge_point_num,
+            )
+            crop_start = params.phase_demod.crop_distance_start
+            crop_end = params.phase_demod.crop_distance_end
+            if crop_start < 0 or crop_end < 0:
+                return False, "CropStart/CropEnd must be >= 0"
+            if not (crop_start == 0 and crop_end == 0) and crop_start >= total_points:
+                return False, f"CropStart must be smaller than total PHASE points ({total_points})"
+            if crop_end > 0 and crop_end <= crop_start:
+                return False, "CropEnd must be greater than CropStart"
+
         return True, ""
+
+    def _is_phase_spatial_crop_active(self, params: Optional[AllParams] = None) -> bool:
+        """Return whether single-channel PHASE spatial crop should be applied."""
+        params = params or self.params
+        return (
+            params.upload.data_source == DataSource.PHASE
+            and params.upload.channel_num == 1
+        )
+
+    def _get_phase_point_count_after_merge(self, params: Optional[AllParams] = None) -> int:
+        """Return PHASE points per frame before software crop."""
+        params = params or self.params
+        return calculate_phase_point_num(
+            params.basic.point_num_per_scan,
+            params.phase_demod.merge_point_num,
+        )
+
+    def _get_effective_phase_point_count(self, params: Optional[AllParams] = None) -> int:
+        """Return PHASE points per frame after software crop."""
+        params = params or self.params
+        base_count = self._get_phase_point_count_after_merge(params)
+        if not self._is_phase_spatial_crop_active(params):
+            return base_count
+        return calculate_cropped_point_count(
+            base_count,
+            params.phase_demod.crop_distance_start,
+            params.phase_demod.crop_distance_end,
+        )
 
     def get_tab3_comm_settings(self) -> Dict[str, Any]:
         """Return the current TCP communication settings."""
@@ -1210,7 +1278,7 @@ class MainWindow(QMainWindow):
 
     def _update_tab3_comm_hints(self, params: AllParams):
         """Update read-only protocol hints shown on Tab3."""
-        point_num_after_merge = max(1, params.basic.point_num_per_scan // max(1, params.phase_demod.merge_point_num))
+        point_num_after_merge = max(1, self._get_effective_phase_point_count(params))
         channel_start = max(0, min(self.tab3_channel_start_spin.value(), point_num_after_merge - 1))
         channel_end = max(channel_start, min(self.tab3_channel_end_spin.value(), point_num_after_merge - 1))
         selected_count = len(range(channel_start, channel_end + 1, max(1, self.tab3_space_downsample_spin.value())))
@@ -1366,7 +1434,10 @@ class MainWindow(QMainWindow):
                 buffer_size=OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
             )
             # Calculate points per frame for filename
-            points_per_frame = params.basic.point_num_per_scan // params.phase_demod.merge_point_num
+            if params.upload.data_source == DataSource.PHASE:
+                points_per_frame = self._get_effective_phase_point_count(params)
+            else:
+                points_per_frame = params.basic.point_num_per_scan
             filename = self.data_saver.start(
                 scan_rate=params.basic.scan_rate,
                 points_per_frame=points_per_frame
@@ -1581,7 +1652,7 @@ class MainWindow(QMainWindow):
     def _update_phase_display(self, data: np.ndarray, channel_num: int):
         """Update display for phase data"""
         frame_num = self.params.display.frame_num
-        point_num = self.params.basic.point_num_per_scan // self.params.phase_demod.merge_point_num
+        point_num = self._get_effective_phase_point_count()
 
         # Debug output to identify mode
         log.debug(f"Display mode: {self.params.display.mode}, Region index: {self.params.display.region_index}")
@@ -1727,7 +1798,7 @@ class MainWindow(QMainWindow):
 
     def _update_monitor_display(self, data: np.ndarray, channel_num: int):
         """Update monitor plot"""
-        point_num = self.params.basic.point_num_per_scan // self.params.phase_demod.merge_point_num
+        point_num = self._get_effective_phase_point_count()
 
         if channel_num == 1:
             self.monitor_curves[0].setData(data[:point_num])
@@ -1853,8 +1924,15 @@ class MainWindow(QMainWindow):
 
         # Point num (actual data points after merging)
         if data_source == DataSource.PHASE:
-            merge_points = self.merge_points_spin.value()
-            actual_point_num = point_num // merge_points
+            total_points = calculate_phase_point_num(point_num, self.merge_points_spin.value())
+            if channel_num == 1:
+                actual_point_num = calculate_cropped_point_count(
+                    total_points,
+                    self.crop_distance_start_spin.value(),
+                    self.crop_distance_end_spin.value(),
+                )
+            else:
+                actual_point_num = total_points
         else:
             actual_point_num = point_num
         self._point_num_label.setText(f"Point num: {actual_point_num}")
@@ -1911,11 +1989,22 @@ class MainWindow(QMainWindow):
         if not is_phase:
             self.mode_time_radio.setChecked(True)
 
+        self._update_phase_crop_controls()
         self._update_calculated_values()
 
     def _on_channel_changed(self, index: int):
         """Handle channel count change"""
+        self._update_phase_crop_controls()
         self._update_calculated_values()
+
+    def _update_phase_crop_controls(self):
+        """Enable crop controls only when they are applicable."""
+        enabled = (
+            self.data_source_combo.currentData() == DataSource.PHASE
+            and self.channel_combo.currentData() == 1
+        )
+        self.crop_distance_start_spin.setEnabled(enabled)
+        self.crop_distance_end_spin.setEnabled(enabled)
 
     def _browse_save_path(self):
         """Open file dialog to select save path"""
@@ -1978,9 +2067,19 @@ class MainWindow(QMainWindow):
             point_num = self.point_num_spin.value()
             merge_points = self.merge_points_spin.value()
             channel_num = self.channel_combo.currentData()
+            data_source = self.data_source_combo.currentData() or DataSource.PHASE
 
-            # Calculate points per frame after merging
-            points_per_frame = point_num // merge_points
+            if data_source == DataSource.PHASE and channel_num == 1:
+                total_points = calculate_phase_point_num(point_num, merge_points)
+                points_per_frame = calculate_cropped_point_count(
+                    total_points,
+                    self.crop_distance_start_spin.value(),
+                    self.crop_distance_end_spin.value(),
+                )
+            elif data_source == DataSource.PHASE:
+                points_per_frame = calculate_phase_point_num(point_num, merge_points)
+            else:
+                points_per_frame = point_num
 
             # Estimate frame size (int32 = 4 bytes per point)
             frame_size_mb = points_per_frame * channel_num * 4 / (1024 * 1024)

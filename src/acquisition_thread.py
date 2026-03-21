@@ -20,7 +20,13 @@ from typing import Optional
 from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition, Qt
 
 from pcie7821_api import PCIe7821API, PCIe7821Error
-from config import DataSource, AllParams, POLLING_CONFIG, OPTIMIZED_BUFFER_SIZES
+from config import (
+    DataSource,
+    AllParams,
+    POLLING_CONFIG,
+    OPTIMIZED_BUFFER_SIZES,
+    resolve_phase_crop_bounds,
+)
 from logger import get_logger
 
 # Module logger
@@ -115,7 +121,48 @@ class AcquisitionThread(QThread):
         log.info(f"Configured: total_points={self._total_point_num}, "
                  f"points_after_merge={self._point_num_after_merge}, "
                  f"frames={self._frame_num}, channels={self._channel_num}, "
-                 f"data_source={self._data_source}")
+                 f"data_source={self._data_source}, "
+                 f"crop=[{params.phase_demod.crop_distance_start}, {params.phase_demod.crop_distance_end})")
+
+    def _apply_phase_spatial_crop(self, phase_data: np.ndarray) -> np.ndarray:
+        """Crop single-channel PHASE data before it leaves the acquisition thread."""
+        if (
+            self._params is None
+            or self._data_source != DataSource.PHASE
+            or self._channel_num != 1
+        ):
+            return phase_data
+
+        start, end = resolve_phase_crop_bounds(
+            self._point_num_after_merge,
+            self._params.phase_demod.crop_distance_start,
+            self._params.phase_demod.crop_distance_end,
+        )
+        if start == 0 and end == self._point_num_after_merge:
+            return phase_data
+
+        frame_matrix = phase_data.reshape(self._frame_num, self._point_num_after_merge)
+        cropped = np.ascontiguousarray(frame_matrix[:, start:end])
+        return cropped.reshape(-1)
+
+    def _apply_monitor_spatial_crop(self, monitor_data: np.ndarray) -> np.ndarray:
+        """Crop single-channel monitor data to match the PHASE crop range."""
+        if (
+            self._params is None
+            or self._data_source != DataSource.PHASE
+            or self._channel_num != 1
+        ):
+            return monitor_data
+
+        start, end = resolve_phase_crop_bounds(
+            self._point_num_after_merge,
+            self._params.phase_demod.crop_distance_start,
+            self._params.phase_demod.crop_distance_end,
+        )
+        if start == 0 and end == self._point_num_after_merge:
+            return monitor_data
+
+        return np.ascontiguousarray(monitor_data[start:end])
 
     def run(self):
         """Thread main loop"""
@@ -278,6 +325,8 @@ class AcquisitionThread(QThread):
 
         self._bytes_acquired += len(phase_data) * 4  # int = 4 bytes
 
+        phase_data = self._apply_phase_spatial_crop(phase_data)
+
         # Reshape data by channels
         if self._channel_num > 1:
             phase_data = phase_data.reshape(-1, self._channel_num)
@@ -290,6 +339,7 @@ class AcquisitionThread(QThread):
             monitor_data = self.api.read_monitor_data(
                 self._point_num_after_merge, self._channel_num
             )
+            monitor_data = self._apply_monitor_spatial_crop(monitor_data)
             self._pending_monitor_data = (monitor_data, self._channel_num)
         except PCIe7821Error as e:
             log.warning(f"Monitor data read failed (non-critical): {e}")
@@ -496,6 +546,8 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                     points = self._point_num_after_merge * self._frame_num
                     phase_data = np.random.randint(-100000, 100000, points * self._channel_num, dtype=np.int32)
 
+                    phase_data = self._apply_phase_spatial_crop(phase_data)
+
                     if self._channel_num > 1:
                         phase_data = phase_data.reshape(-1, self._channel_num)
 
@@ -505,6 +557,7 @@ class SimulatedAcquisitionThread(AcquisitionThread):
 
                     # Simulated monitor data
                     monitor_data = np.random.randint(0, 65535, self._point_num_after_merge * self._channel_num, dtype=np.uint32)
+                    monitor_data = self._apply_monitor_spatial_crop(monitor_data)
                     self._pending_monitor_data = (monitor_data, self._channel_num)
                 else:
                     points = self._total_point_num * self._frame_num

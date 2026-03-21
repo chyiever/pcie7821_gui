@@ -118,7 +118,7 @@ def test_filename_format():
     print(f"Generated filename: {filename}")
 
     # Check format: 序号-eDAS-采样率Hz-每帧点数pt-时间戳.毫秒.bin
-    expected_parts = ["000001", "eDAS", "2000Hz", "0162pt"]
+    expected_parts = ["0000001", "eDAS", "2000Hz", "0162pt"]
     for part in expected_parts:
         if part not in filename:
             print(f"❌ Missing expected part: {part}")
