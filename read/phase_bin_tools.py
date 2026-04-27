@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,6 +27,7 @@ else:
 
 
 POINTS_PATTERN = re.compile(r"-(\d+)pt-")
+SCAN_RATE_PATTERN = re.compile(r"-(\d+)Hz-")
 PHASE_RAD_SCALE = np.pi / 32767.0
 
 
@@ -36,6 +37,43 @@ def infer_points_per_frame_from_filename(file_path: str | Path) -> Optional[int]
     if match is None:
         return None
     return int(match.group(1))
+
+
+def infer_scan_rate_hz_from_filename(file_path: str | Path) -> Optional[float]:
+    """Infer scan_rate_hz from a file name like '...-2000Hz-....bin'."""
+    match = SCAN_RATE_PATTERN.search(Path(file_path).name)
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def list_phase_bin_files(
+    folder_path: str | Path,
+    pattern: str = "*.bin",
+) -> list[Path]:
+    """List .bin files under a folder in lexicographic order."""
+    folder = Path(folder_path)
+    if not folder.exists():
+        raise FileNotFoundError(f"Folder not found: {folder}")
+    if not folder.is_dir():
+        raise NotADirectoryError(f"Path is not a folder: {folder}")
+
+    files = sorted(path for path in folder.glob(pattern) if path.is_file())
+    if not files:
+        raise FileNotFoundError(f"No files matched pattern '{pattern}' in folder: {folder}")
+    return files
+
+
+def _normalize_file_paths(file_paths: Iterable[str | Path]) -> list[Path]:
+    paths = [Path(path) for path in file_paths]
+    if not paths:
+        raise ValueError("file_paths must contain at least one file")
+    for path in paths:
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+        if not path.is_file():
+            raise ValueError(f"Path is not a file: {path}")
+    return sorted(paths)
 
 
 def read_single_channel_phase_bin_raw(
@@ -69,6 +107,47 @@ def read_single_channel_phase_bin_raw(
     return raw.reshape(frame_count, points_per_frame)
 
 
+def read_multi_channel_phase_bin_raw(
+    file_paths: Iterable[str | Path],
+    points_per_frame: Optional[int] = None,
+) -> np.ndarray:
+    """Read multiple PHASE bin files as raw int32 data and concatenate along frames."""
+    paths = _normalize_file_paths(file_paths)
+
+    resolved_points = points_per_frame
+    if resolved_points is None:
+        resolved_points = infer_points_per_frame_from_filename(paths[0])
+    if resolved_points is None:
+        raise ValueError(
+            "points_per_frame is required when filenames do not contain 'XXXXpt'"
+        )
+
+    all_frames = []
+    for path in paths:
+        inferred_points = infer_points_per_frame_from_filename(path)
+        if inferred_points is not None and inferred_points != resolved_points:
+            raise ValueError(
+                f"Mismatched points_per_frame in filename: {path.name} -> {inferred_points}, "
+                f"expected {resolved_points}"
+            )
+        all_frames.append(
+            read_single_channel_phase_bin_raw(path, points_per_frame=resolved_points)
+        )
+
+    return np.concatenate(all_frames, axis=0)
+
+
+def read_phase_bin_folder_raw(
+    folder_path: str | Path,
+    pattern: str = "*.bin",
+    points_per_frame: Optional[int] = None,
+) -> tuple[np.ndarray, list[Path]]:
+    """Read all matching PHASE bin files in a folder and concatenate along frames."""
+    files = list_phase_bin_files(folder_path, pattern=pattern)
+    frame_data = read_multi_channel_phase_bin_raw(files, points_per_frame=points_per_frame)
+    return frame_data, files
+
+
 def convert_phase_to_radians(data: np.ndarray) -> np.ndarray:
     """Convert stored int32 phase values to phase in radians."""
     return np.asarray(data, dtype=np.float64) * PHASE_RAD_SCALE
@@ -81,6 +160,29 @@ def read_single_channel_phase_bin(
     """Read one single-channel PHASE bin file and return phase in radians."""
     raw = read_single_channel_phase_bin_raw(file_path, points_per_frame=points_per_frame)
     return convert_phase_to_radians(raw)
+
+
+def read_multi_channel_phase_bin(
+    file_paths: Iterable[str | Path],
+    points_per_frame: Optional[int] = None,
+) -> np.ndarray:
+    """Read multiple PHASE bin files, concatenate them, and return phase in radians."""
+    raw = read_multi_channel_phase_bin_raw(file_paths, points_per_frame=points_per_frame)
+    return convert_phase_to_radians(raw)
+
+
+def read_phase_bin_folder(
+    folder_path: str | Path,
+    pattern: str = "*.bin",
+    points_per_frame: Optional[int] = None,
+) -> tuple[np.ndarray, list[Path]]:
+    """Read all matching PHASE bin files in a folder and return phase in radians."""
+    raw, files = read_phase_bin_folder_raw(
+        folder_path,
+        pattern=pattern,
+        points_per_frame=points_per_frame,
+    )
+    return convert_phase_to_radians(raw), files
 
 
 def _require_scipy() -> None:
@@ -282,8 +384,14 @@ def plot_space_time(
 
 __all__ = [
     "infer_points_per_frame_from_filename",
+    "infer_scan_rate_hz_from_filename",
+    "list_phase_bin_files",
     "read_single_channel_phase_bin_raw",
+    "read_multi_channel_phase_bin_raw",
+    "read_phase_bin_folder_raw",
     "read_single_channel_phase_bin",
+    "read_multi_channel_phase_bin",
+    "read_phase_bin_folder",
     "convert_phase_to_radians",
     "highpass_filter",
     "bandpass_filter",

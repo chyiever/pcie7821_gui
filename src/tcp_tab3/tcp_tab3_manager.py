@@ -126,7 +126,7 @@ class TCPTab3Manager(QObject):
                 params.phase_demod.crop_distance_end,
             ),
         )
-        item = PhaseQueueItem(phase_data=phase_data.copy(), settings=settings, context=context)
+        item = PhaseQueueItem(phase_data=phase_data, settings=settings, context=context)
         self._worker.enqueue(item)
 
     def _emit_status(self, payload: dict) -> None:

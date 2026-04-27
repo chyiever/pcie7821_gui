@@ -159,11 +159,9 @@ class DataSaver:
             return False
 
         try:
-            # Ensure data is int32 (32-bit signed int) for phase data
-            if data.dtype != np.int32:
-                data = data.astype(np.int32)
-
-            self._data_queue.put_nowait(data.tobytes())
+            # Keep queueing non-blocking; serialization is deferred to the save thread
+            # so the GUI thread only enqueues a reference to the latest numpy block.
+            self._data_queue.put_nowait(data)
             return True
         except queue.Full:
             self._dropped_blocks += 1
@@ -194,11 +192,18 @@ class DataSaver:
         """Handle a queued split request. Base saver does not split files."""
         return
 
-    def _write_data(self, data: bytes):
-        """Write data to file"""
+    def _write_data(self, data):
+        """Serialize one queued block and write it to disk."""
         if self._file_handle is not None:
-            self._file_handle.write(data)
-            self._bytes_written += len(data)
+            if isinstance(data, np.ndarray):
+                if data.dtype != np.int32:
+                    data = data.astype(np.int32)
+                payload = data.tobytes()
+            else:
+                payload = data
+
+            self._file_handle.write(payload)
+            self._bytes_written += len(payload)
             self._blocks_written += 1
 
     @property
@@ -370,10 +375,10 @@ class FrameBasedFileSaver(DataSaver):
     def _split_file(self) -> bool:
         """Queue a split request so rotation happens in the save thread after pending writes."""
         try:
-            self._data_queue.put(self._split_marker, timeout=1.0)
+            self._data_queue.put_nowait(self._split_marker)
             return True
         except queue.Full:
-            log.error("Failed to queue file split request because save queue is full")
+            log.warning("Deferred file split because save queue is full")
             return False
 
     def _handle_split_request(self):
@@ -396,11 +401,10 @@ class FrameBasedFileSaver(DataSaver):
 
     def stop(self):
         """Stop and update total statistics"""
-        self._total_bytes_all_files += self._bytes_written
         super().stop()
         log.info(f"Total files created: {self._total_files_created}, "
                  f"Total frames saved: {(self._total_files_created - 1) * self.frames_per_file + self._frame_count}, "
-                 f"Total bytes: {self._total_bytes_all_files}")
+                 f"Total bytes: {self.total_bytes_all_files}")
 
     @property
     def total_bytes_all_files(self) -> int:

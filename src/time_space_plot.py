@@ -153,6 +153,8 @@ class TimeSpacePlotWidget(QWidget):
     pointCountChanged = pyqtSignal(int)
     plotStateChanged = pyqtSignal(bool)  # 新增：绘图状态变化信号
 
+    DISPLAY_UPDATE_INTERVAL_MS = 200
+
     def __init__(self):
         """初始化 PlotWidget 版本的 TimeSpacePlot"""
         super().__init__()
@@ -175,6 +177,10 @@ class TimeSpacePlotWidget(QWidget):
         self._plot_enabled = False  # 替代enable_plot
         self._pending_update = False
         self._full_point_num = 0  # V2新增：完整点数记录
+
+        self._display_update_timer = QTimer(self)
+        self._display_update_timer.setSingleShot(True)
+        self._display_update_timer.timeout.connect(self._flush_scheduled_display_update)
 
         self._setup_ui()
         log.debug("TimeSpacePlotWidget initialized successfully")
@@ -771,8 +777,17 @@ class TimeSpacePlotWidget(QWidget):
             return None
 
     def _schedule_display_update(self):
-        """直接更新显示，不使用定时器控制"""
-        # 改为每帧直接更新，不使用定时器延迟
+        """Throttle expensive image updates in the GUI thread."""
+        self._pending_update = True
+        if not self._display_update_timer.isActive():
+            self._display_update_timer.start(self.DISPLAY_UPDATE_INTERVAL_MS)
+
+    def _flush_scheduled_display_update(self):
+        """Render the latest buffered data and coalesce intermediate updates."""
+        if not self._pending_update:
+            return
+
+        self._pending_update = False
         self._update_display()
 
     def _update_display(self):

@@ -92,6 +92,7 @@ class MainWindow(QMainWindow):
         self._gui_update_count = 0
         self._raw_data_count = 0  # Counter for raw data callbacks
         self._last_raw_display_time = 0  # Last raw display update timestamp
+        self._last_storage_queue_log_time = 0.0
 
         # System monitoring
         self._last_system_update = 0
@@ -502,11 +503,22 @@ class MainWindow(QMainWindow):
         self.analysis_type_label.setToolTip("Analysis type: Raw data → Power Spectrum, Phase data → PSD")
         display_layout.addWidget(self.analysis_type_label, 1, 3)
 
-        # Row 2: rad checkbox
+        # Row 2: waveform / monitor display switches
+        self.waveform_enable_check = QCheckBox("Waveform")
+        self.waveform_enable_check.setToolTip("Enable time/space waveform plot updates")
+        self.waveform_enable_check.setChecked(False)
+        display_layout.addWidget(self.waveform_enable_check, 2, 0, 1, 2)
+
+        self.monitor_enable_check = QCheckBox("Monitor")
+        self.monitor_enable_check.setToolTip("Enable monitor plot updates")
+        self.monitor_enable_check.setChecked(False)
+        display_layout.addWidget(self.monitor_enable_check, 2, 2, 1, 2)
+
+        # Row 3: rad checkbox
         self.rad_check = QCheckBox("rad")
         self.rad_check.setToolTip("Convert phase data to radians for display only: display = data / 32767 * π\n(Storage always saves original int32 data)")
         self.rad_check.setChecked(True)  # Default checked
-        display_layout.addWidget(self.rad_check, 2, 0, 1, 2)
+        display_layout.addWidget(self.rad_check, 3, 0, 1, 2)
 
         layout.addWidget(display_group)
 
@@ -915,7 +927,7 @@ class MainWindow(QMainWindow):
         settings_layout.setVerticalSpacing(6)
 
         self.tab3_comm_enable_check = QCheckBox("Enable communication")
-        self.tab3_comm_enable_check.setChecked(True)
+        self.tab3_comm_enable_check.setChecked(False)
         settings_layout.addWidget(self.tab3_comm_enable_check, 0, 0, 1, 2)
 
         settings_layout.addWidget(QLabel("Server IP:"), 1, 0)
@@ -1056,6 +1068,8 @@ class MainWindow(QMainWindow):
         # 连接模式切换信号
         self.mode_time_radio.toggled.connect(self._on_mode_changed)
         self.mode_space_radio.toggled.connect(self._on_mode_changed)
+        self.waveform_enable_check.toggled.connect(self._on_waveform_display_toggled)
+        self.monitor_enable_check.toggled.connect(self._on_monitor_display_toggled)
 
         # 连接region index变化信号
         self.region_index_spin.valueChanged.connect(self._on_region_changed)
@@ -1076,6 +1090,38 @@ class MainWindow(QMainWindow):
         self.tcp_tab3_manager.statistics_changed.connect(self.update_tab3_comm_statistics)
         self.tcp_tab3_manager.availability_changed.connect(self.update_tab3_comm_availability)
         self.tcp_tab3_manager.error_occurred.connect(self._on_tcp_tab3_error)
+
+    def _clear_waveform_plot(self):
+        """Clear all waveform curves on plot 1."""
+        if not hasattr(self, 'plot_curve_1'):
+            return
+        for curve in self.plot_curve_1:
+            curve.setData([])
+
+    def _clear_monitor_plot(self):
+        """Clear all monitor curves on plot 3."""
+        if not hasattr(self, 'monitor_curves'):
+            return
+        for curve in self.monitor_curves:
+            curve.setData([])
+
+    @pyqtSlot(bool)
+    def _on_waveform_display_toggled(self, enabled: bool):
+        """Enable or disable waveform rendering on plot 1."""
+        if not enabled:
+            self._clear_waveform_plot()
+
+    @pyqtSlot(bool)
+    def _on_monitor_display_toggled(self, enabled: bool):
+        """Enable or disable monitor rendering on plot 3."""
+        if not enabled:
+            self._clear_monitor_plot()
+        elif self._current_monitor_data is not None:
+            try:
+                channel_num = self.params.upload.channel_num or 1
+                self._update_monitor_display(self._current_monitor_data, channel_num)
+            except Exception as e:
+                log.warning(f"Failed to refresh monitor display: {e}")
 
     def _initialize_analysis_type_label(self):
         """初始化分析类型标签显示"""
@@ -1587,6 +1633,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.exception(f"Error in _update_phase_display: {e}")
 
+        if self.acq_thread is not None:
+            self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
+
         elapsed = (time.perf_counter() - start_time) * 1000
         if elapsed > 50:
             log.warning(f"Slow _on_phase_data: {elapsed:.1f}ms")
@@ -1621,6 +1670,9 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 log.exception(f"Error in _update_raw_display: {e}")
 
+        if self.acq_thread is not None:
+            self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
+
         elapsed = (time.perf_counter() - start_time) * 1000
         if elapsed > 50:
             log.warning(f"Slow _on_raw_data: {elapsed:.1f}ms")
@@ -1629,6 +1681,8 @@ class MainWindow(QMainWindow):
     def _on_monitor_data(self, data: np.ndarray, channel_num: int):
         """Handle monitor data from acquisition thread"""
         self._current_monitor_data = data
+        if not self.monitor_enable_check.isChecked():
+            return
         try:
             self._update_monitor_display(data, channel_num)
         except Exception as e:
@@ -1653,6 +1707,7 @@ class MainWindow(QMainWindow):
         """Update display for phase data"""
         frame_num = self.params.display.frame_num
         point_num = self._get_effective_phase_point_count()
+        waveform_enabled = self.waveform_enable_check.isChecked()
 
         # Debug output to identify mode
         log.debug(f"Display mode: {self.params.display.mode}, Region index: {self.params.display.region_index}")
@@ -1670,11 +1725,12 @@ class MainWindow(QMainWindow):
                         space_data.append(data[idx])
 
                 space_data = np.array(space_data)
-                self.plot_curve_1[0].setData(space_data)
+                if waveform_enabled:
+                    self.plot_curve_1[0].setData(space_data)
 
-                # Clear other curves
-                for i in range(1, 4):
-                    self.plot_curve_1[i].setData([])
+                    # Clear other curves
+                    for i in range(1, 4):
+                        self.plot_curve_1[i].setData([])
 
                 # Update spectrum (Phase data: automatically uses PSD)
                 if self.params.display.spectrum_enable and len(space_data) > 0:
@@ -1691,10 +1747,12 @@ class MainWindow(QMainWindow):
                         idx = region_idx + point_num * i
                         if idx < len(data):
                             space_data.append(data[idx, ch])
-                    self.plot_curve_1[ch].setData(np.array(space_data))
+                    if waveform_enabled:
+                        self.plot_curve_1[ch].setData(np.array(space_data))
 
-                for i in range(channel_num, 4):
-                    self.plot_curve_1[i].setData([])
+                if waveform_enabled:
+                    for i in range(channel_num, 4):
+                        self.plot_curve_1[i].setData([])
 
         else:
             # Time mode: show multiple frames overlay
@@ -1702,9 +1760,9 @@ class MainWindow(QMainWindow):
                 for i in range(min(4, frame_num)):
                     start = i * point_num
                     end = start + point_num
-                    if end <= len(data):
+                    if waveform_enabled and end <= len(data):
                         self.plot_curve_1[i].setData(data[start:end])
-                    else:
+                    elif waveform_enabled:
                         self.plot_curve_1[i].setData([])
 
                 # Spectrum of first frame (Phase data: automatically uses PSD)
@@ -1717,7 +1775,7 @@ class MainWindow(QMainWindow):
 
                 # Show first frame of each channel
                 for ch in range(min(channel_num, 4)):
-                    if point_num <= len(data):
+                    if waveform_enabled and point_num <= len(data):
                         self.plot_curve_1[ch].setData(data[:point_num, ch])
 
         # Time-Space plot: 独立于MODE控制，由PLOT按钮控制
@@ -1747,27 +1805,24 @@ class MainWindow(QMainWindow):
             if not success:
                 log.debug("Time-space plot update skipped (plot disabled)")
 
-        # Update frame counter
-        if self.acq_thread is not None:
-            self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
-
     def _update_raw_display(self, data: np.ndarray, channel_num: int):
         """Update display for raw IQ data"""
         point_num = self.params.basic.point_num_per_scan
         frame_num = self.params.display.frame_num
+        waveform_enabled = self.waveform_enable_check.isChecked()
 
         if channel_num == 1:
             # Show multiple frames with downsampling for display
             for i in range(min(4, frame_num)):
                 start = i * point_num
                 end = start + point_num
-                if end <= len(data):
+                if waveform_enabled and end <= len(data):
                     # Time domain: 10x downsample for display performance
                     # (raw data has ~20K+ points per frame, too many for realtime plot)
                     raw_frame_data = data[start:end]
                     downsampled_data = raw_frame_data[::10]
                     self.plot_curve_1[i].setData(downsampled_data)
-                else:
+                elif waveform_enabled:
                     self.plot_curve_1[i].setData([])
 
             # Spectrum: use full-resolution data (Raw data: automatically uses Power Spectrum)
@@ -1780,7 +1835,7 @@ class MainWindow(QMainWindow):
                 data = data.reshape(-1, channel_num)
 
             for ch in range(min(channel_num, 4)):
-                if point_num <= len(data):
+                if waveform_enabled and point_num <= len(data):
                     # 10x downsample for multi-channel display performance
                     raw_channel_data = data[:point_num, ch]
                     downsampled_data = raw_channel_data[::10]
@@ -1793,11 +1848,11 @@ class MainWindow(QMainWindow):
                 self._update_spectrum(data[:point_num, 0], sample_rate,
                                      psd_mode=False, data_type='short')  # psd_mode ignored for raw data
 
-        if self.acq_thread is not None:
-            self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
-
     def _update_monitor_display(self, data: np.ndarray, channel_num: int):
         """Update monitor plot"""
+        if not self.monitor_enable_check.isChecked():
+            return
+
         point_num = self._get_effective_phase_point_count()
 
         if channel_num == 1:
@@ -1901,9 +1956,25 @@ class MainWindow(QMainWindow):
 
             # Update file size estimates
             self._update_file_estimates()
+            self._log_storage_queue_status()
 
         except Exception as e:
             log.warning(f"Error in _update_status: {e}")
+
+    def _log_storage_queue_status(self):
+        """Periodically log storage queue occupancy for现场排查."""
+        if not self.data_saver or not self.data_saver.is_running:
+            return
+
+        now = time.time()
+        if now - self._last_storage_queue_log_time < 5.0:
+            return
+
+        queue_size = self.data_saver.queue_size
+        queue_max = getattr(self.data_saver, 'buffer_size', OPTIMIZED_BUFFER_SIZES['storage_queue_frames'])
+        dropped = self.data_saver.dropped_blocks
+        log.info(f"Storage queue: {queue_size}/{queue_max}, dropped={dropped}")
+        self._last_storage_queue_log_time = now
 
     def _update_calculated_values(self):
         """Update calculated display values"""
