@@ -18,10 +18,13 @@ Key Design:
 
 import sys
 import os
+import json
 import time
 import numpy as np
 import psutil  # For CPU and disk monitoring
 import shutil  # For disk space monitoring
+from dataclasses import asdict, fields, is_dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -49,6 +52,7 @@ from spectrum_analyzer import RealTimeSpectrumAnalyzer
 from time_space_plot import create_time_space_widget
 from tcp_tab3 import TCPTab3Manager
 from logger import get_logger
+from plot_interaction import ZoomablePlotViewBox
 
 # Module logger
 log = get_logger("gui")
@@ -77,6 +81,9 @@ class MainWindow(QMainWindow):
         self.spectrum_analyzer = RealTimeSpectrumAnalyzer()
         self.time_space_widget = None
         self.tcp_tab3_manager = TCPTab3Manager()
+        self._interactive_plot_widgets: Dict[str, pg.PlotWidget] = {}
+        self._plot_zoom_locked: Dict[str, bool] = {}
+        self._settings_path = self._get_settings_path()
 
         # Parameters
         self.params = AllParams()
@@ -108,6 +115,7 @@ class MainWindow(QMainWindow):
         self._setup_plots()
         self._connect_signals()
         self._connect_tcp_tab3_manager()
+        self._load_local_params()
         self._sync_tcp_tab3_availability()
         self._update_phase_crop_controls()
 
@@ -768,9 +776,9 @@ class MainWindow(QMainWindow):
         tab1_layout.setContentsMargins(5, 5, 5, 10)
 
         # Create plots with custom titles and styling
-        self.plot_widget_1 = pg.PlotWidget()  # Remove title, will set via label
-        self.plot_widget_2 = pg.PlotWidget()
-        self.plot_widget_3 = pg.PlotWidget()
+        self.plot_widget_1 = self._create_interactive_plot_widget("plot1")
+        self.plot_widget_2 = self._create_interactive_plot_widget("plot2")
+        self.plot_widget_3 = self._create_interactive_plot_widget("plot3")
 
         # Configure plot styles - white background and custom title styling
         plot_titles = ["Time Domain Data", "FFT Spectrum", "Monitor (Fiber End Detection)"]
@@ -1024,6 +1032,42 @@ class MainWindow(QMainWindow):
 
         self.plot_tabs.addTab(tab3_widget, "TCP Comm")
 
+    def _create_interactive_plot_widget(self, plot_key: str) -> pg.PlotWidget:
+        """Create a PlotWidget with unified rectangle zoom behavior."""
+        view_box = ZoomablePlotViewBox()
+        plot_widget = pg.PlotWidget(viewBox=view_box)
+        self._interactive_plot_widgets[plot_key] = plot_widget
+        self._plot_zoom_locked[plot_key] = False
+        view_box.sigManualRangeChange.connect(
+            lambda key=plot_key: self._on_plot_manual_range_change(key)
+        )
+        view_box.sigViewAllRequested.connect(
+            lambda key=plot_key: self._restore_plot_auto_range(key)
+        )
+        return plot_widget
+
+    def _configure_realtime_curve(self, curve: pg.PlotDataItem):
+        """Use pyqtgraph fast-path settings for large realtime curves."""
+        curve.setClipToView(True)
+        curve.setDownsampling(auto=True, method="peak")
+        curve.setSkipFiniteCheck(True)
+
+    def _on_plot_manual_range_change(self, plot_key: str):
+        plot_widget = self._interactive_plot_widgets.get(plot_key)
+        if plot_widget is None:
+            return
+        self._plot_zoom_locked[plot_key] = True
+        plot_widget.getViewBox().disableAutoRange()
+
+    def _restore_plot_auto_range(self, plot_key: str):
+        plot_widget = self._interactive_plot_widgets.get(plot_key)
+        if plot_widget is None:
+            return
+        self._plot_zoom_locked[plot_key] = False
+        view_box = plot_widget.getViewBox()
+        view_box.enableAutoRange(x=True, y=True)
+        view_box.autoRange(padding=0.0)
+
     def _setup_plots(self):
         """Initialize plot curves"""
         # Colors suitable for white background
@@ -1032,11 +1076,13 @@ class MainWindow(QMainWindow):
         # Time domain curves (up to 4 frames)
         for i in range(4):
             curve = self.plot_widget_1.plot(pen=pg.mkPen(colors[i], width=1.5))
+            self._configure_realtime_curve(curve)
             self.plot_curve_1.append(curve)
 
         # Monitor curves (up to 2 channels)
         for i in range(2):
             curve = self.plot_widget_3.plot(pen=pg.mkPen(colors[i], width=1.5))
+            self._configure_realtime_curve(curve)
             self.monitor_curves.append(curve)
 
     # ----- SIGNAL-SLOT CONNECTIONS -----
@@ -1123,6 +1169,15 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 log.warning(f"Failed to refresh monitor display: {e}")
 
+    def _sync_display_control_states(self):
+        """Keep display switches consistent with the current data source."""
+        is_phase = self.data_source_combo.currentData() == DataSource.PHASE
+        self.plot_widget_3.setEnabled(is_phase)
+        self.mode_space_radio.setEnabled(is_phase)
+        self.monitor_enable_check.setEnabled(is_phase)
+        if not is_phase:
+            self._clear_monitor_plot()
+
     def _initialize_analysis_type_label(self):
         """初始化分析类型标签显示"""
         # 根据当前数据源设置分析类型标签
@@ -1177,6 +1232,140 @@ class MainWindow(QMainWindow):
             self._device_status_label.setText("Device: Disconnected")
             self._device_status_label.setStyleSheet("color: red;")
 
+    def _get_settings_path(self) -> Path:
+        """Return the local settings file path for source and frozen builds."""
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent / "last_params.json"
+        return Path(__file__).resolve().parents[1] / "last_params.json"
+
+    def _merge_dict_into_dataclass(self, target, values: Dict[str, Any]):
+        """Best-effort dataclass merge used by local settings restore."""
+        if not isinstance(values, dict):
+            return
+        for field in fields(target):
+            if field.name not in values:
+                continue
+            current_value = getattr(target, field.name)
+            new_value = values[field.name]
+            if is_dataclass(current_value) and isinstance(new_value, dict):
+                self._merge_dict_into_dataclass(current_value, new_value)
+            else:
+                setattr(target, field.name, new_value)
+
+    def _set_combo_to_data(self, combo: QComboBox, value: Any):
+        """Set combo-box current item by user data when available."""
+        for index in range(combo.count()):
+            if combo.itemData(index) == value:
+                combo.setCurrentIndex(index)
+                return
+
+    def _apply_params_to_ui(self, params: AllParams):
+        """Apply restored parameters back to the UI controls."""
+        if params.basic.clk_src == ClockSource.EXTERNAL:
+            self.clk_external_radio.setChecked(True)
+        else:
+            self.clk_internal_radio.setChecked(True)
+
+        if params.basic.trig_dir == TriggerDirection.INPUT:
+            self.trig_in_radio.setChecked(True)
+        else:
+            self.trig_out_radio.setChecked(True)
+
+        self.scan_rate_spin.setValue(params.basic.scan_rate)
+        self.pulse_width_spin.setValue(params.basic.pulse_width_ns)
+        self.point_num_spin.setValue(params.basic.point_num_per_scan)
+        self.bypass_spin.setValue(params.basic.bypass_point_num)
+        self.center_freq_spin.setValue(params.basic.center_freq_mhz)
+
+        self._set_combo_to_data(self.channel_combo, params.upload.channel_num)
+        self._set_combo_to_data(self.data_source_combo, params.upload.data_source)
+        self._set_combo_to_data(self.data_rate_combo, params.upload.data_rate)
+
+        self._set_combo_to_data(self.rate2phase_combo, params.phase_demod.rate2phase)
+        self.space_avg_spin.setValue(params.phase_demod.space_avg_order)
+        self.merge_points_spin.setValue(params.phase_demod.merge_point_num)
+        self.crop_distance_start_spin.setValue(params.phase_demod.crop_distance_start)
+        self.crop_distance_end_spin.setValue(params.phase_demod.crop_distance_end)
+        self.diff_order_spin.setValue(params.phase_demod.diff_order)
+        self.detrend_bw_spin.setValue(params.phase_demod.detrend_bw)
+        self.polar_div_check.setChecked(params.phase_demod.polarization_diversity)
+
+        if params.display.mode == DisplayMode.SPACE:
+            self.mode_space_radio.setChecked(True)
+        else:
+            self.mode_time_radio.setChecked(True)
+        self.region_index_spin.setValue(params.display.region_index)
+        self.frame_num_spin.setValue(params.display.frame_num)
+        self.spectrum_enable_check.setChecked(params.display.spectrum_enable)
+        self.rad_check.setChecked(params.display.rad_enable)
+        self.waveform_enable_check.setChecked(params.display.waveform_plot_enabled)
+        self.monitor_enable_check.setChecked(params.display.monitor_plot_enabled)
+
+        if self.time_space_widget is not None:
+            self.time_space_widget.set_parameters(
+                {
+                    "window_frames": params.time_space.window_frames,
+                    "distance_range_start": params.time_space.distance_range_start,
+                    "distance_range_end": params.time_space.distance_range_end,
+                    "time_downsample": params.time_space.time_downsample,
+                    "space_downsample": params.time_space.space_downsample,
+                    "colormap_type": params.time_space.colormap_type,
+                    "vmin": params.time_space.vmin,
+                    "vmax": params.time_space.vmax,
+                }
+            )
+            self.time_space_widget.set_scan_rate(params.basic.scan_rate)
+
+        self.save_enable_check.setChecked(params.save.enable)
+        self.save_path_edit.setText(params.save.path)
+        self.frames_per_file_spin.setValue(params.save.frames_per_file)
+
+        self._sync_display_control_states()
+        self._update_phase_crop_controls()
+        self._update_calculated_values()
+        self._update_file_estimates()
+
+    def _save_local_params(self):
+        """Persist the current UI parameters to last_params.json."""
+        try:
+            params = self._collect_params()
+            payload = {
+                "version": 1,
+                "params": asdict(params),
+            }
+            self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self._settings_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self.params = params
+            log.info(f"Saved local parameters to {self._settings_path}")
+        except Exception as e:
+            log.warning(f"Failed to save local parameters: {e}")
+
+    def _load_local_params(self):
+        """Restore the last saved UI parameters when available."""
+        if not self._settings_path.exists():
+            log.info(f"Local parameter file not found, using defaults: {self._settings_path}")
+            self._sync_display_control_states()
+            self._update_calculated_values()
+            self._update_file_estimates()
+            return
+
+        try:
+            payload = json.loads(self._settings_path.read_text(encoding="utf-8"))
+            params_data = payload.get("params", payload)
+            params = AllParams()
+            self._merge_dict_into_dataclass(params, params_data)
+            self._apply_params_to_ui(params)
+            self.params = self._collect_params()
+            log.info(f"Loaded local parameters from {self._settings_path}")
+        except Exception as e:
+            log.warning(f"Failed to load local parameters, using defaults: {e}")
+            self._sync_display_control_states()
+            self._update_calculated_values()
+            self._update_file_estimates()
+
     def _collect_params(self) -> AllParams:
         """Collect current parameter values from UI"""
         params = AllParams()
@@ -1217,6 +1406,8 @@ class MainWindow(QMainWindow):
         params.display.spectrum_enable = self.spectrum_enable_check.isChecked()
         # Note: PSD mode now automatically determined by data_type (removed psd_enable)
         params.display.rad_enable = self.rad_check.isChecked()
+        params.display.waveform_plot_enabled = self.waveform_enable_check.isChecked()
+        params.display.monitor_plot_enabled = self.monitor_enable_check.isChecked()
 
         # Time-Space parameters (get from widget if available)
         if self.time_space_widget is not None:
@@ -1453,6 +1644,9 @@ class MainWindow(QMainWindow):
             return
 
         self.params = params
+        self._save_local_params()
+        if self.time_space_widget is not None:
+            self.time_space_widget.set_scan_rate(params.basic.scan_rate)
         log.info(f"Parameters: scan_rate={params.basic.scan_rate}, points={params.basic.point_num_per_scan}, "
                  f"channels={params.upload.channel_num}, data_source={params.upload.data_source}, "
                  f"frames={params.display.frame_num}")
@@ -1786,6 +1980,7 @@ class MainWindow(QMainWindow):
             self.plot_tabs.currentIndex() == 1):  # 只有当Tab2活动时才更新
             # Use the processed data parameter (already includes rad conversion if enabled)
             display_data = data
+            self.time_space_widget.set_scan_rate(self.params.basic.scan_rate)
 
             # Reshape data to frames x points for time-space widget
             if len(display_data.shape) == 1:
@@ -1812,16 +2007,12 @@ class MainWindow(QMainWindow):
         waveform_enabled = self.waveform_enable_check.isChecked()
 
         if channel_num == 1:
-            # Show multiple frames with downsampling for display
+            # Show full-resolution frames; pyqtgraph handles view clipping/downsampling.
             for i in range(min(4, frame_num)):
                 start = i * point_num
                 end = start + point_num
                 if waveform_enabled and end <= len(data):
-                    # Time domain: 10x downsample for display performance
-                    # (raw data has ~20K+ points per frame, too many for realtime plot)
-                    raw_frame_data = data[start:end]
-                    downsampled_data = raw_frame_data[::10]
-                    self.plot_curve_1[i].setData(downsampled_data)
+                    self.plot_curve_1[i].setData(data[start:end])
                 elif waveform_enabled:
                     self.plot_curve_1[i].setData([])
 
@@ -1836,10 +2027,7 @@ class MainWindow(QMainWindow):
 
             for ch in range(min(channel_num, 4)):
                 if waveform_enabled and point_num <= len(data):
-                    # 10x downsample for multi-channel display performance
-                    raw_channel_data = data[:point_num, ch]
-                    downsampled_data = raw_channel_data[::10]
-                    self.plot_curve_1[ch].setData(downsampled_data)
+                    self.plot_curve_1[ch].setData(data[:point_num, ch])
 
             # Spectrum: full-resolution data (Raw data: automatically uses Power Spectrum)
             if self.params.display.spectrum_enable and point_num <= len(data):
@@ -1899,11 +2087,15 @@ class MainWindow(QMainWindow):
                 self.spectrum_curve.setData(freq_display, spectrum_filtered)
 
                 # Set X-axis range
-                if data_type == 'int':  # Phase data: explicit range [1, fs/2]
-                    nyquist_display = nyquist
-                    self.plot_widget_2.setXRange(1.0, nyquist_display, padding=0.02)
-                else:  # Raw data: auto range
-                    self.plot_widget_2.enableAutoRange(axis='x')
+                if not self._plot_zoom_locked.get("plot2", False):
+                    spectrum_view_box = self.plot_widget_2.getViewBox()
+                    spectrum_view_box.enableAutoRange(y=True)
+                    if data_type == 'int':  # Phase data: explicit range [1, fs/2]
+                        nyquist_display = nyquist
+                        spectrum_view_box.enableAutoRange(x=False)
+                        self.plot_widget_2.setXRange(1.0, nyquist_display, padding=0.02)
+                    else:  # Raw data: auto range
+                        spectrum_view_box.enableAutoRange(x=True)
 
                 # Set axis labels with explicit unit text (bypasses pyqtgraph auto-scaling)
                 if data_type == 'int':  # Phase data
@@ -2045,9 +2237,7 @@ class MainWindow(QMainWindow):
         data_source = self.data_source_combo.currentData()
         is_phase = (data_source == DataSource.PHASE)
 
-        # Enable/disable phase-specific controls
-        self.plot_widget_3.setEnabled(is_phase)
-        self.mode_space_radio.setEnabled(is_phase)
+        self._sync_display_control_states()
 
         # Update analysis type label
         if is_phase:
@@ -2095,6 +2285,8 @@ class MainWindow(QMainWindow):
             self._status_timer.stop()
         if hasattr(self, '_system_timer'):
             self._system_timer.stop()
+
+        self._save_local_params()
 
         # Stop acquisition
         if self.acq_thread is not None and self.acq_thread.isRunning():

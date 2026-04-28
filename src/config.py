@@ -222,6 +222,8 @@ class DisplayParams:
         frame_num: Number of frames to process/display
         spectrum_enable: Enable FFT spectrum analysis display
         rad_enable: Convert phase data to radians for display (storage unaffected)
+        waveform_plot_enabled: Enable plot 1 waveform updates
+        monitor_plot_enabled: Enable plot 3 monitor updates in PHASE mode
 
     Note: Analysis type (Power Spectrum vs PSD) is now automatically determined:
           - Raw data: Power Spectrum
@@ -234,6 +236,8 @@ class DisplayParams:
     frame_num: int = 1024                    # Frames to display/analyze
     spectrum_enable: bool = True             # Enable frequency domain analysis
     rad_enable: bool = True                  # Display-only radian conversion (default enabled)
+    waveform_plot_enabled: bool = False      # Plot 1 switch
+    monitor_plot_enabled: bool = False       # Plot 3 switch
 
 
 @dataclass

@@ -9,6 +9,7 @@ A comprehensive PyQt5-based GUI application for real-time Distributed Acoustic S
 ## Table of Contents
 
 - [Overview](#overview)
+- [Recent Updates](#recent-updates)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Installation](#installation)
@@ -34,6 +35,16 @@ This application provides a complete solution for DAS data acquisition, real-tim
 - **Performance Monitoring**: System resource monitoring and optimization tools
 - **Simulation Mode**: Hardware-independent testing and development environment
 
+## Recent Updates
+
+Recent GUI and plotting updates include:
+
+- Unified rectangle zoom interaction for all realtime plots with `View All` restore
+- Raw plot rendering optimized for large curves while preserving zoomed-in detail
+- Time-Space plot rebuilt on top of a fixed rolling display buffer
+- Automatic local parameter save/restore through `last_params.json`
+- Persistent display switches for waveform and monitor plots
+
 ## Features
 
 ### Data Acquisition
@@ -46,7 +57,7 @@ This application provides a complete solution for DAS data acquisition, real-tim
 - **Time-domain Plots**: Real-time waveform display with downsampling
 - **Spectrum Analysis**: FFT-based frequency domain visualization with PSD support
 - **Time-space Plots**: 2D visualization for spatial-temporal phase analysis
-- **Interactive Controls**: Zoom, pan, and measurement tools
+- **Interactive Controls**: Rectangle zoom, wheel zoom, horizontal pan, and `View All`
 - **Customizable Colormaps**: Multiple color schemes for enhanced data interpretation
 
 ### Data Processing
@@ -511,6 +522,7 @@ pcie7821_gui/
 │   ├── config.py                 # Configuration management
 │   ├── acquisition_thread.py     # Data acquisition logic
 │   ├── data_saver.py             # Data storage management
+│   ├── plot_interaction.py       # Shared zoom/pan interaction layer
 │   ├── spectrum_analyzer.py      # Signal processing
 │   ├── time_space_plot.py        # Visualization widgets
 │   ├── pcie7821_api.py          # Hardware interface
@@ -524,6 +536,7 @@ pcie7821_gui/
 ├── docs/                         # Documentation
 ├── run.py                        # Quick launcher
 ├── requirements.txt              # Python dependencies
+├── dev_log.md                    # Rolling development update log
 └── README.md                     # This file
 ```
 
@@ -542,7 +555,12 @@ pcie7821_gui/
 #### `time_space_plot.py`
 - **Purpose**: Advanced 2D visualization capabilities
 - **Key Classes**: `TimeSpacePlotWidget`
-- **Responsibilities**: Real-time 2D plotting, interactive controls, performance optimization
+- **Responsibilities**: Real-time 2D plotting, fixed rolling buffer, interactive controls
+
+#### `plot_interaction.py`
+- **Purpose**: Shared realtime plot interaction behaviors
+- **Key Classes**: `ZoomablePlotViewBox`
+- **Responsibilities**: Rectangle zoom, wheel zoom, horizontal pan, `View All`
 
 #### `spectrum_analyzer.py`
 - **Purpose**: Real-time signal processing and analysis
@@ -559,6 +577,14 @@ pcie7821_gui/
 - **Key Features**: Parameter validation, hardware constraints, option mappings
 
 ## Configuration
+
+### Local Parameter Cache
+
+The GUI now persists the latest local settings to `last_params.json`.
+
+- Source mode: saved in the project root
+- Frozen `.exe` mode: saved next to the executable
+- This file is intentionally ignored by git because it is machine-local runtime state
 
 ### Parameter Categories
 
