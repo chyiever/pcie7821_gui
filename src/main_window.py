@@ -57,6 +57,9 @@ from plot_interaction import ZoomablePlotViewBox
 # Module logger
 log = get_logger("gui")
 
+ACQ_STALL_TIMEOUT_S = 8.0
+ACQ_RECOVERY_COOLDOWN_S = 20.0
+
 
 # ----- MAIN APPLICATION WINDOW -----
 
@@ -100,6 +103,8 @@ class MainWindow(QMainWindow):
         self._raw_data_count = 0  # Counter for raw data callbacks
         self._last_raw_display_time = 0  # Last raw display update timestamp
         self._last_storage_queue_log_time = 0.0
+        self._recovery_in_progress = False
+        self._last_recovery_time = 0.0
 
         # System monitoring
         self._last_system_update = 0
@@ -1691,6 +1696,7 @@ class MainWindow(QMainWindow):
         self._gui_update_count = 0
         self._raw_data_count = 0
         self._last_data_time = time.time()
+        self._recovery_in_progress = False
         self._last_raw_display_time = 0  # Force immediate first update
 
         # Create and start acquisition thread
@@ -1735,8 +1741,9 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_btn.setText("Stopping...")
 
+        thread_stopped = True
         if self.acq_thread is not None:
-            log.debug("Stopping acquisition thread...")
+            log.debug("Requesting acquisition thread stop...")
             self.acq_thread.stop()
 
         if not self.simulation_mode and self.api is not None:
@@ -1747,6 +1754,11 @@ class MainWindow(QMainWindow):
                 log.warning(f"Error stopping device: {e}")
             except Exception as e:
                 log.warning(f"Unexpected error stopping device: {e}")
+
+        if self.acq_thread is not None:
+            thread_stopped = self.acq_thread.wait_until_stopped(5000)
+            if not thread_stopped:
+                log.error("Acquisition thread is still running after stop; skip force terminate to avoid driver corruption")
 
         if self.data_saver is not None:
             log.debug("Stopping data saver...")
@@ -1759,7 +1771,10 @@ class MainWindow(QMainWindow):
         self.tcp_tab3_manager.stop_session()
 
         self.save_status_label.setText("Save: Off")
-        log.info(f"Stopped. Total data callbacks: {self._data_count}, GUI updates: {self._gui_update_count}")
+        log.info(
+            f"Stopped (thread_stopped={thread_stopped}). "
+            f"Total data callbacks: {self._data_count}, GUI updates: {self._gui_update_count}"
+        )
 
         # Reset stop button text (color will be set by _on_acquisition_stopped)
         self.stop_btn.setText("STOP")
@@ -1792,6 +1807,7 @@ class MainWindow(QMainWindow):
     def _on_phase_data(self, data: np.ndarray, channel_num: int):
         """Handle phase data from acquisition thread"""
         self._data_count += 1
+        self._last_data_time = time.time()
         start_time = time.perf_counter()
 
         if self._data_count % 10 == 0:
@@ -1839,6 +1855,7 @@ class MainWindow(QMainWindow):
         """Handle raw data from acquisition thread"""
         self._data_count += 1
         self._raw_data_count += 1
+        self._last_data_time = time.time()
         start_time = time.perf_counter()
 
         if self._data_count % 10 == 0:
@@ -2140,6 +2157,7 @@ class MainWindow(QMainWindow):
 
                 # Update buffer status displays (with estimated values)
                 self._update_buffer_status()
+                self._check_acquisition_stall()
             else:
                 if hasattr(self, 'frames_label'):
                     self.frames_label.setText("Frames: 0")
@@ -2152,6 +2170,45 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             log.warning(f"Error in _update_status: {e}")
+
+    def _check_acquisition_stall(self):
+        """Detect no-data stall during acquisition and trigger one-shot recovery."""
+        if self._recovery_in_progress:
+            return
+        if self._last_data_time <= 0:
+            return
+
+        now = time.time()
+        if now - self._last_recovery_time < ACQ_RECOVERY_COOLDOWN_S:
+            return
+
+        silent_s = now - self._last_data_time
+        if silent_s < ACQ_STALL_TIMEOUT_S:
+            return
+
+        self._recovery_in_progress = True
+        self._last_recovery_time = now
+        log.error(
+            f"Acquisition stall detected: no data callbacks for {silent_s:.1f}s. "
+            "Triggering auto-recovery (stop/start)."
+        )
+
+        try:
+            self._on_stop()
+        except Exception as e:
+            log.error(f"Auto-recovery stop failed: {e}")
+
+        QTimer.singleShot(800, self._recover_start)
+
+    def _recover_start(self):
+        """Second stage of auto-recovery: restart acquisition."""
+        try:
+            self._on_start()
+            log.info("Auto-recovery restart issued")
+        except Exception as e:
+            log.error(f"Auto-recovery start failed: {e}")
+        finally:
+            self._recovery_in_progress = False
 
     def _log_storage_queue_status(self):
         """Periodically log storage queue occupancy for现场排查."""
@@ -2288,15 +2345,20 @@ class MainWindow(QMainWindow):
 
         self._save_local_params()
 
-        # Stop acquisition
+        # Stop acquisition (request thread stop -> stop hardware -> wait thread)
         if self.acq_thread is not None and self.acq_thread.isRunning():
-            log.debug("Stopping acquisition thread...")
+            log.debug("Requesting acquisition thread stop...")
             self.acq_thread.stop()
-            # Give it a reasonable amount of time to stop, then force close
-            if not self.acq_thread.wait(2000):
-                log.warning("Acquisition thread did not stop gracefully, terminating...")
-                self.acq_thread.terminate()
-                self.acq_thread.wait(1000)
+
+            if not self.simulation_mode and self.api is not None:
+                log.debug("Stopping device during close...")
+                try:
+                    self.api.stop()
+                except Exception as e:
+                    log.warning(f"Error stopping device during close: {e}")
+
+            if not self.acq_thread.wait_until_stopped(5000):
+                log.error("Acquisition thread still running during close; continue shutdown without force terminate")
 
         # Stop data saver
         if self.data_saver is not None:

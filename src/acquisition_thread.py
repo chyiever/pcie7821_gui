@@ -406,7 +406,7 @@ class AcquisitionThread(QThread):
             log.debug(f"Buffer usage: {buffer_usage_ratio:.1%}, polling interval: {self._current_polling_interval*1000:.1f}ms")
 
     def stop(self):
-        """Stop acquisition thread"""
+        """Request acquisition thread stop (non-blocking)."""
         log.info("Stop requested")
         self._running = False
 
@@ -416,19 +416,18 @@ class AcquisitionThread(QThread):
         self._pause_condition.wakeAll()
         self._mutex.unlock()
 
-        # Wait for thread to finish
-        if self.isRunning():
-            log.debug("Waiting for thread to finish...")
-            if not self.wait(3000):  # 3 second timeout
-                log.warning("Thread did not finish in 3 seconds! Terminating forcefully...")
-                self.terminate()
-                # Wait a bit more for cleanup
-                if not self.wait(1000):
-                    log.error("Thread termination failed!")
-                else:
-                    log.info("Thread terminated successfully")
-            else:
-                log.debug("Thread finished gracefully")
+    def wait_until_stopped(self, timeout_ms: int = 5000) -> bool:
+        """Wait for thread exit without force-termination."""
+        if not self.isRunning():
+            return True
+
+        log.debug(f"Waiting for thread to finish (timeout={timeout_ms}ms)...")
+        stopped = self.wait(timeout_ms)
+        if not stopped:
+            log.warning(f"Thread did not finish in {timeout_ms}ms")
+        else:
+            log.debug("Thread finished gracefully")
+        return stopped
 
     def pause(self):
         """Pause acquisition"""
