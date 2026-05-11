@@ -1,0 +1,104 @@
+2026-05-11 20km / 4kHz / 6000+位置点 采集参数建议
+
+一、前提假设
+1. 目标场景：单通道 PHASE，20 km 光纤。
+2. 当前常见配置：Points=51200，Merge=8，得到约 6400 个位置点。
+3. 实时保存开启，要求连续稳定运行优先。
+
+二、核心原则
+1. 先把 FrameLoad 压下来，避免单次 read_phase_data() 读 100MB 级大块。
+2. FramePlot 只负责显示和分析，不要再跟 FrameLoad 绑死。
+3. 稳定性优先时，宁可增加回调频率，也不要让单块数据过大。
+
+三、推荐参数
+
+推荐方案 A：首选稳定方案
+ScanRate = 4000
+Points = 51200
+DataSource = PHASE
+Channel = 1
+MergePointNum = 8
+FrameLoad = 512
+FramePlot = 128
+Save = ON
+FramesPerFile = 200
+Waveform = OFF 或只在需要时开启
+Spectrum = OFF（稳定性测试阶段建议先关）
+Time-Space = OFF（稳定性测试阶段建议先关）
+TCP Tab3 = OFF（稳定性测试阶段建议先关）
+
+说明：
+1. 单块数据约 6400 * 512 * 4 = 13.1 MB。
+2. 单块时间跨度约 512 / 4000 = 128 ms。
+3. 这个量级比 FrameLoad=4000 的 102.4 MB/块 小很多，更适合先验证驱动稳定性。
+
+推荐方案 B：更保守的排障方案
+ScanRate = 4000
+Points = 51200
+DataSource = PHASE
+Channel = 1
+MergePointNum = 8
+FrameLoad = 256
+FramePlot = 64 或 128
+Save = ON
+FramesPerFile = 200
+Waveform = OFF
+Spectrum = OFF
+Time-Space = OFF
+TCP Tab3 = OFF
+
+说明：
+1. 单块数据约 6.25 MB。
+2. 单块时间跨度约 64 ms。
+3. 如果方案 A 仍偶发卡死，优先降到这一档继续测。
+
+推荐方案 C：在稳定后再逐步提高吞吐
+第一步：FrameLoad = 512, FramePlot = 128
+第二步：FrameLoad = 768, FramePlot = 128 或 256
+第三步：FrameLoad = 1024, FramePlot = 256
+
+不建议直接回到：
+FrameLoad = 4000
+
+原因：
+1. 单块数据约 102.4 MB。
+2. 单块时间跨度 1.0 s。
+3. 现有日志已经表明这一档位最容易触发 query/read 变慢和最终卡死。
+
+四、显示与分析建议
+1. 稳定性排障阶段：
+   Waveform = OFF
+   Spectrum = OFF
+   Time-Space = OFF
+   TCP = OFF
+   只开实时保存
+
+2. 确认保存稳定后：
+   先开 Waveform
+   再开 Spectrum
+   最后开 Time-Space / TCP
+
+3. 如果必须保留显示：
+   FramePlot 建议不超过 128 或 256
+
+五、文件分片建议
+FramesPerFile = 200 较合适
+
+理由：
+1. 方案 A 下，每块约 13.1 MB，200 块约 2.56 GB/文件。
+2. 文件不会切得过碎，也不会大到难以管理。
+3. 若希望更小文件，可改为 100；若希望减少切文件次数，可改为 300。
+
+六、测试顺序建议
+1. 先测：FrameLoad=256, FramePlot=64, 只保存，不开显示增强功能。
+2. 稳定后测：FrameLoad=512, FramePlot=128。
+3. 再测：逐步开启 Waveform、Spectrum、Time-Space、TCP。
+4. 每次只改一个变量，配合 debug.log 对比。
+
+七、下一轮日志命令
+python run.py --debug --log debug.log
+
+建议：
+1. 每组参数单独保留一份日志。
+2. 记录当次是否开启保存、波形、频谱、Time-Space、TCP。
+3. 一旦界面卡住，不要立刻强退，先等待 10~20 秒再尝试 STOP，方便保留完整尾日志。

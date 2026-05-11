@@ -62,6 +62,10 @@ class DataSaver:
         self._bytes_written = 0
         self._blocks_written = 0
         self._dropped_blocks = 0
+        self._enqueue_count = 0
+        self._max_queue_size_seen = 0
+        self._last_write_ms = 0.0
+        self._last_write_bytes = 0
 
     def start(self, file_no: Optional[int] = None, scan_rate: int = 2000) -> str:
         """
@@ -97,12 +101,16 @@ class DataSaver:
         filepath = self.save_path / self._current_filename
         self._file_handle = open(filepath, 'wb')
 
-        log.info(f"Started saving to {filepath}")
+        log.info(f"Started saving to {filepath} (queue_capacity={self.buffer_size})")
 
         # Reset statistics
         self._bytes_written = 0
         self._blocks_written = 0
         self._dropped_blocks = 0
+        self._enqueue_count = 0
+        self._max_queue_size_seen = 0
+        self._last_write_ms = 0.0
+        self._last_write_bytes = 0
 
         # Clear queue
         while not self._data_queue.empty():
@@ -143,7 +151,9 @@ class DataSaver:
             self._file_handle = None
 
         log.info(f"Stopped saving. Bytes written: {self._bytes_written}, "
-                 f"Blocks: {self._blocks_written}, Dropped: {self._dropped_blocks}")
+                 f"Blocks: {self._blocks_written}, Dropped: {self._dropped_blocks}, "
+                 f"Max queue: {self._max_queue_size_seen}/{self.buffer_size}, "
+                 f"Last write: {self._last_write_ms:.1f}ms/{self._last_write_bytes}B")
 
     def save(self, data: np.ndarray) -> bool:
         """
@@ -162,9 +172,27 @@ class DataSaver:
             # Keep queueing non-blocking; serialization is deferred to the save thread
             # so the GUI thread only enqueues a reference to the latest numpy block.
             self._data_queue.put_nowait(data)
+            self._enqueue_count += 1
+            queue_size = self._data_queue.qsize()
+            self._max_queue_size_seen = max(self._max_queue_size_seen, queue_size)
+            if (
+                self._enqueue_count <= 3
+                or self._enqueue_count % 20 == 0
+                or queue_size >= max(1, self.buffer_size // 2)
+            ):
+                block_bytes = int(data.nbytes) if isinstance(data, np.ndarray) else len(data)
+                log.debug(
+                    f"Queued save block #{self._enqueue_count}: bytes={block_bytes}, "
+                    f"queue={queue_size}/{self.buffer_size}"
+                )
             return True
         except queue.Full:
             self._dropped_blocks += 1
+            block_bytes = int(data.nbytes) if isinstance(data, np.ndarray) else len(data)
+            log.warning(
+                f"Save queue full, dropping block: bytes={block_bytes}, "
+                f"dropped={self._dropped_blocks}, queue={self._data_queue.qsize()}/{self.buffer_size}"
+            )
             return False
 
     def _save_loop(self):
@@ -195,6 +223,7 @@ class DataSaver:
     def _write_data(self, data):
         """Serialize one queued block and write it to disk."""
         if self._file_handle is not None:
+            start = time.perf_counter()
             if isinstance(data, np.ndarray):
                 if data.dtype != np.int32:
                     data = data.astype(np.int32)
@@ -203,8 +232,30 @@ class DataSaver:
                 payload = data
 
             self._file_handle.write(payload)
+            self._last_write_ms = (time.perf_counter() - start) * 1000
+            self._last_write_bytes = len(payload)
             self._bytes_written += len(payload)
             self._blocks_written += 1
+            if self._last_write_ms > 50:
+                log.warning(
+                    f"Slow disk write: {self._last_write_ms:.1f}ms, bytes={len(payload)}, "
+                    f"queue={self._data_queue.qsize()}/{self.buffer_size}"
+                )
+
+    def get_diagnostics_snapshot(self) -> dict:
+        """Return save-thread diagnostics for periodic logging."""
+        return {
+            "queue_size": self.queue_size,
+            "buffer_size": self.buffer_size,
+            "dropped_blocks": self._dropped_blocks,
+            "blocks_written": self._blocks_written,
+            "bytes_written": self._bytes_written,
+            "enqueue_count": self._enqueue_count,
+            "max_queue_size_seen": self._max_queue_size_seen,
+            "last_write_ms": self._last_write_ms,
+            "last_write_bytes": self._last_write_bytes,
+            "is_running": self._running,
+        }
 
     @property
     def is_running(self) -> bool:

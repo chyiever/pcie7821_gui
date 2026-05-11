@@ -130,3 +130,70 @@
 
 - 已通过：`python -m py_compile src\acquisition_thread.py src\main_window.py`
 - 待继续观察：长时（>10分钟）大数据量采集下自动恢复成功率与稳定性。
+
+## 2026-05-11
+
+### 更新日志
+
+- 基于最新测试日志 `logs/log-20260506-1.txt`，补充大数据量采集死机原因分析，并在关键数据流节点增加详细日志埋点。
+- 新增原因分析文档：`docs/2026-5-11-大数据量采集软件死机原因分析.md`
+- 新增 20 km / 4 kHz 场景采集参数建议：`docs/2026-5-11-20km采集参数建议.txt`
+
+### 问题分析结论
+
+- 当前主要风险点仍在底层采集链路，而不是存储队列。
+- `FrameLoad=4000` 时单次 `PHASE` 读数块约 `102.4 MB`，明显过大，极易放大 DLL / 驱动阻塞风险。
+- `STOP` 卡在 `pcie7821.api : Stopping acquisition...`，高度怀疑采集线程已先卡在 DLL 调用内，主线程再调用 `api.stop()` 时被同一把锁或同一底层状态拖住。
+
+### 本次代码修改
+
+- `src/acquisition_thread.py`
+  - 增加采集线程内部阶段追踪：等待缓冲区、查询点数、读数、读 monitor、发信号、停止请求等。
+  - 增加诊断快照接口，记录最近一次缓冲区点数、查询耗时、读数耗时、块大小、阶段停留时长。
+  - 增加单块大小、单块时长、发信号次数、GUI 节流跳过次数等日志。
+
+- `src/main_window.py`
+  - 启动时记录 `FrameLoad / FramePlot / block_bytes / block_duration`。
+  - 在 `_on_phase_data` 中拆分记录 TCP 入队、保存入队、rad 转换、显示更新耗时。
+  - 在 `_on_raw_data` 中增加保存与显示拆分耗时日志。
+  - 增加周期性 `Acq snapshot` 汇总日志，并在检测到 stall 或手动 STOP 前强制输出一次。
+
+- `src/data_saver.py`
+  - 增加保存队列入队日志、历史最大队列长度、最后一次写盘耗时和写盘字节数。
+  - 当队列满或写盘过慢时输出告警。
+
+- `src/tcp_tab3/tcp_sender_worker.py`
+  - 增加 TCP 队列丢包、慢打包、慢发送日志。
+
+### 涉及文件
+
+- `src/acquisition_thread.py`
+- `src/main_window.py`
+- `src/data_saver.py`
+- `src/tcp_tab3/tcp_sender_worker.py`
+- `src/config.py`
+- `src/tcp_tab3/tcp_tab3_manager.py`
+- `docs/2026-5-5-大数据量采集死机问题分析与解决.md`
+- `docs/2026-5-11-大数据量采集软件死机原因分析.md`
+- `docs/2026-5-11-20km采集参数建议.txt`
+- `dev_log.md`
+
+### 验证
+
+- 在 `LZdataread39` 环境下完成源码语法编译检查：
+  - 通过内置 `compile(...)` 对 `run.py`、`src/main.py`、`src/logger.py`、`src/acquisition_thread.py`、`src/data_saver.py`、`src/main_window.py`、`src/tcp_tab3/tcp_sender_worker.py` 进行检查。
+- 已验证命令参数解析正常：
+  - `python run.py --help`
+- 已验证调试日志参数链路可用：
+  - `python run.py --simulate --debug --log debug.log`
+  - 已成功创建 `debug.log`
+
+### 现场测试建议
+
+- 首轮稳定性测试建议使用：
+  - `ScanRate=4000`
+  - `Points=51200`
+  - `MergePointNum=8`
+  - `FrameLoad=512`
+  - `FramePlot=128`
+- 若仍异常，优先继续降低 `FrameLoad`，而不是先扩大显示或通信负载。

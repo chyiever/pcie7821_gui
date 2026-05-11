@@ -116,7 +116,7 @@ class TCPTab3Manager(QObject):
 
         context = AcquisitionContext(
             scan_rate_hz=int(params.basic.scan_rate),
-            frame_num=int(params.display.frame_num),
+            frame_num=int(params.display.frame_load_num),
             point_num_after_merge=calculate_cropped_point_count(
                 calculate_phase_point_num(
                     params.basic.point_num_per_scan,

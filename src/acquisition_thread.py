@@ -86,6 +86,20 @@ class AcquisitionThread(QThread):
         self._bytes_acquired = 0
         self._loop_count = 0
         self._last_log_time = 0
+        self._phase_emit_count = 0
+        self._raw_emit_count = 0
+        self._monitor_emit_count = 0
+        self._gui_skip_count = 0
+        self._last_buffer_points = 0
+        self._last_expected_points = 0
+        self._last_wait_iterations = 0
+        self._last_query_ms = 0.0
+        self._last_read_ms = 0.0
+        self._last_monitor_read_ms = 0.0
+        self._last_block_bytes = 0
+        self._current_stage = "idle"
+        self._current_stage_detail = ""
+        self._current_stage_started_at = time.perf_counter()
 
         # GUI throttling: store latest data, only emit when MIN_GUI_UPDATE_INTERVAL_MS
         # has elapsed. Older pending data is discarded (keeps only latest snapshot).
@@ -114,15 +128,59 @@ class AcquisitionThread(QThread):
         self._params = params
         self._total_point_num = params.basic.point_num_per_scan
         self._point_num_after_merge = self._total_point_num // params.phase_demod.merge_point_num
-        self._frame_num = params.display.frame_num
+        self._frame_num = params.display.frame_load_num
         self._channel_num = params.upload.channel_num
         self._data_source = params.upload.data_source
+
+        if self._data_source == DataSource.PHASE:
+            points_per_frame = self._point_num_after_merge
+            bytes_per_point = 4
+        else:
+            points_per_frame = self._total_point_num
+            bytes_per_point = 2
+
+        block_points_total = points_per_frame * self._frame_num * self._channel_num
+        block_bytes_total = block_points_total * bytes_per_point
+        block_duration_ms = self._frame_num / max(params.basic.scan_rate, 1) * 1000.0
 
         log.info(f"Configured: total_points={self._total_point_num}, "
                  f"points_after_merge={self._point_num_after_merge}, "
                  f"frames={self._frame_num}, channels={self._channel_num}, "
                  f"data_source={self._data_source}, "
-                 f"crop=[{params.phase_demod.crop_distance_start}, {params.phase_demod.crop_distance_end})")
+                 f"crop=[{params.phase_demod.crop_distance_start}, {params.phase_demod.crop_distance_end}), "
+                 f"block_points={block_points_total}, block_bytes={block_bytes_total / 1024 / 1024:.2f}MB, "
+                 f"block_duration={block_duration_ms:.1f}ms")
+
+    def _set_stage(self, stage: str, detail: str = ""):
+        """Track the current internal stage for external diagnostics."""
+        self._current_stage = stage
+        self._current_stage_detail = detail
+        self._current_stage_started_at = time.perf_counter()
+
+    def get_diagnostics_snapshot(self) -> dict:
+        """Return a lightweight diagnostic snapshot for stall analysis."""
+        return {
+            "loop_count": self._loop_count,
+            "frames_acquired": self._frames_acquired,
+            "bytes_acquired": self._bytes_acquired,
+            "phase_emit_count": self._phase_emit_count,
+            "raw_emit_count": self._raw_emit_count,
+            "monitor_emit_count": self._monitor_emit_count,
+            "gui_skip_count": self._gui_skip_count,
+            "current_stage": self._current_stage,
+            "current_stage_detail": self._current_stage_detail,
+            "stage_elapsed_ms": (time.perf_counter() - self._current_stage_started_at) * 1000.0,
+            "last_buffer_points": self._last_buffer_points,
+            "last_expected_points": self._last_expected_points,
+            "last_wait_iterations": self._last_wait_iterations,
+            "last_query_ms": self._last_query_ms,
+            "last_read_ms": self._last_read_ms,
+            "last_monitor_read_ms": self._last_monitor_read_ms,
+            "last_block_bytes": self._last_block_bytes,
+            "polling_interval_ms": self._current_polling_interval * 1000.0,
+            "is_running": self.is_running,
+            "is_paused": self.is_paused,
+        }
 
     def _apply_phase_spatial_crop(self, phase_data: np.ndarray) -> np.ndarray:
         """Crop single-channel PHASE data before it leaves the acquisition thread."""
@@ -172,6 +230,18 @@ class AcquisitionThread(QThread):
         self._bytes_acquired = 0
         self._loop_count = 0
         self._last_log_time = time.time()
+        self._phase_emit_count = 0
+        self._raw_emit_count = 0
+        self._monitor_emit_count = 0
+        self._gui_skip_count = 0
+        self._last_buffer_points = 0
+        self._last_expected_points = 0
+        self._last_wait_iterations = 0
+        self._last_query_ms = 0.0
+        self._last_read_ms = 0.0
+        self._last_monitor_read_ms = 0.0
+        self._last_block_bytes = 0
+        self._set_stage("started")
 
         self.acquisition_started.emit()
         log.debug("acquisition_started signal emitted")
@@ -184,8 +254,17 @@ class AcquisitionThread(QThread):
                 # Periodic status log (every 5 seconds)
                 now = time.time()
                 if now - self._last_log_time > 5.0:
-                    log.info(f"Status: loops={self._loop_count}, frames={self._frames_acquired}, "
-                             f"bytes={self._bytes_acquired/1024/1024:.1f}MB")
+                    snapshot = self.get_diagnostics_snapshot()
+                    log.info(
+                        "Status: "
+                        f"loops={snapshot['loop_count']}, frames={snapshot['frames_acquired']}, "
+                        f"bytes={snapshot['bytes_acquired']/1024/1024:.1f}MB, "
+                        f"stage={snapshot['current_stage']}, stage_ms={snapshot['stage_elapsed_ms']:.1f}, "
+                        f"buffer={snapshot['last_buffer_points']}/{snapshot['last_expected_points']}, "
+                        f"query_ms={snapshot['last_query_ms']:.1f}, read_ms={snapshot['last_read_ms']:.1f}, "
+                        f"emit_phase={snapshot['phase_emit_count']}, emit_raw={snapshot['raw_emit_count']}, "
+                        f"gui_skips={snapshot['gui_skip_count']}"
+                    )
                     self._last_log_time = now
 
                 # Check for pause
@@ -204,17 +283,26 @@ class AcquisitionThread(QThread):
                     expected_points = self._point_num_after_merge * self._frame_num
                 else:
                     expected_points = self._total_point_num * self._frame_num
+                self._last_expected_points = expected_points
 
                 log.debug(f"Loop {self._loop_count}: waiting for {expected_points} points")
 
                 # Wait for enough data in buffer with dynamic polling
                 wait_start = time.perf_counter()
                 wait_count = 0
+                self._set_stage("wait_buffer", f"expected_points={expected_points}")
                 while self._running:
+                    self._set_stage(
+                        "query_buffer_points",
+                        f"wait_count={wait_count}, expected_points={expected_points}"
+                    )
                     query_start = time.perf_counter()
                     try:
                         points_in_buffer = self.api.query_buffer_points()
                         query_time = (time.perf_counter() - query_start) * 1000
+                        self._last_buffer_points = points_in_buffer
+                        self._last_query_ms = query_time
+                        self._last_wait_iterations = wait_count
 
                         if query_time > 50:
                             log.warning(f"Slow query_buffer_points: {query_time:.1f}ms")
@@ -226,11 +314,19 @@ class AcquisitionThread(QThread):
 
                         if points_in_buffer >= expected_points:
                             wait_time = (time.perf_counter() - wait_start) * 1000
+                            self._set_stage(
+                                "buffer_ready",
+                                f"points={points_in_buffer}, wait_ms={wait_time:.1f}, waits={wait_count}"
+                            )
                             log.debug(f"Buffer ready: {points_in_buffer} points, waited {wait_time:.1f}ms ({wait_count} iterations)")
                             break
 
                         # Dynamic polling interval adjustment
                         self._adjust_polling_interval(points_in_buffer, expected_points)
+                        self._set_stage(
+                            "wait_buffer_sleep",
+                            f"points={points_in_buffer}, sleep_ms={self._current_polling_interval * 1000.0:.1f}"
+                        )
                         time.sleep(self._current_polling_interval)
                         wait_count += 1
 
@@ -255,18 +351,24 @@ class AcquisitionThread(QThread):
                 try:
                     read_start = time.perf_counter()
                     if self._data_source == DataSource.PHASE:
+                        self._set_stage("read_phase_data", f"expected_points={expected_points}")
                         self._read_phase_data()
                     else:
+                        self._set_stage("read_raw_data", f"expected_points={expected_points}")
                         self._read_raw_data()
                     read_time = (time.perf_counter() - read_start) * 1000
+                    self._last_read_ms = read_time
+                    self._set_stage("read_complete", f"read_ms={read_time:.1f}")
                     log.debug(f"Data read completed in {read_time:.1f}ms")
 
                 except PCIe7821Error as e:
+                    self._set_stage("read_error", str(e))
                     log.error(f"Read error: {e}")
                     self.error_occurred.emit(str(e))
                     time.sleep(0.1)
                     continue
                 except Exception as e:
+                    self._set_stage("read_exception", str(e))
                     log.error(f"Unexpected read error: {e}")
                     # Check if we should stop
                     if not self._running:
@@ -287,6 +389,7 @@ class AcquisitionThread(QThread):
             self.error_occurred.emit(f"Acquisition error: {e}")
 
         finally:
+            self._set_stage("stopped")
             log.info(f"=== Acquisition thread stopped === (loops={self._loop_count}, frames={self._frames_acquired})")
             self.acquisition_stopped.emit()
 
@@ -296,12 +399,20 @@ class AcquisitionThread(QThread):
         log.debug(f"Reading raw data: {points_per_ch} points/ch, {self._channel_num} channels")
 
         try:
+            log.debug(
+                f"Calling api.read_data: points_per_ch={points_per_ch}, channels={self._channel_num}, "
+                f"estimated_block={points_per_ch * self._channel_num * 2 / 1024 / 1024:.2f}MB"
+            )
             data, points_returned = self.api.read_data(points_per_ch, self._channel_num)
         except Exception as e:
             log.error(f"Failed to read raw data: {e}")
             raise
 
+        if points_returned != points_per_ch:
+            log.warning(f"Raw read returned unexpected point count: requested={points_per_ch}, returned={points_returned}")
+
         self._bytes_acquired += len(data) * 2  # short = 2 bytes
+        self._last_block_bytes = int(np.asarray(data).nbytes)
 
         # Reshape data by channels
         if self._channel_num > 1:
@@ -318,14 +429,22 @@ class AcquisitionThread(QThread):
         log.debug(f"Reading phase data: {points_per_ch} points/ch, {self._channel_num} channels")
 
         try:
+            log.debug(
+                f"Calling api.read_phase_data: points_per_ch={points_per_ch}, channels={self._channel_num}, "
+                f"estimated_block={points_per_ch * self._channel_num * 4 / 1024 / 1024:.2f}MB"
+            )
             phase_data, points_returned = self.api.read_phase_data(points_per_ch, self._channel_num)
         except Exception as e:
             log.error(f"Failed to read phase data: {e}")
             raise
 
+        if points_returned != points_per_ch:
+            log.warning(f"Phase read returned unexpected point count: requested={points_per_ch}, returned={points_returned}")
+
         self._bytes_acquired += len(phase_data) * 4  # int = 4 bytes
 
         phase_data = self._apply_phase_spatial_crop(phase_data)
+        self._last_block_bytes = int(np.asarray(phase_data).nbytes)
 
         # Reshape data by channels
         if self._channel_num > 1:
@@ -336,9 +455,11 @@ class AcquisitionThread(QThread):
 
         # Also read monitor data when in phase mode
         try:
+            monitor_start = time.perf_counter()
             monitor_data = self.api.read_monitor_data(
                 self._point_num_after_merge, self._channel_num
             )
+            self._last_monitor_read_ms = (time.perf_counter() - monitor_start) * 1000
             monitor_data = self._apply_monitor_spatial_crop(monitor_data)
             self._pending_monitor_data = (monitor_data, self._channel_num)
         except PCIe7821Error as e:
@@ -356,6 +477,7 @@ class AcquisitionThread(QThread):
 
         if elapsed < MIN_GUI_UPDATE_INTERVAL_MS:
             # Not enough time passed, skip this update (keep latest data pending)
+            self._gui_skip_count += 1
             return
 
         # Emit all pending signals
@@ -363,27 +485,43 @@ class AcquisitionThread(QThread):
 
         if self._pending_phase_data is not None:
             phase_data, channel_num = self._pending_phase_data
-            log.debug(f"Emitting phase_data_ready signal: shape={phase_data.shape}")
+            self._phase_emit_count += 1
+            self._set_stage("emit_phase_signal", f"emit_seq={self._phase_emit_count}")
+            log.debug(
+                f"Emitting phase_data_ready signal: seq={self._phase_emit_count}, "
+                f"shape={phase_data.shape}, bytes={np.asarray(phase_data).nbytes / 1024 / 1024:.2f}MB"
+            )
             self.phase_data_ready.emit(phase_data, channel_num)
             self._pending_phase_data = None
             signals_emitted += 1
 
         if self._pending_raw_data is not None:
             data, data_source, channel_num = self._pending_raw_data
-            log.debug(f"Emitting data_ready signal: shape={data.shape}, dtype={data.dtype}")
+            self._raw_emit_count += 1
+            self._set_stage("emit_raw_signal", f"emit_seq={self._raw_emit_count}")
+            log.debug(
+                f"Emitting data_ready signal: seq={self._raw_emit_count}, shape={data.shape}, "
+                f"dtype={data.dtype}, bytes={np.asarray(data).nbytes / 1024 / 1024:.2f}MB"
+            )
             self.data_ready.emit(data, data_source, channel_num)
             self._pending_raw_data = None
             signals_emitted += 1
 
         if self._pending_monitor_data is not None:
             monitor_data, channel_num = self._pending_monitor_data
-            log.debug(f"Emitting monitor_data_ready signal: shape={monitor_data.shape}")
+            self._monitor_emit_count += 1
+            self._set_stage("emit_monitor_signal", f"emit_seq={self._monitor_emit_count}")
+            log.debug(
+                f"Emitting monitor_data_ready signal: seq={self._monitor_emit_count}, "
+                f"shape={monitor_data.shape}, bytes={np.asarray(monitor_data).nbytes / 1024:.1f}KB"
+            )
             self.monitor_data_ready.emit(monitor_data, channel_num)
             self._pending_monitor_data = None
             signals_emitted += 1
 
         if signals_emitted > 0:
             self._last_gui_update_time = current_time
+            self._set_stage("emit_complete", f"signals={signals_emitted}, elapsed_ms={elapsed:.1f}")
             log.debug(f"GUI update: emitted {signals_emitted} signals, elapsed={elapsed:.1f}ms")
 
     def _adjust_polling_interval(self, points_in_buffer: int, expected_points: int):
@@ -407,8 +545,15 @@ class AcquisitionThread(QThread):
 
     def stop(self):
         """Request acquisition thread stop (non-blocking)."""
-        log.info("Stop requested")
+        snapshot = self.get_diagnostics_snapshot()
+        log.info(
+            "Stop requested: "
+            f"stage={snapshot['current_stage']}, stage_ms={snapshot['stage_elapsed_ms']:.1f}, "
+            f"buffer={snapshot['last_buffer_points']}/{snapshot['last_expected_points']}, "
+            f"query_ms={snapshot['last_query_ms']:.1f}, read_ms={snapshot['last_read_ms']:.1f}"
+        )
         self._running = False
+        self._set_stage("stop_requested")
 
         # Wake up if paused
         self._mutex.lock()
@@ -424,7 +569,13 @@ class AcquisitionThread(QThread):
         log.debug(f"Waiting for thread to finish (timeout={timeout_ms}ms)...")
         stopped = self.wait(timeout_ms)
         if not stopped:
-            log.warning(f"Thread did not finish in {timeout_ms}ms")
+            snapshot = self.get_diagnostics_snapshot()
+            log.warning(
+                f"Thread did not finish in {timeout_ms}ms: stage={snapshot['current_stage']}, "
+                f"stage_ms={snapshot['stage_elapsed_ms']:.1f}, buffer={snapshot['last_buffer_points']}/"
+                f"{snapshot['last_expected_points']}, query_ms={snapshot['last_query_ms']:.1f}, "
+                f"read_ms={snapshot['last_read_ms']:.1f}"
+            )
         else:
             log.debug("Thread finished gracefully")
         return stopped

@@ -1,4 +1,4 @@
-"""
+﻿"""
 PCIe-7821 Main Window GUI
 
 PyQt5-based GUI with real-time waveform display and parameter control.
@@ -103,6 +103,7 @@ class MainWindow(QMainWindow):
         self._raw_data_count = 0  # Counter for raw data callbacks
         self._last_raw_display_time = 0  # Last raw display update timestamp
         self._last_storage_queue_log_time = 0.0
+        self._last_acq_snapshot_log_time = 0.0
         self._recovery_in_progress = False
         self._last_recovery_time = 0.0
 
@@ -233,7 +234,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(logo_label)
 
         # Title - SimHei bold 28pt (Chinese UI text)
-        title_label = QLabel("分布式光纤传感系统（eDAS）")
+        title_label = QLabel("Distributed Optical Fiber Sensing (eDAS)")
         title_font = QFont("SimHei", 28, QFont.Bold)
         title_label.setFont(title_font)
         title_label.setAlignment(Qt.AlignCenter)
@@ -438,14 +439,14 @@ class MainWindow(QMainWindow):
         phase_layout.addWidget(QLabel("Detrend(Hz):"), 2, 0)
         self.detrend_bw_spin = QDoubleSpinBox()
         self.detrend_bw_spin.setRange(0.0, 1000000.0)
-        self.detrend_bw_spin.setValue(10.0)  # 默认值改为10Hz
+        self.detrend_bw_spin.setValue(10.0)  # 榛樿鍊兼敼涓?0Hz
         self.detrend_bw_spin.setSingleStep(0.1)
         self.detrend_bw_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.detrend_bw_spin.setMaximumWidth(INPUT_MAX_WIDTH)
         phase_layout.addWidget(self.detrend_bw_spin, 2, 1)
 
         self.polar_div_check = QCheckBox("PolarDiv")
-        self.polar_div_check.setChecked(True)  # 默认勾选偏振分集功能
+        self.polar_div_check.setChecked(True)  # 榛樿鍕鹃€夊亸鎸垎闆嗗姛鑳?
         phase_layout.addWidget(self.polar_div_check, 2, 2, 1, 2)
 
         phase_layout.addWidget(QLabel("CropStart:"), 3, 0)
@@ -478,7 +479,7 @@ class MainWindow(QMainWindow):
         display_layout.addWidget(QLabel("Mode:"), 0, 0)
         self.mode_time_radio = QRadioButton("Time")
         self.mode_space_radio = QRadioButton("Space")
-        # Time-space选项移动到Tab2，这里只保留Time和Space
+        # Time-space閫夐」绉诲姩鍒癟ab2锛岃繖閲屽彧淇濈暀Time鍜孲pace
         self.mode_time_radio.setChecked(True)
         mode_group = QButtonGroup(self)
         mode_group.addButton(self.mode_time_radio, 0)
@@ -494,27 +495,25 @@ class MainWindow(QMainWindow):
         self.region_index_spin.setRange(0, 10000000)
         self.region_index_spin.setValue(0)
         self.region_index_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.region_index_spin.setMaximumWidth(60)  # 缩小Region输入框宽度
+        self.region_index_spin.setMaximumWidth(60)  # 缂╁皬Region杈撳叆妗嗗搴?
         display_layout.addWidget(self.region_index_spin, 0, 3)
 
-        # Row 1: Frames | Spectrum/PSD
-        display_layout.addWidget(QLabel("Frames:"), 1, 0)
-        self.frame_num_spin = QSpinBox()
-        self.frame_num_spin.setRange(1, 1000000)
-        self.frame_num_spin.setValue(1024)
-        self.frame_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.frame_num_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        display_layout.addWidget(self.frame_num_spin, 1, 1)
+        # Row 1: FrameLoad | FramePlot
+        display_layout.addWidget(QLabel("FrameLoad:"), 1, 0)
+        self.frame_load_num_spin = QSpinBox()
+        self.frame_load_num_spin.setRange(0, 1000000)
+        self.frame_load_num_spin.setValue(1024)
+        self.frame_load_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.frame_load_num_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        display_layout.addWidget(self.frame_load_num_spin, 1, 1)
 
-        self.spectrum_enable_check = QCheckBox("Spectrum")
-        self.spectrum_enable_check.setChecked(True)
-        display_layout.addWidget(self.spectrum_enable_check, 1, 2)
-
-        # Analysis type info label (shows Power/PSD based on data type)
-        self.analysis_type_label = QLabel("Power")
-        self.analysis_type_label.setStyleSheet("QLabel { color: blue; font-weight: bold; }")
-        self.analysis_type_label.setToolTip("Analysis type: Raw data → Power Spectrum, Phase data → PSD")
-        display_layout.addWidget(self.analysis_type_label, 1, 3)
+        display_layout.addWidget(QLabel("FramePlot:"), 1, 2)
+        self.frame_plot_num_spin = QSpinBox()
+        self.frame_plot_num_spin.setRange(0, 1000000)
+        self.frame_plot_num_spin.setValue(1024)
+        self.frame_plot_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.frame_plot_num_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        display_layout.addWidget(self.frame_plot_num_spin, 1, 3)
 
         # Row 2: waveform / monitor display switches
         self.waveform_enable_check = QCheckBox("Waveform")
@@ -527,11 +526,21 @@ class MainWindow(QMainWindow):
         self.monitor_enable_check.setChecked(False)
         display_layout.addWidget(self.monitor_enable_check, 2, 2, 1, 2)
 
-        # Row 3: rad checkbox
+        # Row 3: spectrum / analysis / rad
+        self.spectrum_enable_check = QCheckBox("Spectrum")
+        self.spectrum_enable_check.setChecked(True)
+        display_layout.addWidget(self.spectrum_enable_check, 3, 0)
+
+        # Analysis type info label (shows Power/PSD based on data type)
+        self.analysis_type_label = QLabel("Power")
+        self.analysis_type_label.setStyleSheet("QLabel { color: blue; font-weight: bold; }")
+        self.analysis_type_label.setToolTip("Analysis type: Raw data -> Power Spectrum, Phase data -> PSD")
+        display_layout.addWidget(self.analysis_type_label, 3, 1)
+
         self.rad_check = QCheckBox("rad")
-        self.rad_check.setToolTip("Convert phase data to radians for display only: display = data / 32767 * π\n(Storage always saves original int32 data)")
+        self.rad_check.setToolTip("Convert phase data to radians for display only: display = data / 32767 * pi\n(Storage always saves original int32 data)")
         self.rad_check.setChecked(True)  # Default checked
-        display_layout.addWidget(self.rad_check, 3, 0, 1, 2)
+        display_layout.addWidget(self.rad_check, 3, 2, 1, 2)
 
         layout.addWidget(display_group)
 
@@ -832,8 +841,8 @@ class MainWindow(QMainWindow):
             pw.showGrid(x=True, y=True, alpha=0.6)
 
             # Set fonts for axes - increase tick font size by 2 units
-            axis_font = QFont("Times New Roman", 8)      # 轴标签保持8pt
-            tick_font = QFont("Times New Roman", 8)      # 刻度值调大到9pt (从7pt+2)
+            axis_font = QFont("Times New Roman", 8)      # 杞存爣绛句繚鎸?pt
+            tick_font = QFont("Times New Roman", 8)      # 鍒诲害鍊艰皟澶у埌9pt (浠?pt+2)
 
             # Configure tick style with reduced spacing
             x_axis.setStyle(showValues=True, tickLength=4, tickTextOffset=6)  # Reduced offset
@@ -1114,18 +1123,20 @@ class MainWindow(QMainWindow):
         self.merge_points_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
         self.crop_distance_start_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
         self.crop_distance_end_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
-        self.frame_num_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
+        self.frame_load_num_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
+        self.frame_load_num_spin.valueChanged.connect(self._update_file_estimates)
+        self.frame_plot_num_spin.valueChanged.connect(self._update_file_estimates)
 
-        # 连接模式切换信号
+        # 杩炴帴妯″紡鍒囨崲淇″彿
         self.mode_time_radio.toggled.connect(self._on_mode_changed)
         self.mode_space_radio.toggled.connect(self._on_mode_changed)
         self.waveform_enable_check.toggled.connect(self._on_waveform_display_toggled)
         self.monitor_enable_check.toggled.connect(self._on_monitor_display_toggled)
 
-        # 连接region index变化信号
+        # 杩炴帴region index鍙樺寲淇″彿
         self.region_index_spin.valueChanged.connect(self._on_region_changed)
 
-        # 初始化分析类型标签
+        # 鍒濆鍖栧垎鏋愮被鍨嬫爣绛?
         self._initialize_analysis_type_label()
         self.tab3_comm_enable_check.toggled.connect(self._on_tcp_tab3_settings_changed)
         self.tab3_server_ip_edit.textChanged.connect(self._on_tcp_tab3_settings_changed)
@@ -1184,8 +1195,8 @@ class MainWindow(QMainWindow):
             self._clear_monitor_plot()
 
     def _initialize_analysis_type_label(self):
-        """初始化分析类型标签显示"""
-        # 根据当前数据源设置分析类型标签
+        """Initialize the analysis type label based on the current data source."""
+        # 鏍规嵁褰撳墠鏁版嵁婧愯缃垎鏋愮被鍨嬫爣绛?
         data_source = self.data_source_combo.currentData() or DataSource.PHASE
         is_phase = (data_source == DataSource.PHASE)
 
@@ -1201,7 +1212,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'time_space_widget') and self.time_space_widget is not None:
             self.time_space_widget.parametersChanged.connect(self._on_time_space_params_changed)
             self.time_space_widget.pointCountChanged.connect(self._on_point_count_changed)
-            # 连接PLOT按钮状态变化信号
+            # 杩炴帴PLOT鎸夐挳鐘舵€佸彉鍖栦俊鍙?
             if hasattr(self.time_space_widget, 'plotStateChanged'):
                 self.time_space_widget.plotStateChanged.connect(self._on_plot_state_changed)
             log.debug("Time-space widget signals connected")
@@ -1300,7 +1311,8 @@ class MainWindow(QMainWindow):
         else:
             self.mode_time_radio.setChecked(True)
         self.region_index_spin.setValue(params.display.region_index)
-        self.frame_num_spin.setValue(params.display.frame_num)
+        self.frame_load_num_spin.setValue(getattr(params.display, "frame_load_num", 1024))
+        self.frame_plot_num_spin.setValue(getattr(params.display, "frame_plot_num", getattr(params.display, "frame_num", 1024)))
         self.spectrum_enable_check.setChecked(params.display.spectrum_enable)
         self.rad_check.setChecked(params.display.rad_enable)
         self.waveform_enable_check.setChecked(params.display.waveform_plot_enabled)
@@ -1400,14 +1412,15 @@ class MainWindow(QMainWindow):
         params.phase_demod.polarization_diversity = self.polar_div_check.isChecked()
 
         # Display params
-        # Display mode selection (移除TIME_SPACE选项，由PLOT按钮控制)
+        # Display mode selection (绉婚櫎TIME_SPACE閫夐」锛岀敱PLOT鎸夐挳鎺у埗)
         if self.mode_space_radio.isChecked():
             params.display.mode = DisplayMode.SPACE
         else:
             params.display.mode = DisplayMode.TIME
 
         params.display.region_index = self.region_index_spin.value()
-        params.display.frame_num = self.frame_num_spin.value()
+        params.display.frame_load_num = self.frame_load_num_spin.value()
+        params.display.frame_plot_num = self.frame_plot_num_spin.value()
         params.display.spectrum_enable = self.spectrum_enable_check.isChecked()
         # Note: PSD mode now automatically determined by data_type (removed psd_enable)
         params.display.rad_enable = self.rad_check.isChecked()
@@ -1442,6 +1455,15 @@ class MainWindow(QMainWindow):
         )
         if not valid:
             return False, msg
+
+        if params.display.frame_load_num <= 0:
+            return False, "FrameLoad must be greater than 0."
+
+        if params.display.frame_plot_num <= 0:
+            return False, "FramePlot must be greater than 0."
+
+        if params.display.frame_plot_num > params.display.frame_load_num:
+            return False, "FramePlot must not exceed FrameLoad."
 
         # Raw data source with 4 channels not supported
         if params.upload.data_source != DataSource.PHASE and params.upload.channel_num == 4:
@@ -1530,7 +1552,7 @@ class MainWindow(QMainWindow):
         data_bytes_text = "-"
         if params.basic.scan_rate > 0 and params.basic.scan_rate % max(1, self.tab3_time_downsample_spin.value()) == 0:
             sample_rate_hz = params.basic.scan_rate // self.tab3_time_downsample_spin.value()
-            samples_per_channel = len(range(0, params.display.frame_num, max(1, self.tab3_time_downsample_spin.value())))
+            samples_per_channel = len(range(0, params.display.frame_load_num, max(1, self.tab3_time_downsample_spin.value())))
             sample_rate_text = f"{sample_rate_hz} Hz"
             packet_duration = samples_per_channel / float(sample_rate_hz)
             duration_text = f"{packet_duration:.6f} s"
@@ -1620,7 +1642,7 @@ class MainWindow(QMainWindow):
             self.api.allocate_buffers(
                 params.basic.point_num_per_scan,
                 params.upload.channel_num,
-                params.display.frame_num,
+                params.display.frame_load_num,
                 params.phase_demod.merge_point_num,
                 params.upload.data_source == DataSource.PHASE
             )
@@ -1652,9 +1674,18 @@ class MainWindow(QMainWindow):
         self._save_local_params()
         if self.time_space_widget is not None:
             self.time_space_widget.set_scan_rate(params.basic.scan_rate)
+        if params.upload.data_source == DataSource.PHASE:
+            points_per_frame = self._get_effective_phase_point_count(params)
+            bytes_per_point = 4
+        else:
+            points_per_frame = params.basic.point_num_per_scan
+            bytes_per_point = 2
+        block_bytes = points_per_frame * params.display.frame_load_num * params.upload.channel_num * bytes_per_point
+        block_duration_ms = params.display.frame_load_num / max(params.basic.scan_rate, 1) * 1000.0
         log.info(f"Parameters: scan_rate={params.basic.scan_rate}, points={params.basic.point_num_per_scan}, "
                  f"channels={params.upload.channel_num}, data_source={params.upload.data_source}, "
-                 f"frames={params.display.frame_num}")
+                 f"frame_load={params.display.frame_load_num}, frame_plot={params.display.frame_plot_num}, "
+                 f"block_bytes={block_bytes / 1024 / 1024:.2f}MB, block_duration={block_duration_ms:.1f}ms")
 
         # Configure device (if not simulation mode)
         if not self.simulation_mode:
@@ -1746,6 +1777,8 @@ class MainWindow(QMainWindow):
             log.debug("Requesting acquisition thread stop...")
             self.acq_thread.stop()
 
+        self._log_acquisition_diagnostics("manual_stop_before_api_stop", force=True)
+
         if not self.simulation_mode and self.api is not None:
             log.debug("Stopping device...")
             try:
@@ -1809,15 +1842,26 @@ class MainWindow(QMainWindow):
         self._data_count += 1
         self._last_data_time = time.time()
         start_time = time.perf_counter()
+        tcp_ms = 0.0
+        save_ms = 0.0
+        rad_ms = 0.0
+        display_ms = 0.0
+        save_ok = None
 
         if self._data_count % 10 == 0:
             log.debug(f"Phase data received #{self._data_count}: shape={data.shape}, channels={channel_num}")
 
+        tcp_start = time.perf_counter()
         self.tcp_tab3_manager.enqueue_phase_data(data, self.params, self.get_tab3_comm_settings())
+        tcp_ms = (time.perf_counter() - tcp_start) * 1000
 
         # Save original data if enabled (always save raw int32 data, regardless of rad option)
         if self.data_saver is not None and self.data_saver.is_running:
-            self.data_saver.save_frame(data)
+            save_start = time.perf_counter()
+            save_ok = self.data_saver.save_frame(data)
+            save_ms = (time.perf_counter() - save_start) * 1000
+            if not save_ok:
+                log.warning(f"Phase save enqueue failed at callback #{self._data_count}")
             # Update save status periodically
             if self._data_count % 20 == 0:
                 frame_info = f"{self.data_saver.frame_count}/{self.data_saver.frames_per_file}"
@@ -1831,14 +1875,18 @@ class MainWindow(QMainWindow):
                     self._update_buffer_status(storage_count=storage_count, storage_max=storage_max)
 
         # rad conversion: display-only, does NOT affect saved data.
-        # Formula: rad = int32_value / 32767 * π (FPGA uses 32767 as full-scale π)
+        # Formula: rad = int32_value / 32767 * 蟺 (FPGA uses 32767 as full-scale 蟺)
         processed_data = data
         if self.params.display.rad_enable:
+            rad_start = time.perf_counter()
             processed_data = data.astype(np.float64) / 32767.0 * 3.141592654
+            rad_ms = (time.perf_counter() - rad_start) * 1000
 
         # Update display (use processed data)
         try:
+            display_start = time.perf_counter()
             self._update_phase_display(processed_data, channel_num)
+            display_ms = (time.perf_counter() - display_start) * 1000
             self._gui_update_count += 1
         except Exception as e:
             log.exception(f"Error in _update_phase_display: {e}")
@@ -1847,8 +1895,19 @@ class MainWindow(QMainWindow):
             self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
 
         elapsed = (time.perf_counter() - start_time) * 1000
+        if self._data_count <= 3 or self._data_count % 10 == 0:
+            queue_size = self.data_saver.queue_size if self.data_saver is not None and self.data_saver.is_running else 0
+            log.debug(
+                f"Phase callback #{self._data_count}: bytes={data.nbytes / 1024 / 1024:.2f}MB, "
+                f"tcp_ms={tcp_ms:.1f}, save_ms={save_ms:.1f}, rad_ms={rad_ms:.1f}, "
+                f"display_ms={display_ms:.1f}, total_ms={elapsed:.1f}, "
+                f"save_ok={save_ok}, queue={queue_size}"
+            )
         if elapsed > 50:
-            log.warning(f"Slow _on_phase_data: {elapsed:.1f}ms")
+            log.warning(
+                f"Slow _on_phase_data: {elapsed:.1f}ms "
+                f"(tcp={tcp_ms:.1f}, save={save_ms:.1f}, rad={rad_ms:.1f}, display={display_ms:.1f})"
+            )
 
     @pyqtSlot(np.ndarray, int, int)
     def _on_raw_data(self, data: np.ndarray, data_type: int, channel_num: int):
@@ -1857,13 +1916,20 @@ class MainWindow(QMainWindow):
         self._raw_data_count += 1
         self._last_data_time = time.time()
         start_time = time.perf_counter()
+        save_ms = 0.0
+        display_ms = 0.0
+        save_ok = None
 
         if self._data_count % 10 == 0:
             log.debug(f"Raw data received #{self._data_count}: shape={data.shape}, type={data_type}, channels={channel_num}")
 
         # Save data if enabled (frame-based saving for raw data)
         if self.data_saver is not None and self.data_saver.is_running:
-            self.data_saver.save_frame(data)
+            save_start = time.perf_counter()
+            save_ok = self.data_saver.save_frame(data)
+            save_ms = (time.perf_counter() - save_start) * 1000
+            if not save_ok:
+                log.warning(f"Raw save enqueue failed at callback #{self._data_count}")
             # Update save status periodically
             if self._data_count % 20 == 0:
                 frame_info = f"{self.data_saver.frame_count}/{self.data_saver.frames_per_file}"
@@ -1874,7 +1940,9 @@ class MainWindow(QMainWindow):
         if (current_time - self._last_raw_display_time) >= 1.0:
             # Update display
             try:
+                display_start = time.perf_counter()
                 self._update_raw_display(data, channel_num)
+                display_ms = (time.perf_counter() - display_start) * 1000
                 self._gui_update_count += 1
                 log.debug(f"Raw display updated #{self._raw_data_count}: interval={current_time - self._last_raw_display_time:.1f}s")
                 self._last_raw_display_time = current_time
@@ -1885,8 +1953,15 @@ class MainWindow(QMainWindow):
             self.frames_label.setText(f"Frames: {self.acq_thread.frames_acquired}")
 
         elapsed = (time.perf_counter() - start_time) * 1000
+        if self._raw_data_count <= 3 or self._raw_data_count % 10 == 0:
+            queue_size = self.data_saver.queue_size if self.data_saver is not None and self.data_saver.is_running else 0
+            log.debug(
+                f"Raw callback #{self._raw_data_count}: bytes={data.nbytes / 1024 / 1024:.2f}MB, "
+                f"save_ms={save_ms:.1f}, display_ms={display_ms:.1f}, total_ms={elapsed:.1f}, "
+                f"save_ok={save_ok}, queue={queue_size}"
+            )
         if elapsed > 50:
-            log.warning(f"Slow _on_raw_data: {elapsed:.1f}ms")
+            log.warning(f"Slow _on_raw_data: {elapsed:.1f}ms (save={save_ms:.1f}, display={display_ms:.1f})")
 
     @pyqtSlot(np.ndarray, int)
     def _on_monitor_data(self, data: np.ndarray, channel_num: int):
@@ -1916,9 +1991,16 @@ class MainWindow(QMainWindow):
 
     def _update_phase_display(self, data: np.ndarray, channel_num: int):
         """Update display for phase data"""
-        frame_num = self.params.display.frame_num
         point_num = self._get_effective_phase_point_count()
         waveform_enabled = self.waveform_enable_check.isChecked()
+        display_data, frame_num = self._select_latest_display_frames(
+            data,
+            point_num,
+            channel_num,
+            self.params.display.frame_plot_num,
+        )
+        if frame_num <= 0:
+            return
 
         # Debug output to identify mode
         log.debug(f"Display mode: {self.params.display.mode}, Region index: {self.params.display.region_index}")
@@ -1932,8 +2014,8 @@ class MainWindow(QMainWindow):
                 space_data = []
                 for i in range(frame_num):
                     idx = region_idx + point_num * i
-                    if idx < len(data):
-                        space_data.append(data[idx])
+                    if idx < len(display_data):
+                        space_data.append(display_data[idx])
 
                 space_data = np.array(space_data)
                 if waveform_enabled:
@@ -1949,15 +2031,15 @@ class MainWindow(QMainWindow):
                                          psd_mode=False, data_type='int')  # psd_mode ignored for phase data
             else:
                 # Multi-channel space mode
-                if len(data.shape) == 1:
-                    data = data.reshape(-1, channel_num)
+                if len(display_data.shape) == 1:
+                    display_data = display_data.reshape(-1, channel_num)
 
                 for ch in range(min(channel_num, 2)):
                     space_data = []
                     for i in range(frame_num):
                         idx = region_idx + point_num * i
-                        if idx < len(data):
-                            space_data.append(data[idx, ch])
+                        if idx < len(display_data):
+                            space_data.append(display_data[idx, ch])
                     if waveform_enabled:
                         self.plot_curve_1[ch].setData(np.array(space_data))
 
@@ -1971,32 +2053,31 @@ class MainWindow(QMainWindow):
                 for i in range(min(4, frame_num)):
                     start = i * point_num
                     end = start + point_num
-                    if waveform_enabled and end <= len(data):
-                        self.plot_curve_1[i].setData(data[start:end])
+                    if waveform_enabled and end <= len(display_data):
+                        self.plot_curve_1[i].setData(display_data[start:end])
                     elif waveform_enabled:
                         self.plot_curve_1[i].setData([])
 
                 # Spectrum of first frame (Phase data: automatically uses PSD)
-                if self.params.display.spectrum_enable and point_num <= len(data):
-                    self._update_spectrum(data[:point_num], self.params.basic.scan_rate,
+                if self.params.display.spectrum_enable and point_num <= len(display_data):
+                    self._update_spectrum(display_data[-point_num:], self.params.basic.scan_rate,
                                          psd_mode=False, data_type='int')  # psd_mode ignored for phase data
             else:
-                if len(data.shape) == 1:
-                    data = data.reshape(-1, channel_num)
+                if len(display_data.shape) == 1:
+                    display_data = display_data.reshape(-1, channel_num)
 
                 # Show first frame of each channel
                 for ch in range(min(channel_num, 4)):
-                    if waveform_enabled and point_num <= len(data):
-                        self.plot_curve_1[ch].setData(data[:point_num, ch])
+                    if waveform_enabled and point_num <= len(display_data):
+                        self.plot_curve_1[ch].setData(display_data[:point_num, ch])
 
-        # Time-Space plot: 独立于MODE控制，由PLOT按钮控制
-        # 只有当Tab2处于活动状态时才更新time-space plot，避免干扰Tab1
+        # Time-Space plot: 鐙珛浜嶮ODE鎺у埗锛岀敱PLOT鎸夐挳鎺у埗
+        # 鍙湁褰揟ab2澶勪簬娲诲姩鐘舵€佹椂鎵嶆洿鏂皌ime-space plot锛岄伩鍏嶅共鎵癟ab1
         if (self.time_space_widget is not None and
             hasattr(self.time_space_widget, 'is_plot_enabled') and
             self.time_space_widget.is_plot_enabled() and
-            self.plot_tabs.currentIndex() == 1):  # 只有当Tab2活动时才更新
+            self.plot_tabs.currentIndex() == 1):  # 鍙湁褰揟ab2娲诲姩鏃舵墠鏇存柊
             # Use the processed data parameter (already includes rad conversion if enabled)
-            display_data = data
             self.time_space_widget.set_scan_rate(self.params.basic.scan_rate)
 
             # Reshape data to frames x points for time-space widget
@@ -2020,37 +2101,44 @@ class MainWindow(QMainWindow):
     def _update_raw_display(self, data: np.ndarray, channel_num: int):
         """Update display for raw IQ data"""
         point_num = self.params.basic.point_num_per_scan
-        frame_num = self.params.display.frame_num
         waveform_enabled = self.waveform_enable_check.isChecked()
+        display_data, frame_num = self._select_latest_display_frames(
+            data,
+            point_num,
+            channel_num,
+            self.params.display.frame_plot_num,
+        )
+        if frame_num <= 0:
+            return
 
         if channel_num == 1:
             # Show full-resolution frames; pyqtgraph handles view clipping/downsampling.
             for i in range(min(4, frame_num)):
                 start = i * point_num
                 end = start + point_num
-                if waveform_enabled and end <= len(data):
-                    self.plot_curve_1[i].setData(data[start:end])
+                if waveform_enabled and end <= len(display_data):
+                    self.plot_curve_1[i].setData(display_data[start:end])
                 elif waveform_enabled:
                     self.plot_curve_1[i].setData([])
 
             # Spectrum: use full-resolution data (Raw data: automatically uses Power Spectrum)
-            if self.params.display.spectrum_enable and point_num <= len(data):
+            if self.params.display.spectrum_enable and point_num <= len(display_data):
                 sample_rate = 1e9 / self.params.upload.data_rate
-                self._update_spectrum(data[:point_num], sample_rate,
+                self._update_spectrum(display_data[-point_num:], sample_rate,
                                      psd_mode=False, data_type='short')  # psd_mode ignored for raw data
         else:
-            if len(data.shape) == 1:
-                data = data.reshape(-1, channel_num)
+            if len(display_data.shape) == 1:
+                display_data = display_data.reshape(-1, channel_num)
 
             for ch in range(min(channel_num, 4)):
-                if waveform_enabled and point_num <= len(data):
-                    self.plot_curve_1[ch].setData(data[:point_num, ch])
+                if waveform_enabled and point_num <= len(display_data):
+                    self.plot_curve_1[ch].setData(display_data[:point_num, ch])
 
             # Spectrum: full-resolution data (Raw data: automatically uses Power Spectrum)
-            if self.params.display.spectrum_enable and point_num <= len(data):
+            if self.params.display.spectrum_enable and point_num <= len(display_data):
                 sample_rate = 1e9 / self.params.upload.data_rate
                 # Use first channel for spectrum computation
-                self._update_spectrum(data[:point_num, 0], sample_rate,
+                self._update_spectrum(display_data[-point_num:, 0], sample_rate,
                                      psd_mode=False, data_type='short')  # psd_mode ignored for raw data
 
     def _update_monitor_display(self, data: np.ndarray, channel_num: int):
@@ -2132,6 +2220,37 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.warning(f"Spectrum update error: {e}")
 
+    def _select_latest_display_frames(
+        self,
+        data: np.ndarray,
+        points_per_frame: int,
+        channel_num: int,
+        target_frames: int,
+    ) -> tuple[np.ndarray, int]:
+        """Extract the most recent frames needed for one GUI update."""
+        if points_per_frame <= 0 or target_frames <= 0:
+            return np.asarray(data), 0
+
+        if channel_num == 1:
+            flat = np.asarray(data).reshape(-1)
+            available_frames = flat.size // points_per_frame
+            frame_num = min(target_frames, available_frames)
+            if frame_num <= 0:
+                return flat[:0], 0
+            keep_points = frame_num * points_per_frame
+            return flat[-keep_points:], frame_num
+
+        matrix = np.asarray(data)
+        if matrix.ndim == 1:
+            matrix = matrix.reshape(-1, channel_num)
+
+        available_frames = matrix.shape[0] // points_per_frame
+        frame_num = min(target_frames, available_frames)
+        if frame_num <= 0:
+            return matrix[:0], 0
+        keep_rows = frame_num * points_per_frame
+        return matrix[-keep_rows:, :], frame_num
+
     # ----- STATUS MONITORING -----
 
     def _update_status(self):
@@ -2166,6 +2285,7 @@ class MainWindow(QMainWindow):
 
             # Update file size estimates
             self._update_file_estimates()
+            self._log_acquisition_diagnostics("periodic")
             self._log_storage_queue_status()
 
         except Exception as e:
@@ -2188,6 +2308,7 @@ class MainWindow(QMainWindow):
 
         self._recovery_in_progress = True
         self._last_recovery_time = now
+        self._log_acquisition_diagnostics("stall_detected", force=True)
         log.error(
             f"Acquisition stall detected: no data callbacks for {silent_s:.1f}s. "
             "Triggering auto-recovery (stop/start)."
@@ -2211,7 +2332,7 @@ class MainWindow(QMainWindow):
             self._recovery_in_progress = False
 
     def _log_storage_queue_status(self):
-        """Periodically log storage queue occupancy for现场排查."""
+        """Periodically log storage queue occupancy for鐜板満鎺掓煡."""
         if not self.data_saver or not self.data_saver.is_running:
             return
 
@@ -2224,6 +2345,50 @@ class MainWindow(QMainWindow):
         dropped = self.data_saver.dropped_blocks
         log.info(f"Storage queue: {queue_size}/{queue_max}, dropped={dropped}")
         self._last_storage_queue_log_time = now
+
+    def _log_acquisition_diagnostics(self, reason: str, force: bool = False):
+        """Emit a consolidated acquisition snapshot for field diagnostics."""
+        if self.acq_thread is None:
+            return
+
+        now = time.time()
+        if not force and now - self._last_acq_snapshot_log_time < 5.0:
+            return
+
+        snapshot = self.acq_thread.get_diagnostics_snapshot()
+        parts = [
+            f"reason={reason}",
+            f"stage={snapshot['current_stage']}",
+            f"stage_ms={snapshot['stage_elapsed_ms']:.1f}",
+            f"loop={snapshot['loop_count']}",
+            f"frames={snapshot['frames_acquired']}",
+            f"buffer={snapshot['last_buffer_points']}/{snapshot['last_expected_points']}",
+            f"waits={snapshot['last_wait_iterations']}",
+            f"query_ms={snapshot['last_query_ms']:.1f}",
+            f"read_ms={snapshot['last_read_ms']:.1f}",
+            f"monitor_ms={snapshot['last_monitor_read_ms']:.1f}",
+            f"block_mb={snapshot['last_block_bytes'] / 1024 / 1024:.2f}",
+            f"poll_ms={snapshot['polling_interval_ms']:.1f}",
+            f"emit_phase={snapshot['phase_emit_count']}",
+            f"emit_raw={snapshot['raw_emit_count']}",
+            f"gui_skips={snapshot['gui_skip_count']}",
+        ]
+        detail = snapshot.get("current_stage_detail")
+        if detail:
+            parts.append(f"detail={detail}")
+
+        if self.data_saver is not None and hasattr(self.data_saver, "get_diagnostics_snapshot"):
+            saver = self.data_saver.get_diagnostics_snapshot()
+            parts.extend([
+                f"save_queue={saver['queue_size']}/{saver['buffer_size']}",
+                f"save_max_queue={saver['max_queue_size_seen']}",
+                f"save_dropped={saver['dropped_blocks']}",
+                f"save_written={saver['blocks_written']}",
+                f"save_last_write_ms={saver['last_write_ms']:.1f}",
+            ])
+
+        log.info("Acq snapshot: " + ", ".join(parts))
+        self._last_acq_snapshot_log_time = now
 
     def _update_calculated_values(self):
         """Update calculated display values"""
@@ -2261,10 +2426,10 @@ class MainWindow(QMainWindow):
     def _on_mode_changed(self, checked):
         """Handle mode radio button changes"""
         if checked:  # Only respond to the checked button to avoid duplicate calls
-            # 安全地更新显示模式参数，避免在运行时重新收集所有参数
+            # 瀹夊叏鍦版洿鏂版樉绀烘ā寮忓弬鏁帮紝閬垮厤鍦ㄨ繍琛屾椂閲嶆柊鏀堕泦鎵€鏈夊弬鏁?
             try:
                 if hasattr(self, 'params') and self.params is not None:
-                    # 只更新显示模式相关参数
+                    # 鍙洿鏂版樉绀烘ā寮忕浉鍏冲弬鏁?
                     if self.mode_space_radio.isChecked():
                         self.params.display.mode = DisplayMode.SPACE
                         log.debug("Display mode changed to SPACE")
@@ -2272,7 +2437,7 @@ class MainWindow(QMainWindow):
                         self.params.display.mode = DisplayMode.TIME
                         log.debug("Display mode changed to TIME")
 
-                    # 更新region index
+                    # 鏇存柊region index
                     self.params.display.region_index = self.region_index_spin.value()
                 else:
                     log.warning("Params not initialized, mode change ignored")
@@ -2388,6 +2553,7 @@ class MainWindow(QMainWindow):
         """Update file size and duration estimates"""
         try:
             frames_per_file = self.frames_per_file_spin.value()
+            frame_load_num = self.frame_load_num_spin.value()
             scan_rate = self.scan_rate_spin.value()
             point_num = self.point_num_spin.value()
             merge_points = self.merge_points_spin.value()
@@ -2406,9 +2572,9 @@ class MainWindow(QMainWindow):
             else:
                 points_per_frame = point_num
 
-            # Estimate frame size (int32 = 4 bytes per point)
-            frame_size_mb = points_per_frame * channel_num * 4 / (1024 * 1024)
-            file_size_mb = frame_size_mb * frames_per_file
+            # One saved block corresponds to one acquisition callback.
+            block_size_mb = points_per_frame * max(1, frame_load_num) * channel_num * 4 / (1024 * 1024)
+            file_size_mb = block_size_mb * frames_per_file
 
             # Update label
             self.file_size_label.setText(f"~{file_size_mb:.1f}MB/file")
@@ -2438,10 +2604,10 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(bool)
     def _on_plot_state_changed(self, enabled: bool):
-        """处理Time-space PLOT按钮状态变化"""
+        """Handle time-space plot button state changes."""
         try:
             log.info(f"Time-space plot state changed: {'Enabled' if enabled else 'Disabled'}")
-            # 这里可以添加其他响应逻辑，比如状态栏显示等
+            # 杩欓噷鍙互娣诲姞鍏朵粬鍝嶅簲閫昏緫锛屾瘮濡傜姸鎬佹爮鏄剧ず绛?
         except Exception as e:
             log.warning(f"Error handling plot state change: {e}")
 
@@ -2511,3 +2677,8 @@ class MainWindow(QMainWindow):
             progress_bar.setStyleSheet("QProgressBar::chunk { background-color: orange; }")
         else:
             progress_bar.setStyleSheet("QProgressBar::chunk { background-color: green; }")
+
+
+
+
+

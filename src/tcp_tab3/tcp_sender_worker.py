@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 import socket
 import threading
 import time
 from collections import deque
 from typing import Callable, Deque, Optional
+
+from logger import get_logger
 
 from .tcp_packet_builder import TCPPacketBuildError, TCPPacketBuilder
 from .tcp_types import PhaseQueueItem
@@ -25,7 +26,7 @@ class TCPSenderWorker:
         self._stats_callback = stats_callback
         self._status_callback = status_callback
         self._error_callback = error_callback
-        self._logger = logging.getLogger(f"{__name__}.TCPSenderWorker")
+        self._logger = get_logger("tcp_tab3.worker")
 
         self._queue: Deque[PhaseQueueItem] = deque()
         self._queue_max_packets = 8
@@ -116,6 +117,10 @@ class TCPSenderWorker:
             while len(self._queue) >= self._queue_max_packets:
                 self._queue.popleft()
                 self._stats["dropped_packets"] += 1
+                self._logger.warning(
+                    f"TCP queue full, dropping oldest packet: dropped={self._stats['dropped_packets']}, "
+                    f"queue_max={self._queue_max_packets}"
+                )
             self._queue.append(item)
             self._stats["queued_packets"] = len(self._queue)
             self._condition.notify()
@@ -142,12 +147,16 @@ class TCPSenderWorker:
                 self._stats["queued_packets"] = len(self._queue)
 
             try:
+                build_start = time.perf_counter()
                 packet = TCPPacketBuilder.build_packet(
                     item.phase_data,
                     item.context,
                     item.settings,
                     self._comm_count,
                 )
+                build_ms = (time.perf_counter() - build_start) * 1000
+                if build_ms > 20:
+                    self._logger.warning(f"Slow TCP packet build: {build_ms:.1f}ms")
             except TCPPacketBuildError as exc:
                 self._stats["dropped_packets"] += 1
                 self._stats["last_error"] = str(exc)
@@ -163,8 +172,10 @@ class TCPSenderWorker:
 
             try:
                 assert self._socket is not None
+                send_start = time.perf_counter()
                 self._socket.sendall(packet.header_bytes)
                 self._socket.sendall(packet.payload_bytes)
+                send_ms = (time.perf_counter() - send_start) * 1000
                 self._comm_count += 1
                 self._stats.update(
                     {
@@ -185,6 +196,10 @@ class TCPSenderWorker:
                     f"Connected to {item.settings.server_ip}:{item.settings.server_port}",
                 )
                 self._emit_stats()
+                if send_ms > 50:
+                    self._logger.warning(
+                        f"Slow TCP send: {send_ms:.1f}ms, bytes={len(packet.header_bytes) + len(packet.payload_bytes)}"
+                    )
             except OSError as exc:
                 self._handle_socket_error(item, f"Send failed: {exc}")
 

@@ -219,7 +219,8 @@ class DisplayParams:
     Attributes:
         mode: Display mode (TIME/SPACE - see DisplayMode enum)
         region_index: Spatial position for SPACE mode display
-        frame_num: Number of frames to process/display
+        frame_load_num: Number of frames to read from FPGA per acquisition block
+        frame_plot_num: Number of frames to use for waveform/PSD/time-space updates
         spectrum_enable: Enable FFT spectrum analysis display
         rad_enable: Convert phase data to radians for display (storage unaffected)
         waveform_plot_enabled: Enable plot 1 waveform updates
@@ -229,11 +230,12 @@ class DisplayParams:
           - Raw data: Power Spectrum
           - Phase data: PSD using scipy.welch
 
-    Performance: Large frame_num values may impact GUI responsiveness
+    Constraint: frame_plot_num must not exceed frame_load_num in the current architecture.
     """
     mode: int = DisplayMode.TIME
     region_index: int = 0                    # Spatial position index for SPACE mode
-    frame_num: int = 1024                    # Frames to display/analyze
+    frame_load_num: int = 1024               # Frames to read from FPGA per block
+    frame_plot_num: int = 1024               # Frames to display/analyze per update
     spectrum_enable: bool = True             # Enable frequency domain analysis
     rad_enable: bool = True                  # Display-only radian conversion (default enabled)
     waveform_plot_enabled: bool = False      # Plot 1 switch
