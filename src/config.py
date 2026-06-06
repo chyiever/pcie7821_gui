@@ -219,7 +219,7 @@ class DisplayParams:
     Attributes:
         mode: Display mode (TIME/SPACE - see DisplayMode enum)
         region_index: Spatial position for SPACE mode display
-        frame_load_num: Number of frames to read from FPGA per acquisition block
+        frame_load_num: Number of frames requested from the DLL buffer per software read block
         frame_plot_num: Number of frames to use for waveform/PSD/time-space updates
         spectrum_enable: Enable FFT spectrum analysis display
         rad_enable: Convert phase data to radians for display (storage unaffected)

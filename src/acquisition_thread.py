@@ -14,9 +14,10 @@ Classes:
 - SimulatedAcquisitionThread: Random data generator for UI testing
 """
 
+import threading
 import time
 import numpy as np
-from typing import Optional
+from typing import Callable, Optional
 from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition, Qt
 
 from pcie7821_api import PCIe7821API, PCIe7821Error
@@ -101,12 +102,15 @@ class AcquisitionThread(QThread):
         self._current_stage_detail = ""
         self._current_stage_started_at = time.perf_counter()
 
-        # GUI throttling: store latest data, only emit when MIN_GUI_UPDATE_INTERVAL_MS
-        # has elapsed. Older pending data is discarded (keeps only latest snapshot).
+        # Display handoff uses one overwriteable slot instead of queued large-array signals.
         self._last_gui_update_time = 0
         self._pending_phase_data = None
         self._pending_raw_data = None
         self._pending_monitor_data = None
+        self._latest_display_data = None
+        self._latest_display_lock = threading.Lock()
+        self._full_data_handler: Optional[Callable[[np.ndarray, int, int], None]] = None
+        self._last_successful_read_time = 0.0
 
         # Dynamic polling: switch between fast/slow intervals based on buffer fill.
         # Hysteresis between high/low thresholds prevents oscillation.
@@ -177,6 +181,11 @@ class AcquisitionThread(QThread):
             "last_read_ms": self._last_read_ms,
             "last_monitor_read_ms": self._last_monitor_read_ms,
             "last_block_bytes": self._last_block_bytes,
+            "last_successful_read_age_s": (
+                time.perf_counter() - self._last_successful_read_time
+                if self._last_successful_read_time > 0
+                else 0.0
+            ),
             "polling_interval_ms": self._current_polling_interval * 1000.0,
             "is_running": self.is_running,
             "is_paused": self.is_paused,
@@ -241,6 +250,8 @@ class AcquisitionThread(QThread):
         self._last_read_ms = 0.0
         self._last_monitor_read_ms = 0.0
         self._last_block_bytes = 0
+        self._last_successful_read_time = time.perf_counter()
+        self.clear_latest_display_data()
         self._set_stage("started")
 
         self.acquisition_started.emit()
@@ -413,15 +424,15 @@ class AcquisitionThread(QThread):
 
         self._bytes_acquired += len(data) * 2  # short = 2 bytes
         self._last_block_bytes = int(np.asarray(data).nbytes)
+        self._last_successful_read_time = time.perf_counter()
 
         # Reshape data by channels
         if self._channel_num > 1:
             # Data is interleaved: ch0[0], ch1[0], ch0[1], ch1[1], ...
             data = data.reshape(-1, self._channel_num)
 
-        # Throttle GUI updates to prevent signal queue backup
-        self._pending_raw_data = (data, self._data_source, self._channel_num)
-        self._emit_if_ready()
+        self._dispatch_full_data(data, self._data_source, self._channel_num)
+        self._publish_latest_display_data(data, self._data_source, self._channel_num)
 
     def _read_phase_data(self):
         """Read phase demodulated data"""
@@ -445,13 +456,14 @@ class AcquisitionThread(QThread):
 
         phase_data = self._apply_phase_spatial_crop(phase_data)
         self._last_block_bytes = int(np.asarray(phase_data).nbytes)
+        self._last_successful_read_time = time.perf_counter()
 
         # Reshape data by channels
         if self._channel_num > 1:
             phase_data = phase_data.reshape(-1, self._channel_num)
 
-        # Store pending data for throttled emission
-        self._pending_phase_data = (phase_data, self._channel_num)
+        self._dispatch_full_data(phase_data, DataSource.PHASE, self._channel_num)
+        self._publish_latest_display_data(phase_data, DataSource.PHASE, self._channel_num)
 
         # Also read monitor data when in phase mode
         try:
@@ -469,6 +481,59 @@ class AcquisitionThread(QThread):
 
         # Emit all pending data if enough time has passed
         self._emit_if_ready()
+
+    def set_full_data_handler(self, handler: Optional[Callable[[np.ndarray, int, int], None]]):
+        """Set a non-GUI handler for saving and communication queue handoff."""
+        self._full_data_handler = handler
+
+    def _dispatch_full_data(self, data: np.ndarray, data_source: int, channel_num: int):
+        """Dispatch one complete acquisition block without entering the GUI event queue."""
+        if self._full_data_handler is None:
+            return
+        try:
+            self._full_data_handler(data, data_source, channel_num)
+        except Exception as e:
+            log.exception(f"Full data handler failed: {e}")
+
+    def _publish_latest_display_data(self, data: np.ndarray, data_source: int, channel_num: int):
+        """Replace the latest display snapshot; unconsumed older snapshots are discarded."""
+        points_per_frame = (
+            self._point_num_after_merge
+            if data_source == DataSource.PHASE
+            else self._total_point_num
+        )
+        target_frames = max(1, min(self._params.display.frame_plot_num, self._frame_num))
+        if channel_num == 1:
+            keep_points = min(data.size, points_per_frame * target_frames)
+            display_data = data.reshape(-1)[-keep_points:]
+        else:
+            matrix = data.reshape(-1, channel_num)
+            keep_rows = min(matrix.shape[0], points_per_frame * target_frames)
+            display_data = matrix[-keep_rows:, :]
+        # The display snapshot must not keep the complete acquisition block alive via a view.
+        display_data = np.array(display_data, copy=True, order="C")
+
+        with self._latest_display_lock:
+            if self._latest_display_data is not None:
+                self._gui_skip_count += 1
+            self._latest_display_data = (display_data, data_source, channel_num)
+
+        if data_source == DataSource.PHASE:
+            self._phase_emit_count += 1
+        else:
+            self._raw_emit_count += 1
+
+    def take_latest_display_data(self):
+        """Atomically take the newest display snapshot for GUI-timer consumption."""
+        with self._latest_display_lock:
+            latest = self._latest_display_data
+            self._latest_display_data = None
+        return latest
+
+    def clear_latest_display_data(self):
+        """Release any display snapshot that has not yet been consumed."""
+        with self._latest_display_lock:
+            self._latest_display_data = None
 
     def _emit_if_ready(self):
         """Emit pending data signals if enough time has passed since last update"""
@@ -553,6 +618,7 @@ class AcquisitionThread(QThread):
             f"query_ms={snapshot['last_query_ms']:.1f}, read_ms={snapshot['last_read_ms']:.1f}"
         )
         self._running = False
+        self.clear_latest_display_data()
         self._set_stage("stop_requested")
 
         # Wake up if paused
@@ -701,8 +767,8 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                     if self._channel_num > 1:
                         phase_data = phase_data.reshape(-1, self._channel_num)
 
-                    # Use throttled emission (same as real acquisition)
-                    self._pending_phase_data = (phase_data, self._channel_num)
+                    self._dispatch_full_data(phase_data, DataSource.PHASE, self._channel_num)
+                    self._publish_latest_display_data(phase_data, DataSource.PHASE, self._channel_num)
                     self._bytes_acquired += len(phase_data.flatten()) * 4
 
                     # Simulated monitor data
@@ -716,12 +782,10 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                     if self._channel_num > 1:
                         data = data.reshape(-1, self._channel_num)
 
-                    # Use throttled emission (same as real acquisition)
-                    self._pending_raw_data = (data, self._data_source, self._channel_num)
+                    self._dispatch_full_data(data, self._data_source, self._channel_num)
+                    self._publish_latest_display_data(data, self._data_source, self._channel_num)
                     self._bytes_acquired += len(data.flatten()) * 2
-
-                # Emit pending signals if enough time has passed
-                self._emit_if_ready()
+                self._last_successful_read_time = time.perf_counter()
 
                 # Emit buffer status (throttle this too - only every 10 loops)
                 if self._loop_count % 10 == 0:

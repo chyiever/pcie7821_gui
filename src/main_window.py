@@ -6,11 +6,11 @@ PyQt5-based GUI with real-time waveform display and parameter control.
 Layout: Left panel (parameters) | Right panel (3 plots + status bar)
 Plots: Time/Space domain, FFT Spectrum, Monitor (fiber end detection)
 
-Data Flow: AcqThread --[Qt signals]--> slot handlers --> display update
-           Phase data also forwarded to DataSaver for disk storage.
+Data Flow: AcqThread --> full-data queues for storage/TCP
+           AcqThread --> overwriteable latest snapshot --> GUI timer --> display update
 
 Key Design:
-- All plotting happens in GUI thread via Qt signal-slot mechanism
+- All plotting happens in GUI thread via timer-driven latest-snapshot consumption
 - Raw display throttled to 1 Hz; phase display follows acq thread rate
 - rad conversion is display-only; storage always saves original int32
 - Spectrum analysis delegated to RealTimeSpectrumAnalyzer with averaging
@@ -106,6 +106,8 @@ class MainWindow(QMainWindow):
         self._last_acq_snapshot_log_time = 0.0
         self._recovery_in_progress = False
         self._last_recovery_time = 0.0
+        self._full_data_count = 0
+        self._tcp_settings_snapshot: Dict[str, Any] = {}
 
         # System monitoring
         self._last_system_update = 0
@@ -129,6 +131,11 @@ class MainWindow(QMainWindow):
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._update_status)
         self._status_timer.start(MONITOR_UPDATE_INTERVALS['buffer_status_ms'])
+
+        # Consume only the newest display snapshot; acquisition never queues large arrays to Qt.
+        self._display_timer = QTimer(self)
+        self._display_timer.timeout.connect(self._drain_latest_display_data)
+        self._display_timer.start(100)
 
         # System monitoring timer (slower update)
         self._system_timer = QTimer(self)
@@ -439,14 +446,14 @@ class MainWindow(QMainWindow):
         phase_layout.addWidget(QLabel("Detrend(Hz):"), 2, 0)
         self.detrend_bw_spin = QDoubleSpinBox()
         self.detrend_bw_spin.setRange(0.0, 1000000.0)
-        self.detrend_bw_spin.setValue(10.0)  # 榛樿鍊兼敼涓?0Hz
+        self.detrend_bw_spin.setValue(10.0)  # 默认值为 10 Hz
         self.detrend_bw_spin.setSingleStep(0.1)
         self.detrend_bw_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.detrend_bw_spin.setMaximumWidth(INPUT_MAX_WIDTH)
         phase_layout.addWidget(self.detrend_bw_spin, 2, 1)
 
         self.polar_div_check = QCheckBox("PolarDiv")
-        self.polar_div_check.setChecked(True)  # 榛樿鍕鹃€夊亸鎸垎闆嗗姛鑳?
+        self.polar_div_check.setChecked(True)  # 默认启用偏振分集
         phase_layout.addWidget(self.polar_div_check, 2, 2, 1, 2)
 
         phase_layout.addWidget(QLabel("CropStart:"), 3, 0)
@@ -495,7 +502,7 @@ class MainWindow(QMainWindow):
         self.region_index_spin.setRange(0, 10000000)
         self.region_index_spin.setValue(0)
         self.region_index_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.region_index_spin.setMaximumWidth(60)  # 缂╁皬Region杈撳叆妗嗗搴?
+        self.region_index_spin.setMaximumWidth(60)  # 缩小 Region 输入框宽度
         display_layout.addWidget(self.region_index_spin, 0, 3)
 
         # Row 1: FrameLoad | FramePlot
@@ -841,8 +848,8 @@ class MainWindow(QMainWindow):
             pw.showGrid(x=True, y=True, alpha=0.6)
 
             # Set fonts for axes - increase tick font size by 2 units
-            axis_font = QFont("Times New Roman", 8)      # 杞存爣绛句繚鎸?pt
-            tick_font = QFont("Times New Roman", 8)      # 鍒诲害鍊艰皟澶у埌9pt (浠?pt+2)
+            axis_font = QFont("Times New Roman", 8)      # 轴标签保持 8 pt
+            tick_font = QFont("Times New Roman", 8)      # 刻度值使用 8 pt
 
             # Configure tick style with reduced spacing
             x_axis.setStyle(showValues=True, tickLength=4, tickTextOffset=6)  # Reduced offset
@@ -1136,7 +1143,7 @@ class MainWindow(QMainWindow):
         # 杩炴帴region index鍙樺寲淇″彿
         self.region_index_spin.valueChanged.connect(self._on_region_changed)
 
-        # 鍒濆鍖栧垎鏋愮被鍨嬫爣绛?
+        # 初始化分析类型标签
         self._initialize_analysis_type_label()
         self.tab3_comm_enable_check.toggled.connect(self._on_tcp_tab3_settings_changed)
         self.tab3_server_ip_edit.textChanged.connect(self._on_tcp_tab3_settings_changed)
@@ -1196,7 +1203,7 @@ class MainWindow(QMainWindow):
 
     def _initialize_analysis_type_label(self):
         """Initialize the analysis type label based on the current data source."""
-        # 鏍规嵁褰撳墠鏁版嵁婧愯缃垎鏋愮被鍨嬫爣绛?
+        # 根据当前数据源设置分析类型标签
         data_source = self.data_source_combo.currentData() or DataSource.PHASE
         is_phase = (data_source == DataSource.PHASE)
 
@@ -1212,7 +1219,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'time_space_widget') and self.time_space_widget is not None:
             self.time_space_widget.parametersChanged.connect(self._on_time_space_params_changed)
             self.time_space_widget.pointCountChanged.connect(self._on_point_count_changed)
-            # 杩炴帴PLOT鎸夐挳鐘舵€佸彉鍖栦俊鍙?
+            # 连接 PLOT 按钮状态变化信号
             if hasattr(self.time_space_widget, 'plotStateChanged'):
                 self.time_space_widget.plotStateChanged.connect(self._on_plot_state_changed)
             log.debug("Time-space widget signals connected")
@@ -1726,6 +1733,7 @@ class MainWindow(QMainWindow):
         self._data_count = 0
         self._gui_update_count = 0
         self._raw_data_count = 0
+        self._full_data_count = 0
         self._last_data_time = time.time()
         self._recovery_in_progress = False
         self._last_raw_display_time = 0  # Force immediate first update
@@ -1738,11 +1746,11 @@ class MainWindow(QMainWindow):
             self.acq_thread = AcquisitionThread(self.api, self)
 
         self.acq_thread.configure(params)
+        self._tcp_settings_snapshot = self.get_tab3_comm_settings()
+        self.acq_thread.set_full_data_handler(self._handle_full_data_block)
 
-        # Connect signals with logging
+        # Only small control/monitor signals enter the GUI queue.
         log.debug("Connecting acquisition thread signals...")
-        self.acq_thread.phase_data_ready.connect(self._on_phase_data)
-        self.acq_thread.data_ready.connect(self._on_raw_data)
         self.acq_thread.monitor_data_ready.connect(self._on_monitor_data)
         self.acq_thread.buffer_status.connect(self._on_buffer_status)
         self.acq_thread.error_occurred.connect(self._on_error)
@@ -1768,14 +1776,17 @@ class MainWindow(QMainWindow):
         """Handle stop button click"""
         log.info("=== STOP button clicked ===")
 
-        # Disable stop button immediately to prevent double-clicks
-        self.stop_btn.setEnabled(False)
+        # Stop display consumption and restore controls immediately. Hardware cleanup follows.
+        self._set_start_btn_ready()
+        self._set_stop_btn_disabled()
+        self._set_params_enabled(True)
         self.stop_btn.setText("Stopping...")
 
         thread_stopped = True
-        if self.acq_thread is not None:
+        stopping_thread = self.acq_thread
+        if stopping_thread is not None:
             log.debug("Requesting acquisition thread stop...")
-            self.acq_thread.stop()
+            stopping_thread.stop()
 
         self._log_acquisition_diagnostics("manual_stop_before_api_stop", force=True)
 
@@ -1788,10 +1799,12 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 log.warning(f"Unexpected error stopping device: {e}")
 
-        if self.acq_thread is not None:
-            thread_stopped = self.acq_thread.wait_until_stopped(5000)
+        if stopping_thread is not None:
+            thread_stopped = stopping_thread.wait_until_stopped(5000)
             if not thread_stopped:
                 log.error("Acquisition thread is still running after stop; skip force terminate to avoid driver corruption")
+            stopping_thread.set_full_data_handler(None)
+            stopping_thread.clear_latest_display_data()
 
         if self.data_saver is not None:
             log.debug("Stopping data saver...")
@@ -1804,17 +1817,21 @@ class MainWindow(QMainWindow):
         self.tcp_tab3_manager.stop_session()
 
         self.save_status_label.setText("Save: Off")
+        if self.acq_thread is stopping_thread:
+            self.acq_thread = None
         log.info(
             f"Stopped (thread_stopped={thread_stopped}). "
             f"Total data callbacks: {self._data_count}, GUI updates: {self._gui_update_count}"
         )
 
-        # Reset stop button text (color will be set by _on_acquisition_stopped)
         self.stop_btn.setText("STOP")
 
     @pyqtSlot()
     def _on_acquisition_stopped(self):
         """Handle acquisition stopped signal"""
+        if self.sender() is not self.acq_thread:
+            log.debug("Ignoring delayed acquisition_stopped signal from an inactive thread")
+            return
         log.info("Acquisition stopped signal received")
         # Restore button colors
         self._set_start_btn_ready()
@@ -1832,9 +1849,37 @@ class MainWindow(QMainWindow):
                        self.diff_order_spin, self.detrend_bw_spin, self.polar_div_check]:
             widget.setEnabled(enabled)
 
-    # ----- DATA SIGNAL HANDLERS -----
-    # Called in GUI thread when acquisition thread emits new data.
-    # Responsible for: saving to disk, optional rad conversion, display update.
+    # ----- DATA HANDLERS -----
+    # Complete blocks stay off the GUI event queue. The GUI consumes only the latest snapshot.
+
+    def _handle_full_data_block(self, data: np.ndarray, data_source: int, channel_num: int):
+        """Run in the acquisition thread and hand complete blocks to background consumers."""
+        self._full_data_count += 1
+
+        if data_source == DataSource.PHASE:
+            self.tcp_tab3_manager.enqueue_phase_data(data, self.params, self._tcp_settings_snapshot)
+
+        saver = self.data_saver
+        if saver is not None and saver.is_running:
+            save_ok = saver.save_frame(data)
+            if not save_ok:
+                log.warning(f"Save enqueue failed at full block #{self._full_data_count}")
+
+    def _drain_latest_display_data(self):
+        """Consume at most one latest display snapshot per GUI timer tick."""
+        thread = self.acq_thread
+        if thread is None or not thread.is_running:
+            return
+
+        latest = thread.take_latest_display_data()
+        if latest is None:
+            return
+
+        data, data_source, channel_num = latest
+        if data_source == DataSource.PHASE:
+            self._on_phase_data(data, channel_num)
+        else:
+            self._on_raw_data(data, data_source, channel_num)
 
     @pyqtSlot(np.ndarray, int)
     def _on_phase_data(self, data: np.ndarray, channel_num: int):
@@ -1842,40 +1887,14 @@ class MainWindow(QMainWindow):
         self._data_count += 1
         self._last_data_time = time.time()
         start_time = time.perf_counter()
-        tcp_ms = 0.0
-        save_ms = 0.0
         rad_ms = 0.0
         display_ms = 0.0
-        save_ok = None
 
         if self._data_count % 10 == 0:
             log.debug(f"Phase data received #{self._data_count}: shape={data.shape}, channels={channel_num}")
 
-        tcp_start = time.perf_counter()
-        self.tcp_tab3_manager.enqueue_phase_data(data, self.params, self.get_tab3_comm_settings())
-        tcp_ms = (time.perf_counter() - tcp_start) * 1000
-
-        # Save original data if enabled (always save raw int32 data, regardless of rad option)
-        if self.data_saver is not None and self.data_saver.is_running:
-            save_start = time.perf_counter()
-            save_ok = self.data_saver.save_frame(data)
-            save_ms = (time.perf_counter() - save_start) * 1000
-            if not save_ok:
-                log.warning(f"Phase save enqueue failed at callback #{self._data_count}")
-            # Update save status periodically
-            if self._data_count % 20 == 0:
-                frame_info = f"{self.data_saver.frame_count}/{self.data_saver.frames_per_file}"
-                self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {frame_info} frames")
-
-                # Update storage queue status
-                queue_size = getattr(self.data_saver, '_data_queue', None)
-                if queue_size:
-                    storage_count = queue_size.qsize()
-                    storage_max = OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
-                    self._update_buffer_status(storage_count=storage_count, storage_max=storage_max)
-
         # rad conversion: display-only, does NOT affect saved data.
-        # Formula: rad = int32_value / 32767 * 蟺 (FPGA uses 32767 as full-scale 蟺)
+        # Formula: rad = int32_value / 32767 * pi (FPGA uses 32767 as full-scale pi)
         processed_data = data
         if self.params.display.rad_enable:
             rad_start = time.perf_counter()
@@ -1899,14 +1918,13 @@ class MainWindow(QMainWindow):
             queue_size = self.data_saver.queue_size if self.data_saver is not None and self.data_saver.is_running else 0
             log.debug(
                 f"Phase callback #{self._data_count}: bytes={data.nbytes / 1024 / 1024:.2f}MB, "
-                f"tcp_ms={tcp_ms:.1f}, save_ms={save_ms:.1f}, rad_ms={rad_ms:.1f}, "
-                f"display_ms={display_ms:.1f}, total_ms={elapsed:.1f}, "
-                f"save_ok={save_ok}, queue={queue_size}"
+                f"rad_ms={rad_ms:.1f}, display_ms={display_ms:.1f}, total_ms={elapsed:.1f}, "
+                f"queue={queue_size}"
             )
         if elapsed > 50:
             log.warning(
                 f"Slow _on_phase_data: {elapsed:.1f}ms "
-                f"(tcp={tcp_ms:.1f}, save={save_ms:.1f}, rad={rad_ms:.1f}, display={display_ms:.1f})"
+                f"(rad={rad_ms:.1f}, display={display_ms:.1f})"
             )
 
     @pyqtSlot(np.ndarray, int, int)
@@ -1916,24 +1934,10 @@ class MainWindow(QMainWindow):
         self._raw_data_count += 1
         self._last_data_time = time.time()
         start_time = time.perf_counter()
-        save_ms = 0.0
         display_ms = 0.0
-        save_ok = None
 
         if self._data_count % 10 == 0:
             log.debug(f"Raw data received #{self._data_count}: shape={data.shape}, type={data_type}, channels={channel_num}")
-
-        # Save data if enabled (frame-based saving for raw data)
-        if self.data_saver is not None and self.data_saver.is_running:
-            save_start = time.perf_counter()
-            save_ok = self.data_saver.save_frame(data)
-            save_ms = (time.perf_counter() - save_start) * 1000
-            if not save_ok:
-                log.warning(f"Raw save enqueue failed at callback #{self._data_count}")
-            # Update save status periodically
-            if self._data_count % 20 == 0:
-                frame_info = f"{self.data_saver.frame_count}/{self.data_saver.frames_per_file}"
-                self.save_status_label.setText(f"Save: #{self.data_saver.file_no} {frame_info} frames")
 
         # Throttle raw display to 1 Hz to reduce GPU load (raw data is high volume)
         current_time = time.time()
@@ -1957,11 +1961,10 @@ class MainWindow(QMainWindow):
             queue_size = self.data_saver.queue_size if self.data_saver is not None and self.data_saver.is_running else 0
             log.debug(
                 f"Raw callback #{self._raw_data_count}: bytes={data.nbytes / 1024 / 1024:.2f}MB, "
-                f"save_ms={save_ms:.1f}, display_ms={display_ms:.1f}, total_ms={elapsed:.1f}, "
-                f"save_ok={save_ok}, queue={queue_size}"
+                f"display_ms={display_ms:.1f}, total_ms={elapsed:.1f}, queue={queue_size}"
             )
         if elapsed > 50:
-            log.warning(f"Slow _on_raw_data: {elapsed:.1f}ms (save={save_ms:.1f}, display={display_ms:.1f})")
+            log.warning(f"Slow _on_raw_data: {elapsed:.1f}ms (display={display_ms:.1f})")
 
     @pyqtSlot(np.ndarray, int)
     def _on_monitor_data(self, data: np.ndarray, channel_num: int):
@@ -2292,17 +2295,18 @@ class MainWindow(QMainWindow):
             log.warning(f"Error in _update_status: {e}")
 
     def _check_acquisition_stall(self):
-        """Detect no-data stall during acquisition and trigger one-shot recovery."""
+        """Detect acquisition-thread read stalls, independent of GUI callback timing."""
         if self._recovery_in_progress:
             return
-        if self._last_data_time <= 0:
+        if self.acq_thread is None or not self.acq_thread.is_running:
             return
 
         now = time.time()
         if now - self._last_recovery_time < ACQ_RECOVERY_COOLDOWN_S:
             return
 
-        silent_s = now - self._last_data_time
+        snapshot = self.acq_thread.get_diagnostics_snapshot()
+        silent_s = snapshot["last_successful_read_age_s"]
         if silent_s < ACQ_STALL_TIMEOUT_S:
             return
 
@@ -2310,7 +2314,7 @@ class MainWindow(QMainWindow):
         self._last_recovery_time = now
         self._log_acquisition_diagnostics("stall_detected", force=True)
         log.error(
-            f"Acquisition stall detected: no data callbacks for {silent_s:.1f}s. "
+            f"Acquisition stall detected: no successful reads for {silent_s:.1f}s. "
             "Triggering auto-recovery (stop/start)."
         )
 
@@ -2332,7 +2336,7 @@ class MainWindow(QMainWindow):
             self._recovery_in_progress = False
 
     def _log_storage_queue_status(self):
-        """Periodically log storage queue occupancy for鐜板満鎺掓煡."""
+        """Periodically log storage queue occupancy for field diagnostics."""
         if not self.data_saver or not self.data_saver.is_running:
             return
 
@@ -2350,6 +2354,8 @@ class MainWindow(QMainWindow):
         """Emit a consolidated acquisition snapshot for field diagnostics."""
         if self.acq_thread is None:
             return
+        if not force and not self.acq_thread.is_running:
+            return
 
         now = time.time()
         if not force and now - self._last_acq_snapshot_log_time < 5.0:
@@ -2366,6 +2372,7 @@ class MainWindow(QMainWindow):
             f"waits={snapshot['last_wait_iterations']}",
             f"query_ms={snapshot['last_query_ms']:.1f}",
             f"read_ms={snapshot['last_read_ms']:.1f}",
+            f"read_age_s={snapshot['last_successful_read_age_s']:.1f}",
             f"monitor_ms={snapshot['last_monitor_read_ms']:.1f}",
             f"block_mb={snapshot['last_block_bytes'] / 1024 / 1024:.2f}",
             f"poll_ms={snapshot['polling_interval_ms']:.1f}",
@@ -2426,10 +2433,10 @@ class MainWindow(QMainWindow):
     def _on_mode_changed(self, checked):
         """Handle mode radio button changes"""
         if checked:  # Only respond to the checked button to avoid duplicate calls
-            # 瀹夊叏鍦版洿鏂版樉绀烘ā寮忓弬鏁帮紝閬垮厤鍦ㄨ繍琛屾椂閲嶆柊鏀堕泦鎵€鏈夊弬鏁?
+            # 仅更新显示模式参数，避免运行时重新收集全部参数
             try:
                 if hasattr(self, 'params') and self.params is not None:
-                    # 鍙洿鏂版樉绀烘ā寮忕浉鍏冲弬鏁?
+                    # 只更新显示模式相关参数
                     if self.mode_space_radio.isChecked():
                         self.params.display.mode = DisplayMode.SPACE
                         log.debug("Display mode changed to SPACE")
@@ -2507,6 +2514,8 @@ class MainWindow(QMainWindow):
             self._status_timer.stop()
         if hasattr(self, '_system_timer'):
             self._system_timer.stop()
+        if hasattr(self, '_display_timer'):
+            self._display_timer.stop()
 
         self._save_local_params()
 
@@ -2524,6 +2533,8 @@ class MainWindow(QMainWindow):
 
             if not self.acq_thread.wait_until_stopped(5000):
                 log.error("Acquisition thread still running during close; continue shutdown without force terminate")
+            self.acq_thread.set_full_data_handler(None)
+            self.acq_thread.clear_latest_display_data()
 
         # Stop data saver
         if self.data_saver is not None:
@@ -2581,7 +2592,7 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             log.warning(f"Error updating file estimates: {e}")
-            self.file_size_label.setText("~?MB/file")
+            self.file_size_label.setText("~-- MB/file")
 
     def _on_time_space_params_changed(self):
         """Handle time-space plot parameters change"""
@@ -2607,7 +2618,7 @@ class MainWindow(QMainWindow):
         """Handle time-space plot button state changes."""
         try:
             log.info(f"Time-space plot state changed: {'Enabled' if enabled else 'Disabled'}")
-            # 杩欓噷鍙互娣诲姞鍏朵粬鍝嶅簲閫昏緫锛屾瘮濡傜姸鎬佹爮鏄剧ず绛?
+            # 可在此扩展其他响应逻辑，例如更新状态栏
         except Exception as e:
             log.warning(f"Error handling plot state change: {e}")
 
