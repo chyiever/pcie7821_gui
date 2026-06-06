@@ -44,7 +44,7 @@ Dependencies:
 
 Author: PCIe-7821 Development Team
 Last Modified: [Current Date]
-Version: 26.1.24
+Version: 26.6.6
 
 Note: This module should be kept minimal - complex initialization logic
       should be moved to dedicated modules to maintain single responsibility.
@@ -260,8 +260,8 @@ Examples:
     app = QApplication(sys.argv)
 
     # Set application metadata for system integration
-    app.setApplicationName("eDAS-gh26.1.24")    # Used by system for window grouping
-    app.setApplicationVersion("26.1.24")        # Version for about dialogs, etc.
+    app.setApplicationName("eDAS-pt1g-gh-26.6.6")  # Used by system for window grouping
+    app.setApplicationVersion("26.6.6")             # Version for about dialogs, etc.
 
     # Apply modern visual style across all platforms
     app.setStyle('Fusion')  # Consistent modern appearance
@@ -282,7 +282,7 @@ Examples:
 
         # Indicate simulation mode in window title for user awareness
         if args.simulate:
-            window.setWindowTitle("eDAS-gh26.1.24 [SIMULATION MODE]")
+            window.setWindowTitle("eDAS-pt1g-gh-26.6.6 [SIMULATION MODE]")
 
         # Display main window to user
         window.show()

@@ -194,7 +194,11 @@ class TimeSpacePlotWidget(QWidget):
         self.histogram_widget.setMinimumHeight(400)
         self.histogram_widget.setBackground("w")
         self.histogram_widget.setImageItem(self.image_item)
-        self.histogram_widget.setLevels(self._vmin, self._vmax)
+        histogram_item = getattr(self.histogram_widget, "item", None)
+        region = getattr(histogram_item, "region", None)
+        if region is not None:
+            region.setMovable(False)
+        self._apply_color_levels()
 
         plot_item = getattr(self.histogram_widget, "plotItem", None)
         if plot_item is not None:
@@ -291,10 +295,10 @@ class TimeSpacePlotWidget(QWidget):
 
         self.vmin_spin = QDoubleSpinBox()
         self.vmin_spin.setRange(-10000.0, 10000.0)
-        self.vmin_spin.setDecimals(3)
+        self.vmin_spin.setDecimals(6)
         self.vmin_spin.setSingleStep(0.001)
         self.vmin_spin.setValue(self._vmin)
-        self.vmin_spin.setMaximumWidth(60)
+        self.vmin_spin.setMaximumWidth(85)
         self.vmin_spin.setFont(QFont("Times New Roman", 8))
         self.vmin_spin.valueChanged.connect(self._on_vmin_changed)
         layout.addWidget(self.vmin_spin, row, 2)
@@ -305,10 +309,10 @@ class TimeSpacePlotWidget(QWidget):
 
         self.vmax_spin = QDoubleSpinBox()
         self.vmax_spin.setRange(-10000.0, 10000.0)
-        self.vmax_spin.setDecimals(3)
+        self.vmax_spin.setDecimals(6)
         self.vmax_spin.setSingleStep(0.001)
         self.vmax_spin.setValue(self._vmax)
-        self.vmax_spin.setMaximumWidth(60)
+        self.vmax_spin.setMaximumWidth(85)
         self.vmax_spin.setFont(QFont("Times New Roman", 8))
         self.vmax_spin.valueChanged.connect(self._on_vmax_changed)
         layout.addWidget(self.vmax_spin, row, 4)
@@ -357,6 +361,18 @@ class TimeSpacePlotWidget(QWidget):
             self.image_item.setColorMap(colormap)
         if hasattr(self, "histogram_widget") and hasattr(self.histogram_widget, "gradient"):
             self.histogram_widget.gradient.setColorMap(colormap)
+
+    def _apply_color_levels(self):
+        """Apply the front-panel color range without enabling histogram auto-levels."""
+        if self._vmin >= self._vmax:
+            return
+        if hasattr(self, "image_item"):
+            self.image_item.setLevels((self._vmin, self._vmax))
+        if hasattr(self, "histogram_widget"):
+            self.histogram_widget.setLevels(self._vmin, self._vmax)
+            histogram_item = getattr(self.histogram_widget, "item", None)
+            if histogram_item is not None and hasattr(histogram_item, "setHistogramRange"):
+                histogram_item.setHistogramRange(self._vmin, self._vmax, padding=0.0)
 
     def _invalidate_display_buffer(self, clear_image: bool = False):
         self._display_buffer = None
@@ -450,15 +466,19 @@ class TimeSpacePlotWidget(QWidget):
         self.parametersChanged.emit()
 
     def _on_vmin_changed(self, value: float):
+        if value >= self._vmax:
+            self.vmin_spin.setValue(self._vmax - self.vmin_spin.singleStep())
+            return
         self._vmin = value
-        self.image_item.setLevels((self._vmin, self._vmax))
-        self.histogram_widget.setLevels(self._vmin, self._vmax)
+        self._apply_color_levels()
         self.parametersChanged.emit()
 
     def _on_vmax_changed(self, value: float):
+        if value <= self._vmin:
+            self.vmax_spin.setValue(self._vmin + self.vmax_spin.singleStep())
+            return
         self._vmax = value
-        self.image_item.setLevels((self._vmin, self._vmax))
-        self.histogram_widget.setLevels(self._vmin, self._vmax)
+        self._apply_color_levels()
         self.parametersChanged.emit()
 
     def _reset_to_defaults(self):
@@ -589,12 +609,15 @@ class TimeSpacePlotWidget(QWidget):
             return
 
         valid_columns = self._valid_block_count * self._display_block_width
-        display_data = np.ascontiguousarray(self._display_buffer[:, :valid_columns])
+        if valid_columns == self._display_buffer.shape[1]:
+            display_data = self._display_buffer
+        else:
+            display_data = np.ascontiguousarray(self._display_buffer[:, :valid_columns])
         total_duration_s = self._valid_block_count * self._display_block_duration_s
         distance_start, distance_end = self._current_distance_bounds
 
         self.image_item.setImage(display_data, autoLevels=False)
-        self.image_item.setLevels((self._vmin, self._vmax))
+        self._apply_color_levels()
         self.image_item.setRect(
             QRectF(
                 0.0,
@@ -603,9 +626,6 @@ class TimeSpacePlotWidget(QWidget):
                 float(max(distance_end - distance_start, 1)),
             )
         )
-        self.histogram_widget.setLevels(self._vmin, self._vmax)
-        self.histogram_widget.setImageItem(self.image_item)
-
         if not self._zoom_locked:
             self._view_box.enableAutoRange(x=True, y=True)
             self._view_box.autoRange(padding=0.0)
@@ -638,10 +658,19 @@ class TimeSpacePlotWidget(QWidget):
                 if value == params["colormap_type"]:
                     self.colormap_combo.setCurrentText(name)
                     break
-        if "vmin" in params:
-            self.vmin_spin.setValue(float(params["vmin"]))
-        if "vmax" in params:
-            self.vmax_spin.setValue(float(params["vmax"]))
+        if "vmin" in params or "vmax" in params:
+            vmin = float(params.get("vmin", self._vmin))
+            vmax = float(params.get("vmax", self._vmax))
+            if vmin < vmax:
+                self.vmin_spin.blockSignals(True)
+                self.vmax_spin.blockSignals(True)
+                self.vmin_spin.setValue(vmin)
+                self.vmax_spin.setValue(vmax)
+                self.vmin_spin.blockSignals(False)
+                self.vmax_spin.blockSignals(False)
+                self._vmin = vmin
+                self._vmax = vmax
+                self._apply_color_levels()
 
     def clear_data(self):
         self._invalidate_display_buffer(clear_image=True)

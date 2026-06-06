@@ -12,7 +12,7 @@ Data Flow: AcqThread --> full-data queues for storage/TCP
 Key Design:
 - All plotting happens in GUI thread via timer-driven latest-snapshot consumption
 - Raw display throttled to 1 Hz; phase display follows acq thread rate
-- rad conversion is display-only; storage always saves original int32
+- rad conversion is display-only; storage preserves the original acquisition dtype
 - Spectrum analysis delegated to RealTimeSpectrumAnalyzer with averaging
 """
 
@@ -59,6 +59,7 @@ log = get_logger("gui")
 
 ACQ_STALL_TIMEOUT_S = 8.0
 ACQ_RECOVERY_COOLDOWN_S = 20.0
+APP_DISPLAY_VERSION = "eDAS-pt1g-gh-26.6.6"
 
 
 # ----- MAIN APPLICATION WINDOW -----
@@ -108,6 +109,8 @@ class MainWindow(QMainWindow):
         self._last_recovery_time = 0.0
         self._full_data_count = 0
         self._tcp_settings_snapshot: Dict[str, Any] = {}
+        self._last_saver_error_shown = ""
+        self._last_saver_state_shown = ""
 
         # System monitoring
         self._last_system_update = 0
@@ -115,7 +118,7 @@ class MainWindow(QMainWindow):
         self._disk_free_gb = 0.0
 
         # Setup UI
-        self.setWindowTitle("eDAS-gh26.1.24")
+        self.setWindowTitle(APP_DISPLAY_VERSION)
         self.setMinimumSize(1400, 950)  # Slightly increased height to accommodate all content
 
         log.debug("Setting up UI...")
@@ -205,6 +208,8 @@ class MainWindow(QMainWindow):
         self._data_rate_label = QLabel("Data Rate: 0 MB/s")
         self._fiber_length_label = QLabel("Fiber Length: 0 m")
         self._point_num_label = QLabel("Point num: 0")  # Added point num display
+        self._institute_label = QLabel("中国科学院半导体研究所")
+        self._institute_label.setFont(QFont("等线", 10))
 
         # Add separators between status items
         self.statusBar.addWidget(self._device_status_label)
@@ -214,6 +219,7 @@ class MainWindow(QMainWindow):
         self.statusBar.addWidget(self._fiber_length_label)
         self.statusBar.addPermanentWidget(QLabel("  |  "))  # Separator
         self.statusBar.addWidget(self._point_num_label)
+        self.statusBar.addPermanentWidget(self._institute_label)
 
     def _create_header(self) -> QWidget:
         """Create header with logo and title"""
@@ -241,7 +247,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(logo_label)
 
         # Title - SimHei bold 28pt (Chinese UI text)
-        title_label = QLabel("Distributed Optical Fiber Sensing (eDAS)")
+        title_label = QLabel("Enhanced Distributed Acoustic Sensing (eDAS)")
         title_font = QFont("SimHei", 28, QFont.Bold)
         title_label.setFont(title_font)
         title_label.setAlignment(Qt.AlignCenter)
@@ -1726,6 +1732,8 @@ class MainWindow(QMainWindow):
                 points_per_frame=points_per_frame
             )
             self.save_status_label.setText(f"Save: {filename}")
+            self._last_saver_error_shown = ""
+            self._last_saver_state_shown = "running"
         else:
             self.save_status_label.setText("Save: Off")
 
@@ -1862,7 +1870,7 @@ class MainWindow(QMainWindow):
         saver = self.data_saver
         if saver is not None and saver.is_running:
             save_ok = saver.save_frame(data)
-            if not save_ok:
+            if not save_ok and not saver.saving_paused:
                 log.warning(f"Save enqueue failed at full block #{self._full_data_count}")
 
     def _drain_latest_display_data(self):
@@ -1898,7 +1906,8 @@ class MainWindow(QMainWindow):
         processed_data = data
         if self.params.display.rad_enable:
             rad_start = time.perf_counter()
-            processed_data = data.astype(np.float64) / 32767.0 * 3.141592654
+            processed_data = data.astype(np.float32)
+            processed_data *= np.float32(np.pi / 32767.0)
             rad_ms = (time.perf_counter() - rad_start) * 1000
 
         # Update display (use processed data)
@@ -2288,6 +2297,7 @@ class MainWindow(QMainWindow):
 
             # Update file size estimates
             self._update_file_estimates()
+            self._check_data_saver_health()
             self._log_acquisition_diagnostics("periodic")
             self._log_storage_queue_status()
 
@@ -2350,6 +2360,45 @@ class MainWindow(QMainWindow):
         log.info(f"Storage queue: {queue_size}/{queue_max}, dropped={dropped}")
         self._last_storage_queue_log_time = now
 
+    def _check_data_saver_health(self):
+        """Expose save pause, recovery, and fatal errors without repeated notifications."""
+        if self.data_saver is None or not hasattr(self.data_saver, "get_diagnostics_snapshot"):
+            return
+        saver = self.data_saver.get_diagnostics_snapshot()
+        last_error = str(saver.get("last_error", "")).strip()
+        saving_paused = bool(saver.get("saving_paused", False))
+        is_running = bool(saver.get("is_running", False))
+        recovery_count = int(saver.get("recovery_count", 0))
+
+        if saving_paused:
+            state = f"paused:{last_error}"
+            if state == self._last_saver_state_shown:
+                return
+            self._last_saver_state_shown = state
+            self._last_saver_error_shown = last_error
+            self.save_status_label.setText("Save: Paused (disk full)")
+            self.statusBar.showMessage("Saving paused: disk full; acquisition continues and recovery is automatic")
+            log.error(f"Saving paused; waiting for disk space: {last_error}")
+            return
+
+        if is_running and recovery_count > 0:
+            state = f"recovered:{recovery_count}"
+            if state == self._last_saver_state_shown:
+                return
+            self._last_saver_state_shown = state
+            self._last_saver_error_shown = ""
+            self.save_status_label.setText(f"Save: {self.data_saver.current_filename}")
+            self.statusBar.showMessage("Disk space available; saving automatically resumed", 10000)
+            log.info(f"Saving automatically resumed (recovery #{recovery_count})")
+            return
+
+        if last_error and last_error != self._last_saver_error_shown:
+            self._last_saver_state_shown = f"fatal:{last_error}"
+            self._last_saver_error_shown = last_error
+            self.save_status_label.setText(f"Save error: {last_error}")
+            self.statusBar.showMessage(f"Saving stopped: {last_error}", 10000)
+            log.error(f"Saving stopped after fatal error: {last_error}")
+
     def _log_acquisition_diagnostics(self, reason: str, force: bool = False):
         """Emit a consolidated acquisition snapshot for field diagnostics."""
         if self.acq_thread is None:
@@ -2392,6 +2441,8 @@ class MainWindow(QMainWindow):
                 f"save_dropped={saver['dropped_blocks']}",
                 f"save_written={saver['blocks_written']}",
                 f"save_last_write_ms={saver['last_write_ms']:.1f}",
+                f"save_paused={saver['saving_paused']}",
+                f"save_recoveries={saver['recovery_count']}",
             ])
 
         log.info("Acq snapshot: " + ", ".join(parts))
@@ -2584,7 +2635,14 @@ class MainWindow(QMainWindow):
                 points_per_frame = point_num
 
             # One saved block corresponds to one acquisition callback.
-            block_size_mb = points_per_frame * max(1, frame_load_num) * channel_num * 4 / (1024 * 1024)
+            bytes_per_point = 4 if data_source == DataSource.PHASE else 2
+            block_size_mb = (
+                points_per_frame
+                * max(1, frame_load_num)
+                * channel_num
+                * bytes_per_point
+                / (1024 * 1024)
+            )
             file_size_mb = block_size_mb * frames_per_file
 
             # Update label

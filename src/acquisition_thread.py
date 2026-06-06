@@ -111,6 +111,7 @@ class AcquisitionThread(QThread):
         self._latest_display_lock = threading.Lock()
         self._full_data_handler: Optional[Callable[[np.ndarray, int, int], None]] = None
         self._last_successful_read_time = 0.0
+        self._expected_block_duration_ms = 0.0
 
         # Dynamic polling: switch between fast/slow intervals based on buffer fill.
         # Hysteresis between high/low thresholds prevents oscillation.
@@ -146,6 +147,7 @@ class AcquisitionThread(QThread):
         block_points_total = points_per_frame * self._frame_num * self._channel_num
         block_bytes_total = block_points_total * bytes_per_point
         block_duration_ms = self._frame_num / max(params.basic.scan_rate, 1) * 1000.0
+        self._expected_block_duration_ms = block_duration_ms
 
         log.info(f"Configured: total_points={self._total_point_num}, "
                  f"points_after_merge={self._point_num_after_merge}, "
@@ -392,8 +394,12 @@ class AcquisitionThread(QThread):
                 self._frames_acquired += self._frame_num
 
                 loop_time = (time.perf_counter() - loop_start) * 1000
-                if loop_time > 100:
-                    log.warning(f"Slow loop iteration: {loop_time:.1f}ms")
+                slow_threshold_ms = max(100.0, self._expected_block_duration_ms * 1.5)
+                if loop_time > slow_threshold_ms:
+                    log.warning(
+                        f"Slow loop iteration: {loop_time:.1f}ms "
+                        f"(expected_block={self._expected_block_duration_ms:.1f}ms)"
+                    )
 
         except Exception as e:
             log.exception(f"Unexpected acquisition error: {e}")

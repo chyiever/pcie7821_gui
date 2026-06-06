@@ -2,7 +2,7 @@
 PCIe-7821 Data Saver Module
 
 Asynchronous data saving with queue-based buffering.
-Saves original phase data as 32-bit signed int binary (no rad conversion).
+Preserves acquisition dtype: Raw/IQ int16 and Phase int32.
 
 Architecture: Producer (acq thread) -> Queue -> Consumer (save thread) -> Disk
 Non-blocking: queue.put_nowait() drops data if full to avoid backpressure.
@@ -14,6 +14,7 @@ Classes:
 """
 
 import os
+import errno
 import queue
 import threading
 import time
@@ -66,6 +67,11 @@ class DataSaver:
         self._max_queue_size_seen = 0
         self._last_write_ms = 0.0
         self._last_write_bytes = 0
+        self._last_error = ""
+        self._saving_paused = False
+        self._recovery_count = 0
+        self._next_recovery_attempt = 0.0
+        self._recovery_retry_s = 2.0
 
     def start(self, file_no: Optional[int] = None, scan_rate: int = 2000) -> str:
         """
@@ -111,6 +117,10 @@ class DataSaver:
         self._max_queue_size_seen = 0
         self._last_write_ms = 0.0
         self._last_write_bytes = 0
+        self._last_error = ""
+        self._saving_paused = False
+        self._recovery_count = 0
+        self._next_recovery_attempt = 0.0
 
         # Clear queue
         while not self._data_queue.empty():
@@ -128,27 +138,26 @@ class DataSaver:
 
     def stop(self):
         """Stop data saving and close file"""
-        if not self._running:
-            return
-
+        was_running = self._running
         self._running = False
 
         # Wait for save thread to drain queued data and exit.
-        if self._save_thread is not None:
-            try:
-                self._data_queue.put(None, timeout=1.0)
-            except queue.Full:
-                log.warning("Save queue full while stopping; waiting to enqueue sentinel")
-                self._data_queue.put(None)
-
+        if (
+            self._save_thread is not None
+            and self._save_thread is not threading.current_thread()
+            and self._save_thread.is_alive()
+        ):
+            if was_running:
+                try:
+                    self._data_queue.put(None, timeout=1.0)
+                except queue.Full:
+                    log.warning("Save queue full while stopping; waiting to enqueue sentinel")
+                    self._data_queue.put(None)
             self._save_thread.join(timeout=5.0)
-            self._save_thread = None
+        self._save_thread = None
 
         # Close file after the save thread has finished all pending writes.
-        if self._file_handle is not None:
-            self._file_handle.flush()
-            self._file_handle.close()
-            self._file_handle = None
+        self._close_file_handle()
 
         log.info(f"Stopped saving. Bytes written: {self._bytes_written}, "
                  f"Blocks: {self._blocks_written}, Dropped: {self._dropped_blocks}, "
@@ -160,12 +169,15 @@ class DataSaver:
         Queue data for saving.
 
         Args:
-            data: NumPy array to save (original int32 phase data, no rad conversion applied)
+            data: Original acquisition NumPy array; dtype is preserved on disk
 
         Returns:
             True if data was queued, False if queue is full
         """
         if not self._running:
+            return False
+        if self._saving_paused:
+            self._dropped_blocks += 1
             return False
 
         try:
@@ -198,6 +210,11 @@ class DataSaver:
     def _save_loop(self):
         """Background thread for saving data"""
         while True:
+            if not self._running and self._data_queue.empty():
+                break
+            if self._saving_paused and self._running:
+                self._attempt_disk_recovery()
+
             try:
                 item = self._data_queue.get(timeout=0.1)
             except queue.Empty:
@@ -209,12 +226,117 @@ class DataSaver:
             try:
                 if item is None:  # Sentinel
                     break
+                if self._saving_paused:
+                    if item is not self._split_marker:
+                        self._dropped_blocks += 1
+                    continue
                 if item is self._split_marker:
                     self._handle_split_request()
                     continue
                 self._write_data(item)
             except Exception as e:
-                log.error(f"DataSaver error: {e}")
+                if self._is_disk_full_error(e):
+                    self._pause_for_disk_full(e, item)
+                    continue
+                self._last_error = str(e)
+                self._running = False
+                self._discard_pending_data()
+                log.error(f"DataSaver fatal error, stopping save thread: {e}")
+                break
+
+    @staticmethod
+    def _is_disk_full_error(error: Exception) -> bool:
+        """Return whether an exception indicates that the target disk is full."""
+        return (
+            isinstance(error, OSError)
+            and (
+                error.errno == errno.ENOSPC
+                or getattr(error, "winerror", None) == 112
+            )
+        )
+
+    def _discard_pending_data(self) -> int:
+        """Discard queued data without blocking acquisition."""
+        discarded = 0
+        while True:
+            try:
+                queued_item = self._data_queue.get_nowait()
+            except queue.Empty:
+                break
+            if queued_item is not None and queued_item is not self._split_marker:
+                discarded += 1
+        self._dropped_blocks += discarded
+        return discarded
+
+    def _pause_for_disk_full(self, error: Exception, failed_item=None):
+        """Pause writes after disk-full while keeping the save worker alive."""
+        self._last_error = str(error)
+        self._saving_paused = True
+        self._next_recovery_attempt = time.monotonic() + self._recovery_retry_s
+        if failed_item is not None and failed_item is not self._split_marker:
+            self._dropped_blocks += 1
+        discarded = self._discard_pending_data()
+        self._close_file_handle()
+        log.error(
+            f"Disk full; saving paused and acquisition continues: {error}. "
+            f"Discarded queued blocks: {discarded}. Retrying every {self._recovery_retry_s:.1f}s"
+        )
+
+    def _attempt_disk_recovery(self):
+        """Periodically create a new file after disk space becomes available."""
+        if time.monotonic() < self._next_recovery_attempt:
+            return
+        self._next_recovery_attempt = time.monotonic() + self._recovery_retry_s
+        try:
+            self.save_path.mkdir(parents=True, exist_ok=True)
+            self._open_recovery_file()
+        except Exception as e:
+            self._last_error = str(e)
+            if not self._is_disk_full_error(e):
+                log.warning(f"Saving recovery attempt failed: {e}")
+            return
+
+        self._saving_paused = False
+        self._last_error = ""
+        self._recovery_count += 1
+        log.info(
+            f"Disk space available; saving automatically resumed to "
+            f"{self._current_filename} (recovery #{self._recovery_count})"
+        )
+
+    def _open_recovery_file(self):
+        """Open a new base-format file after a disk-full pause."""
+        self._file_no += 1
+        now = datetime.now()
+        self._current_filename = (
+            f"{self._file_no}-{now.hour:02d}-{now.minute:02d}-"
+            f"{now.second:02d}-{self._scan_rate}.bin"
+        )
+        self._file_handle = open(self.save_path / self._current_filename, "wb")
+        self._bytes_written = 0
+
+    def _close_file_handle(self, suppress_errors: bool = True):
+        """Best-effort close; a full disk can also make flush fail."""
+        handle = self._file_handle
+        self._file_handle = None
+        if handle is None:
+            return
+        flush_error = None
+        try:
+            handle.flush()
+        except Exception as e:
+            flush_error = e
+            if suppress_errors:
+                log.warning(f"Failed to flush save file while closing: {e}")
+        try:
+            handle.close()
+        except Exception as e:
+            if suppress_errors:
+                log.warning(f"Failed to close save file: {e}")
+            elif flush_error is None:
+                raise
+        if flush_error is not None and not suppress_errors:
+            raise flush_error
 
     def _handle_split_request(self):
         """Handle a queued split request. Base saver does not split files."""
@@ -225,9 +347,8 @@ class DataSaver:
         if self._file_handle is not None:
             start = time.perf_counter()
             if isinstance(data, np.ndarray):
-                if data.dtype != np.int32:
-                    data = data.astype(np.int32)
-                payload = data.tobytes()
+                # Preserve acquisition dtype: Raw/IQ is int16, Phase is int32.
+                payload = np.ascontiguousarray(data).tobytes()
             else:
                 payload = data
 
@@ -255,12 +376,20 @@ class DataSaver:
             "last_write_ms": self._last_write_ms,
             "last_write_bytes": self._last_write_bytes,
             "is_running": self._running,
+            "last_error": self._last_error,
+            "saving_paused": self._saving_paused,
+            "recovery_count": self._recovery_count,
         }
 
     @property
     def is_running(self) -> bool:
         """Check if saver is running"""
         return self._running
+
+    @property
+    def saving_paused(self) -> bool:
+        """Check whether disk-full recovery is pending."""
+        return self._saving_paused
 
     @property
     def bytes_written(self) -> int:
@@ -372,6 +501,10 @@ class FrameBasedFileSaver(DataSaver):
         self._bytes_written = 0
         self._blocks_written = 0
         self._dropped_blocks = 0
+        self._last_error = ""
+        self._saving_paused = False
+        self._recovery_count = 0
+        self._next_recovery_attempt = 0.0
 
         # Clear queue
         while not self._data_queue.empty():
@@ -434,11 +567,8 @@ class FrameBasedFileSaver(DataSaver):
 
     def _handle_split_request(self):
         """Close current file and open new one in the save thread."""
+        self._close_file_handle(suppress_errors=False)
         self._total_bytes_all_files += self._bytes_written
-
-        if self._file_handle is not None:
-            self._file_handle.flush()
-            self._file_handle.close()
 
         self._file_no += 1
         self._current_filename = self._generate_filename()
@@ -449,6 +579,16 @@ class FrameBasedFileSaver(DataSaver):
         self._total_files_created += 1
 
         log.info(f"Split to new file: {self._current_filename} (File #{self._total_files_created})")
+
+    def _open_recovery_file(self):
+        """Open a new frame-based file after disk space becomes available."""
+        self._total_bytes_all_files += self._bytes_written
+        self._file_no += 1
+        self._current_filename = self._generate_filename()
+        self._file_handle = open(self.save_path / self._current_filename, "wb")
+        self._bytes_written = 0
+        self._frame_count = 0
+        self._total_files_created += 1
 
     def stop(self):
         """Stop and update total statistics"""
