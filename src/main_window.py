@@ -12,7 +12,7 @@ Data Flow: AcqThread --> full-data queues for storage/TCP
 Key Design:
 - All plotting happens in GUI thread via timer-driven latest-snapshot consumption
 - Raw display throttled to 1 Hz; phase display follows acq thread rate
-- rad conversion is display-only; storage preserves the original acquisition dtype
+- rad conversion is display-only; storage always saves original int32
 - Spectrum analysis delegated to RealTimeSpectrumAnalyzer with averaging
 """
 
@@ -109,8 +109,6 @@ class MainWindow(QMainWindow):
         self._last_recovery_time = 0.0
         self._full_data_count = 0
         self._tcp_settings_snapshot: Dict[str, Any] = {}
-        self._last_saver_error_shown = ""
-        self._last_saver_state_shown = ""
 
         # System monitoring
         self._last_system_update = 0
@@ -1732,8 +1730,6 @@ class MainWindow(QMainWindow):
                 points_per_frame=points_per_frame
             )
             self.save_status_label.setText(f"Save: {filename}")
-            self._last_saver_error_shown = ""
-            self._last_saver_state_shown = "running"
         else:
             self.save_status_label.setText("Save: Off")
 
@@ -1870,7 +1866,7 @@ class MainWindow(QMainWindow):
         saver = self.data_saver
         if saver is not None and saver.is_running:
             save_ok = saver.save_frame(data)
-            if not save_ok and not saver.saving_paused:
+            if not save_ok:
                 log.warning(f"Save enqueue failed at full block #{self._full_data_count}")
 
     def _drain_latest_display_data(self):
@@ -2297,7 +2293,6 @@ class MainWindow(QMainWindow):
 
             # Update file size estimates
             self._update_file_estimates()
-            self._check_data_saver_health()
             self._log_acquisition_diagnostics("periodic")
             self._log_storage_queue_status()
 
@@ -2360,45 +2355,6 @@ class MainWindow(QMainWindow):
         log.info(f"Storage queue: {queue_size}/{queue_max}, dropped={dropped}")
         self._last_storage_queue_log_time = now
 
-    def _check_data_saver_health(self):
-        """Expose save pause, recovery, and fatal errors without repeated notifications."""
-        if self.data_saver is None or not hasattr(self.data_saver, "get_diagnostics_snapshot"):
-            return
-        saver = self.data_saver.get_diagnostics_snapshot()
-        last_error = str(saver.get("last_error", "")).strip()
-        saving_paused = bool(saver.get("saving_paused", False))
-        is_running = bool(saver.get("is_running", False))
-        recovery_count = int(saver.get("recovery_count", 0))
-
-        if saving_paused:
-            state = f"paused:{last_error}"
-            if state == self._last_saver_state_shown:
-                return
-            self._last_saver_state_shown = state
-            self._last_saver_error_shown = last_error
-            self.save_status_label.setText("Save: Paused (disk full)")
-            self.statusBar.showMessage("Saving paused: disk full; acquisition continues and recovery is automatic")
-            log.error(f"Saving paused; waiting for disk space: {last_error}")
-            return
-
-        if is_running and recovery_count > 0:
-            state = f"recovered:{recovery_count}"
-            if state == self._last_saver_state_shown:
-                return
-            self._last_saver_state_shown = state
-            self._last_saver_error_shown = ""
-            self.save_status_label.setText(f"Save: {self.data_saver.current_filename}")
-            self.statusBar.showMessage("Disk space available; saving automatically resumed", 10000)
-            log.info(f"Saving automatically resumed (recovery #{recovery_count})")
-            return
-
-        if last_error and last_error != self._last_saver_error_shown:
-            self._last_saver_state_shown = f"fatal:{last_error}"
-            self._last_saver_error_shown = last_error
-            self.save_status_label.setText(f"Save error: {last_error}")
-            self.statusBar.showMessage(f"Saving stopped: {last_error}", 10000)
-            log.error(f"Saving stopped after fatal error: {last_error}")
-
     def _log_acquisition_diagnostics(self, reason: str, force: bool = False):
         """Emit a consolidated acquisition snapshot for field diagnostics."""
         if self.acq_thread is None:
@@ -2441,8 +2397,6 @@ class MainWindow(QMainWindow):
                 f"save_dropped={saver['dropped_blocks']}",
                 f"save_written={saver['blocks_written']}",
                 f"save_last_write_ms={saver['last_write_ms']:.1f}",
-                f"save_paused={saver['saving_paused']}",
-                f"save_recoveries={saver['recovery_count']}",
             ])
 
         log.info("Acq snapshot: " + ", ".join(parts))
@@ -2635,14 +2589,7 @@ class MainWindow(QMainWindow):
                 points_per_frame = point_num
 
             # One saved block corresponds to one acquisition callback.
-            bytes_per_point = 4 if data_source == DataSource.PHASE else 2
-            block_size_mb = (
-                points_per_frame
-                * max(1, frame_load_num)
-                * channel_num
-                * bytes_per_point
-                / (1024 * 1024)
-            )
+            block_size_mb = points_per_frame * max(1, frame_load_num) * channel_num * 4 / (1024 * 1024)
             file_size_mb = block_size_mb * frames_per_file
 
             # Update label
