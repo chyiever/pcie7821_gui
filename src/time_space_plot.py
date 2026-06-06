@@ -140,10 +140,12 @@ class TimeSpacePlotWidget(QWidget):
         layout.addWidget(control_panel)
 
         plot_layout = QHBoxLayout()
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        plot_layout.setSpacing(6)
         self._create_plot_area()
         plot_layout.addWidget(self.plot_widget, 1)
         self._create_colorbar()
-        plot_layout.addWidget(self.histogram_widget)
+        plot_layout.addWidget(self.histogram_widget, 0)
 
         plot_container = QWidget()
         plot_container.setLayout(plot_layout)
@@ -190,7 +192,8 @@ class TimeSpacePlotWidget(QWidget):
 
     def _create_colorbar(self):
         self.histogram_widget = pg.HistogramLUTWidget()
-        self.histogram_widget.setFixedWidth(90)
+        self.histogram_widget.setMinimumWidth(140)
+        self.histogram_widget.setMaximumWidth(180)
         self.histogram_widget.setMinimumHeight(400)
         self.histogram_widget.setBackground("w")
         self.histogram_widget.setImageItem(self.image_item)
@@ -199,7 +202,16 @@ class TimeSpacePlotWidget(QWidget):
         if region is not None:
             region.setMovable(False)
         self._apply_color_levels()
+        self._style_histogram_widget()
+        QTimer.singleShot(100, self._style_histogram_widget)
 
+        self._apply_colormap()
+
+    def _style_histogram_widget(self):
+        """Apply stable colorbar styling after pyqtgraph creates child items."""
+        if not hasattr(self, "histogram_widget"):
+            return
+        self.histogram_widget.setBackground("w")
         plot_item = getattr(self.histogram_widget, "plotItem", None)
         if plot_item is not None:
             axis = plot_item.getAxis("left")
@@ -207,8 +219,11 @@ class TimeSpacePlotWidget(QWidget):
                 axis.setTickFont(QFont("Times New Roman", 8))
                 axis.setPen("k")
                 axis.setTextPen("k")
+                axis.setStyle(showValues=True)
 
-        self._apply_colormap()
+        gradient = getattr(self.histogram_widget, "gradient", None)
+        if gradient is not None and hasattr(gradient, "setTickFont"):
+            gradient.setTickFont(QFont("Times New Roman", 7))
 
     def _create_control_panel(self):
         group = QGroupBox()
@@ -370,9 +385,34 @@ class TimeSpacePlotWidget(QWidget):
             self.image_item.setLevels((self._vmin, self._vmax))
         if hasattr(self, "histogram_widget"):
             self.histogram_widget.setLevels(self._vmin, self._vmax)
-            histogram_item = getattr(self.histogram_widget, "item", None)
-            if histogram_item is not None and hasattr(histogram_item, "setHistogramRange"):
-                histogram_item.setHistogramRange(self._vmin, self._vmax, padding=0.0)
+
+    def _update_histogram_range(self, display_data: np.ndarray):
+        """Show the full data distribution while keeping front-panel color levels fixed."""
+        if not hasattr(self, "histogram_widget") or display_data.size == 0:
+            return
+
+        finite_mask = np.isfinite(display_data)
+        if not np.any(finite_mask):
+            histogram_min, histogram_max = self._vmin, self._vmax
+        else:
+            if np.all(finite_mask):
+                data_min = float(np.min(display_data))
+                data_max = float(np.max(display_data))
+            else:
+                finite_data = display_data[finite_mask]
+                data_min = float(np.min(finite_data))
+                data_max = float(np.max(finite_data))
+            histogram_min = min(data_min, self._vmin)
+            histogram_max = max(data_max, self._vmax)
+
+        if histogram_min >= histogram_max:
+            padding = max(abs(histogram_min) * 0.05, 1e-9)
+            histogram_min -= padding
+            histogram_max += padding
+
+        histogram_item = getattr(self.histogram_widget, "item", None)
+        if histogram_item is not None and hasattr(histogram_item, "setHistogramRange"):
+            histogram_item.setHistogramRange(histogram_min, histogram_max, padding=0.05)
 
     def _invalidate_display_buffer(self, clear_image: bool = False):
         self._display_buffer = None
@@ -618,6 +658,7 @@ class TimeSpacePlotWidget(QWidget):
 
         self.image_item.setImage(display_data, autoLevels=False)
         self._apply_color_levels()
+        self._update_histogram_range(display_data)
         self.image_item.setRect(
             QRectF(
                 0.0,
