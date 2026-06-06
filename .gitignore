@@ -35,6 +35,7 @@ logs/
 .vscode/
 .idea/
 .claude/
+other_files/
 *.swp
 *.swo
 *~
