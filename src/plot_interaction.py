@@ -1,13 +1,10 @@
 """
-Reusable plot interaction helpers.
+`src/plot_interaction.py` 提供统一的实时绘图交互辅助组件，核心是 `ZoomablePlotViewBox`。
 
-This module provides a custom ViewBox with:
-- left-drag rectangle zoom
-- Shift + left-drag horizontal pan
-- mouse wheel zoom
-- right-click "View All" restore entry
+这个模块不处理业务数据，而是把多个图之间应保持一致的交互语义集中起来。当前约定包括左键框选放大、`Shift + 左键拖拽` 横向平移、滚轮缩放以及右键 `View All` 恢复全视图。主窗口中的时域图、监测图和 Time-Space 图都复用这一交互层。
+
+把这些规则抽成独立模块，能显著降低维护成本，也能避免不同图之间出现不一致的交互行为。
 """
-
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import QAction, QMenu

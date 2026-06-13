@@ -1,33 +1,10 @@
 """
-PCIe-7821 DAS Configuration Module
+`src/config.py` 负责定义整个 PCIe-7821 eDAS 上位机的参数模型、枚举、校验规则和派生计算函数。
 
-This module provides comprehensive configuration management for the PCIe-7821
-Distributed Acoustic Sensing (DAS) acquisition system. It defines all system
-parameters, data structures, validation functions, and configuration mappings
-used throughout the application.
+当前版本中，`AllParams` 及其下属 dataclass 已经成为 GUI、采集线程、TCP 发送、Time-Space 控件和保存链路之间共享的事实标准接口。这个模块既表达硬件参数，也表达上位机策略参数，因此是后续扩展配置持久化、脚本化测试和离线回放时必须首先保持稳定的边界。
 
-Key Features:
-- Centralized parameter management with dataclass structures
-- Hardware constraint definitions and validation
-- Option mappings for GUI combo boxes
-- Error code definitions and lookup
-- Performance optimization constants
-
-Usage:
-    from config import AllParams, validate_point_num
-
-    params = AllParams()
-    valid, msg = validate_point_num(params.basic.point_num_per_scan,
-                                   params.upload.channel_num)
-
-Author: PCIe-7821 Development Team
-Last Modified: [Current Date]
-Version: 1.0.0
-
-Note: Future modifications should maintain backward compatibility with
-      existing parameter structures and validation logic.
+需要特别注意的是，`frame_load_num` 属于软件侧批量读取策略，`frame_plot_num` 属于纯显示参数。把这两类参数分开表达，是当前版本避免现场调参歧义的重要经验。
 """
-
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 from enum import IntEnum

@@ -1,43 +1,10 @@
 """
-PCIe-7821 FFT Spectrum Analysis Module
+`src/spectrum_analyzer.py` 封装实时频谱与 PSD 分析逻辑，服务于主窗口中的频谱图。
 
-This module provides comprehensive frequency domain analysis capabilities for
-the PCIe-7821 DAS acquisition system. It implements FFT-based spectrum analysis
-with support for various window functions, power spectrum calculation, and
-Power Spectral Density (PSD) computation.
+这个模块与采集、GUI 控件和 DLL 读取解耦得比较干净。它主要关心输入数组、采样率、窗函数、平均次数和功率谱/功率谱密度的计算方式，不直接依赖界面组件，因此既可以被当前实时 GUI 调用，也适合后续离线分析或自动测试脚本复用。
 
-Key Features:
-- Multiple window functions (Rectangular, Hanning, Hamming, Blackman, Flat-top)
-- Power Spectrum and Power Spectral Density modes
-- Window function correction for accurate measurements
-- Real-time spectrum averaging for noise reduction
-- Optimized caching for window functions
-- Support for different data types (int16 raw, int32 phase)
-
-Technical Implementation:
-- Single-sided spectrum calculation (positive frequencies only)
-- Coherent gain correction for window functions
-- Noise bandwidth correction for PSD calculations
-- Linear domain averaging to preserve statistical properties
-
-Usage:
-    from spectrum_analyzer import RealTimeSpectrumAnalyzer, WindowType
-
-    analyzer = RealTimeSpectrumAnalyzer(WindowType.HANNING, averaging_count=5)
-    freq, spectrum, df = analyzer.update(data, sample_rate, psd_mode=True)
-
-Author: PCIe-7821 Development Team
-Last Modified: [Current Date]
-Version: 1.0.0
-
-References:
-- Oppenheim & Schafer: "Discrete-Time Signal Processing"
-- Harris: "On the Use of Windows for Harmonic Analysis with the DFT"
-
-Note: Window correction factors are calibrated for accurate power measurements.
-      Future enhancements may include additional window types and spectral features.
+当前版本的重要约定是：Raw 数据与 Phase 数据虽然都能进入同一分析器，但物理语义不同，主窗口会根据数据源决定更适合显示功率谱还是 PSD。
 """
-
 import numpy as np
 from typing import Tuple, Optional
 from enum import IntEnum

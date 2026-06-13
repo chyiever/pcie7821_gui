@@ -1,5 +1,10 @@
-"""Packet builder for the Tab3 TCP client."""
+"""
+`src/tcp_tab3/tcp_packet_builder.py` 负责把一块 PHASE 采集数据转换为 Tab3 所需的 TCP 协议字节流。
 
+当前版本中，包构建步骤非常明确：先按采集上下文把一维相位块恢复成 time × space 矩阵，再执行用户设定的空间范围截取、时域降采样和空域降采样，随后把结果转换为大端 `float64` 载荷，并补齐固定格式头部。
+
+这里的设计经验是：协议构建必须自带尺寸校验和语义校验，尽量把坏包截留在本地，而不是发送给下游后再排查。
+"""
 from __future__ import annotations
 
 import math

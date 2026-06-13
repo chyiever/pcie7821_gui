@@ -1,18 +1,10 @@
 """
-PCIe-7821 Data Saver Module
+`src/data_saver.py` 负责把采集得到的完整数据块异步写入磁盘，是实时链路中的后台存储模块。
 
-Asynchronous data saving with queue-based buffering.
-Saves original phase data as 32-bit signed int binary (no rad conversion).
+当前工程采用的是典型生产者-消费者模型。前台线程只做 `put_nowait()` 入队，不在采集回调里直接执行磁盘写入；后台保存线程串行取队列、必要时完成 `dtype` 统一、写入二进制文件并处理分文件请求。这样做的目标，是在采集与磁盘吞吐冲突时优先保护采集线程与 GUI 的实时性。
 
-Architecture: Producer (acq thread) -> Queue -> Consumer (save thread) -> Disk
-Non-blocking: queue.put_nowait() drops data if full to avoid backpressure.
-
-Classes:
-- DataSaver: Base async saver with single-file output
-- FrameBasedFileSaver: Auto-splits files after N frames (primary)
-- TimedFileSaver: Auto-splits files by time interval (legacy)
+如果后续需要更强的数据可靠性，应在这里继续扩展文件头、元数据索引、写入确认或失败恢复策略，而不是把写盘重新塞回 GUI 线程。
 """
-
 import os
 import queue
 import threading

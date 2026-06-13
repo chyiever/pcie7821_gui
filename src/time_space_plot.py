@@ -1,10 +1,10 @@
 """
-Time-space plot widget based on PlotWidget + ImageItem.
+`src/time_space_plot.py` 实现 Tab2 的 Time-Space 图控件，是当前项目中最复杂的自定义绘图部件之一。
 
-The widget keeps a fixed-size rolling display buffer so realtime updates do not
-rebuild the whole image with repeated concatenation.
+最新版本的核心目标已经从“先把图画出来”转向“在持续实时刷新下稳定画图”。因此这里没有采用每次全量拼接历史矩阵的简单做法，而是维护固定大小的滚动显示缓冲，并通过 `PlotWidget + ImageItem + HistogramLUTWidget` 组合完成图像显示、坐标轴控制和颜色条管理。
+
+对类似项目而言，本文件最值得参考的不是控件表面，而是它对显示语义、滚动缓冲、颜色范围和缩放锁定的系统化处理。
 """
-
 from __future__ import annotations
 
 from typing import Dict, Optional, Tuple

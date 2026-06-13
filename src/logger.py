@@ -1,44 +1,10 @@
 """
-PCIe-7821 Centralized Logging System
+`src/logger.py` 提供整个应用统一的日志设施，包括命名空间、线程信息和性能计时格式。
 
-This module provides comprehensive logging capabilities for the PCIe-7821 DAS
-acquisition system. It features thread-aware logging with performance timing,
-formatted output for debugging multi-threaded operations, and flexible output
-destinations (console and file).
+对这个项目来说，日志不是附属品，而是问题定位主工具。采集线程、DLL 包装层、主窗口、TCP 发送和保存线程都依赖这里提供的 `get_logger()`、`setup_logging()` 和 `PerformanceTimer`。统一日志格式之后，现场就能把 `read_ms`、`query_ms`、`gui_skips`、`queue_size`、`send_ms` 这类指标放到同一时间轴上观察。
 
-Key Features:
-- Multi-threaded logging with thread identification
-- Performance timing integration with millisecond precision
-- Structured log format with elapsed time tracking
-- Configurable console and file output
-- UTF-8 encoding support for international characters
-- Performance measurement decorators and context managers
-
-Architecture:
-- ThreadFormatter: Enhanced formatter with timing and thread info
-- setup_logging(): Central logging configuration entry point
-- get_logger(): Namespace-aware logger factory
-- log_timing(): Performance measurement decorator
-- PerformanceTimer: Context manager for code block timing
-
-Usage:
-    from logger import setup_logging, get_logger
-
-    # Initialize logging system
-    setup_logging(level=logging.INFO, log_file="app.log")
-
-    # Get module-specific logger
-    log = get_logger("acquisition")
-    log.info("Starting data acquisition")
-
-Author: PCIe-7821 Development Team
-Last Modified: [Current Date]
-Version: 1.0.0
-
-Note: Thread-safe logging is guaranteed by Python's logging module.
-      Performance timing uses high-resolution perf_counter() for accuracy.
+未来做同类高速采集项目时，应继续沿用“默认可定位”的日志策略：日志名按模块分层，格式中保留线程名与运行时长，文件输出使用 UTF-8，性能敏感路径提供轻量计时器。
 """
-
 import logging
 import sys
 import threading

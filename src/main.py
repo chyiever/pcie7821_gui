@@ -1,55 +1,10 @@
 """
-PCIe-7821 DAS Acquisition Software - Main Entry Point
+`src/main.py` 是应用主入口，负责把命令行、日志系统、Qt 应用生命周期和主窗口创建串起来。
 
-This is the primary entry point for the PCIe-7821 Distributed Acoustic Sensing
-(DAS) data acquisition application. It handles command-line argument parsing,
-logging initialization, high-DPI display support, and application lifecycle
-management.
+当前版本的启动链路比较克制：`run.py` 只做 `src` 路径注入，然后直接调用本文件中的 `main()`。本文件不承载采集逻辑、显示逻辑或业务计算，而是专门处理四类启动期职责：解析参数、初始化日志、设置高 DPI 以及安装异常钩子并创建 `MainWindow`。
 
-Key Features:
-- Command-line interface for various operation modes
-- Comprehensive logging setup with file and console output
-- High-DPI display support for modern monitors
-- Global exception handling for robust error reporting
-- Simulation mode for development and testing without hardware
-- Flexible logging configuration with automatic timestamped filenames
-
-Application Lifecycle:
-1. Parse command-line arguments (simulate, debug, log options)
-2. Initialize logging system with appropriate levels and outputs
-3. Configure high-DPI support for modern displays
-4. Create QApplication with proper styling and metadata
-5. Initialize main window with appropriate mode (normal/simulation)
-6. Enter Qt event loop for GUI operation
-7. Handle graceful shutdown and error reporting
-
-Command-Line Usage:
-    python main.py                    # Normal mode with hardware
-    python main.py --simulate         # Simulation mode for testing
-    python main.py --debug            # Enable detailed debug logging
-    python main.py --log output.log   # Custom log file location
-    python main.py --log ""           # Auto-generated timestamped log file
-
-Error Handling Strategy:
-- Global exception hook captures unhandled exceptions
-- All exceptions logged with full stack traces
-- User-friendly error dialogs for GUI-related failures
-- Proper exit codes for automation and scripting
-
-Dependencies:
-- PyQt5: GUI framework and event loop management
-- argparse: Command-line argument parsing (standard library)
-- logging: Comprehensive logging infrastructure (standard library)
-- sys: System-specific parameters and functions
-
-Author: PCIe-7821 Development Team
-Last Modified: [Current Date]
-Version: 26.6.6
-
-Note: This module should be kept minimal - complex initialization logic
-      should be moved to dedicated modules to maintain single responsibility.
+对后续类似项目而言，这种拆分方式值得保留。启动文件越薄，越容易在设备不可用、依赖缺失、日志路径异常或 GUI 初始化失败时快速定位问题。
 """
-
 import sys
 import argparse
 import traceback

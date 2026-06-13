@@ -1,5 +1,10 @@
-"""Background sender thread for Tab3 TCP communication."""
+"""
+`src/tcp_tab3/tcp_sender_worker.py` 实现 Tab3 的后台 TCP 发送线程。
 
+该模块采用独立工作线程和条件变量队列，把“采集线程产生相位块”与“网络连接建立、重连和发送”彻底分开。当前实现允许在队列达到上限后丢弃最旧待发送包，以保护前台采集不被网络故障反向拖慢。
+
+从架构角度看，这个发送器和 `data_saver.py` 有相似的工程哲学：后台异步执行、前台非阻塞、必要时丢历史而保最新。
+"""
 from __future__ import annotations
 
 import socket

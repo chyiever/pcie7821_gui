@@ -1,5 +1,8 @@
-"""Types for Tab3 TCP communication."""
+"""
+`src/tcp_tab3/tcp_types.py` 定义 Tab3 通信链路使用的轻量数据结构。
 
+这里的 dataclass 负责承载三类信息：用户在界面上配置的通信参数、从当前采集参数派生出的上下文，以及已经构建完成、准备发送或用于状态显示的出站包元数据。把这些结构独立出来后，包构建器、后台发送器和主窗口的接口会更稳定。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass

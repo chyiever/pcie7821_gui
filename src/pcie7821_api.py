@@ -1,18 +1,10 @@
 """
-PCIe-7821 DLL Wrapper Module
+`src/pcie7821_api.py` 是 Python 到 `pcie7821_api.dll` 的硬件边界封装层。
 
-Python interface to pcie7821_api.dll via ctypes.
-Handles DMA buffer alignment, thread-safe DLL calls, and error translation.
+这个模块把底层 DLL 的调用细节、DMA 对齐内存、ctypes 原型声明、错误码翻译和线程互斥保护收口到一处。当前实现通过 `AlignedBuffer` 保证缓冲区满足 DMA 对齐要求，通过单把 `threading.Lock` 保护 DLL 调用，避免 Python 层对底层设备状态造成不可控竞争。
 
-Key Design:
-- AlignedBuffer: 4KB-aligned memory required by DMA hardware
-- Thread safety: all DLL calls protected by threading.Lock
-- Buffer management: auto-resize on demand, numpy views for zero-copy access
-
-Note: DLL export 'pcie7821_set_pusle_width' has typo ('pusle' vs 'pulse')
-      in original API - kept as-is to match DLL symbol name.
+对后续类似项目而言，这种“把硬件脏活隔离在单文件中”的方式很有价值。只要 API 封装边界稳定，上层线程、GUI、保存与网络模块就可以围绕 NumPy 数组和 Python 异常工作。
 """
-
 import ctypes
 import numpy as np
 from pathlib import Path

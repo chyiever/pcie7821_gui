@@ -1,19 +1,10 @@
 """
-PCIe-7821 Data Acquisition Thread Module
+`src/acquisition_thread.py` 实现后台采集线程，是设备数据进入上位机后的第一站。
 
-QThread-based acquisition with signal-slot communication.
-Runs hardware DMA reading in background to keep GUI responsive.
+最新版本的采集线程已经不再只是“读数据然后发信号”。它同时负责动态轮询 DLL 缓冲区、控制单次读取块大小、生成完整数据块、维护最新显示快照、裁剪单通道 PHASE 空间范围、上报诊断快照，并在必要时配合主窗口完成停滞检测与自动恢复。
 
-Key Design:
-- Dynamic polling: adjusts interval based on buffer fill ratio
-- GUI throttling: caps signal emission at ~20 FPS to prevent queue backup
-- Pause/resume: QMutex + QWaitCondition for thread-safe state transitions
-
-Classes:
-- AcquisitionThread: Real hardware acquisition via DLL API
-- SimulatedAcquisitionThread: Random data generator for UI testing
+另一个值得记录的经验是：线程内部保留了较完整的运行态指标，例如最近一次查询耗时、最近一次读数耗时、当前阶段名称以及最后一次成功读取距离现在的时间。这些字段对现场分析“到底卡在 GUI、DLL、驱动还是磁盘”非常关键。
 """
-
 import threading
 import time
 import numpy as np

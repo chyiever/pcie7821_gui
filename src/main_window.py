@@ -1,21 +1,10 @@
-﻿"""
-PCIe-7821 Main Window GUI
-
-PyQt5-based GUI with real-time waveform display and parameter control.
-
-Layout: Left panel (parameters) | Right panel (3 plots + status bar)
-Plots: Time/Space domain, FFT Spectrum, Monitor (fiber end detection)
-
-Data Flow: AcqThread --> full-data queues for storage/TCP
-           AcqThread --> overwriteable latest snapshot --> GUI timer --> display update
-
-Key Design:
-- All plotting happens in GUI thread via timer-driven latest-snapshot consumption
-- Raw display throttled to 1 Hz; phase display follows acq thread rate
-- rad conversion is display-only; storage always saves original int32
-- Spectrum analysis delegated to RealTimeSpectrumAnalyzer with averaging
 """
+`src/main_window.py` 是当前工程的业务编排中心，也是整个上位机最重要的模块。
 
+这个文件不只是“画界面”。最新版本里，它同时承担参数采集与校验、设备初始化、采集线程启停、最新显示快照消费、频谱分析触发、Time-Space 控件协同、异步落盘、Tab3 TCP 发送、系统状态监控、自动恢复与本地参数持久化等职责，因此它本质上是桌面实时采集应用的总控层。
+
+当前代码特别值得后续项目参考的点有三项：完整采集数据与 GUI 显示数据已经拆成两条链路；相位转弧度只发生在显示侧，落盘仍保存原始 `int32`；STOP、自动恢复和旧线程延迟信号的处理都围绕“不要误伤下一轮采集”来设计。
+"""
 import sys
 import os
 import json

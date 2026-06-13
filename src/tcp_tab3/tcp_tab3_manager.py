@@ -1,5 +1,10 @@
-"""Manager that bridges GUI acquisition callbacks to the TCP sender worker."""
+"""
+`src/tcp_tab3/tcp_tab3_manager.py` 是 Tab3 GUI 与后台 TCP 发送器之间的管理层。
 
+主窗口不直接操作 socket，也不直接拼包，而是把当前采集参数与 Tab3 设置交给本模块。本模块负责判断当前采集模式是否允许通信，在采集开始和结束时开启或关闭会话，并把相位完整块转换成 `PhaseQueueItem` 入队给后台发送器。
+
+这个管理层的价值在于把“业务可用性判断”和“纯网络执行逻辑”分开。这样协议限制、界面提示和后台重连策略就不会相互污染。
+"""
 from __future__ import annotations
 
 from typing import Dict
