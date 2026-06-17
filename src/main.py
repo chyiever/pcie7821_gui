@@ -9,11 +9,41 @@ import sys
 import argparse
 import traceback
 import logging
-from datetime import datetime
+import ctypes
+from pathlib import Path
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon
 
-from logger import setup_logging, get_logger
+from logger import setup_logging, get_logger, default_log_directory
+
+
+def get_bundle_root() -> Path:
+    """Return the runtime bundle root for source and frozen builds."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parents[1]
+
+
+def get_app_icon_path() -> Path:
+    """Return the preferred icon path with fallback to the legacy asset."""
+    bundle_root = get_bundle_root()
+    primary = bundle_root / "resources" / "eDAS-LOGO.png"
+    if primary.exists():
+        return primary
+    return bundle_root / "resources" / "logo.png"
+
+
+def set_windows_app_user_model_id() -> None:
+    """Set an explicit AppUserModelID so Windows taskbar uses the app icon."""
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "CAS.eDAS.PCIe7821"
+        )
+    except Exception:
+        pass
 
 
 # ----- DISPLAY CONFIGURATION UTILITIES -----
@@ -124,8 +154,8 @@ def main():
     --simulate, -s: Enable simulation mode for testing without hardware
     --debug, -d: Enable DEBUG level logging for detailed troubleshooting
     --log FILE, -l FILE: Specify custom log file location
-        - If FILE is empty string, auto-generate timestamped filename
-        - If not specified, console-only logging
+        - If FILE is empty string, use the default D:/eDAS-log directory
+        - If not specified, also use the default D:/eDAS-log directory
 
     Error Handling:
     - Comprehensive exception handling with user feedback
@@ -156,7 +186,7 @@ def main():
 Examples:
   python main.py                    # Normal operation with hardware
   python main.py --simulate         # Testing without hardware
-  python main.py --debug --log ""   # Debug mode with auto-named log file
+  python main.py --debug --log ""   # Debug mode with default auto-rotated logs
   python main.py -s -d -l debug.log # Simulation + debug + custom log
         """
     )
@@ -171,7 +201,7 @@ Examples:
 
     # Log file: Flexible logging output configuration
     parser.add_argument('--log', '-l', type=str, default=None,
-                        help='Save log to file (default: pcie7821_YYYYMMDD_HHMMSS.log)')
+                        help='Save log to file (default: auto-create files under D:/eDAS-log)')
 
     args = parser.parse_args()
 
@@ -183,12 +213,12 @@ Examples:
 
     # Handle log file configuration with smart defaults
     log_file = args.log
+    auto_file = log_file in (None, "")
     if log_file == '':
-        # Empty string triggers auto-generated timestamped filename
-        log_file = f"pcie7821_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_file = None
 
     # Initialize logging system with determined configuration
-    setup_logging(level=log_level, log_file=log_file, console=True)
+    setup_logging(level=log_level, log_file=log_file, console=True, auto_file=auto_file)
     log = get_logger("main")
 
     # ----- APPLICATION STARTUP BANNER -----
@@ -198,7 +228,7 @@ Examples:
     log.info("PCIe-7821 DAS Acquisition Software Starting")
     log.info(f"Simulation mode: {args.simulate}")
     log.info(f"Debug mode: {args.debug}")
-    log.info(f"Log file: {log_file or 'None'}")
+    log.info(f"Log target: {log_file or default_log_directory()}")
     log.info("=" * 60)
 
     # ----- GLOBAL ERROR HANDLING SETUP -----
@@ -208,6 +238,7 @@ Examples:
     # ----- DISPLAY SYSTEM CONFIGURATION -----
     # Configure high-DPI support before QApplication creation
     setup_high_dpi()
+    set_windows_app_user_model_id()
 
     # ----- QT APPLICATION INITIALIZATION -----
     # Create Qt application with proper metadata and styling
@@ -217,6 +248,14 @@ Examples:
     # Set application metadata for system integration
     app.setApplicationName("eDAS-pt1g-gh-26.6.6")  # Used by system for window grouping
     app.setApplicationVersion("26.6.6")             # Version for about dialogs, etc.
+    app.setDesktopFileName("eDAS")
+
+    icon_path = get_app_icon_path()
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+        log.info(f"Application icon loaded: {icon_path}")
+    else:
+        log.warning(f"Application icon not found: {icon_path}")
 
     # Apply modern visual style across all platforms
     app.setStyle('Fusion')  # Consistent modern appearance

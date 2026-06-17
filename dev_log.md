@@ -306,3 +306,47 @@ Space-Time 参数恢复改为原子设置 `vmin/vmax`，避免依次设置时因
 历史实现曾每隔约 $2\ \mathrm{s}$ 尝试创建下一个编号文件并恢复写入，并可能保留连续编号的 `0 KB` 文件。当前版本已经移除此状态机。
 
 ## 2026-06-06 当前版本发布
+
+## 2026-06-14
+
+### 本次工作目标
+
+本次更新围绕 Windows 可交付版本打包链路展开，目标是让 `PCIe-7821` 上位机在脱离本地 Python 环境后仍然保持与源码运行一致的行为。重点包括四部分：一是补齐独立的 `build_exe.py` 打包脚本；二是保证 exe 启动后默认沿用上次保存的参数；三是增加默认日志落盘并支持长时间运行时按天切分日志文件；四是修复 PyInstaller `onefile` 模式下资源文件、DLL、页头 logo、窗口图标和任务栏图标之间的路径与显示不一致问题。
+
+### 主要修改内容
+
+首先，新建了根目录打包脚本 `build_exe.py`，参考另一个 `pcie7825_gui` 项目的构建方式，统一封装 PyInstaller 调用、资源收集、隐藏导入、无关模块排除、运行时参数文件复制以及打包完成后的清理动作。脚本现在默认生成以日期命名的可执行文件，格式为 `eDASYY.M.D.exe`，例如 `eDAS26.6.14.exe`。同时，脚本在打包完成后会自动删除 `build/` 目录，减少中间产物残留。
+
+其次，确认并保留了现有的本地参数持久化机制。`src/main_window.py` 中的 `last_params.json` 读写逻辑已经具备“退出时保存、下次启动恢复”的能力，本次重点是确保该逻辑在冻结后的 exe 环境中仍然成立。因此打包脚本会在输出 exe 后，将 `last_params.json` 复制到 `dist/` 目录，冻结版本继续按 exe 同目录读写配置。
+
+第三，扩展了日志系统。`src/logger.py` 增加了按日切换的文件处理器，默认日志目录固定为 `D:/eDAS-log`。`src/main.py` 调整后，在未显式传入 `--log` 时也会自动启用文件日志；日志文件名按启动时间生成，长时间运行跨天后自动切到新的日期文件，避免单文件无限增长。
+
+第四，修复了 `onefile` 模式下的资源路径问题。现场日志显示，冻结后的程序曾在临时解包目录中找不到 `resources/logo.png` 和 `libs/pcie7821_api.dll`。为此，`src/pcie7821_api.py` 增加了对 `sys._MEIPASS` 与 exe 邻近目录的 DLL 搜索；`src/main_window.py` 与 `src/main.py` 则统一增加了 bundle 根目录解析逻辑，确保冻结版本优先从 PyInstaller 临时解包资源目录读取图片与图标。
+
+第五，拆分了“页头显示 logo”和“窗口/任务栏图标”的资源来源。根据最终 UI 要求，页面左上角页头 logo 继续使用 `resources/logo.png`，窗口标题栏左上角图标、任务栏图标以及 exe 文件嵌入图标使用 `resources/eDAS-LOGO.png`。为此，`src/main_window.py` 新增了独立的 `get_header_logo_path()` 与窗口图标路径选择逻辑；`src/main.py` 则在 `QApplication` 级别显式设置窗口图标，并在 Windows 下设置 `AppUserModelID`，降低任务栏图标与文件图标不一致的概率。
+
+第六，打包脚本新增了图标转换步骤。由于 PyInstaller 的 exe 图标嵌入更适合 `.ico`，当前脚本会在打包时用 Pillow 将 `resources/eDAS-LOGO.png` 转换为临时 `.ico` 文件，再通过 `--icon` 参数写入可执行文件。
+
+### 涉及文件
+
+- `build_exe.py`
+- `requirements.txt`
+- `src/logger.py`
+- `src/main.py`
+- `src/main_window.py`
+- `src/pcie7821_api.py`
+- `resources/eDAS-LOGO.png`
+- `dev_log.md`
+
+### 验证与结果
+
+本次修改后，已使用 `python -m py_compile` 对 `build_exe.py`、`src/main.py`、`src/main_window.py`、`src/logger.py`、`src/pcie7821_api.py` 等关键文件完成语法检查。随后多次执行 `python build_exe.py` 验证打包链路，成功输出冻结版本 exe，并确认：
+
+- exe 默认命名符合日期格式要求；
+- 打包结束后 `build/` 目录会自动删除；
+- `dist/` 中会同步复制 `last_params.json`；
+- `onefile` 模式下资源和 DLL 路径不再依赖源码目录；
+- exe 文件图标来自 `resources/eDAS-LOGO.png`；
+- 页头大 logo 与窗口/任务栏图标可以分离配置。
+
+最终产物已验证生成 `dist/eDAS26.6.14.exe`。关于 Windows 资源管理器图标与任务栏图标偶发不一致的问题，本次代码已尽量从 exe 资源、Qt 应用图标和 `AppUserModelID` 三层统一；若现场仍见旧图标，优先判断为 Windows 图标缓存或旧快捷方式缓存，需要通过重新固定任务栏或刷新 `explorer.exe` 进一步验证。

@@ -10,6 +10,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple
 import os
+import sys
 import time
 import threading
 
@@ -142,13 +143,15 @@ class PCIe7821API:
 
     def _find_dll(self) -> str:
         """Find the DLL in default locations"""
-        # Get the directory containing this script (src/)
-        script_dir = Path(__file__).parent
-        # Get project root (one level up from src/)
+        script_dir = Path(__file__).resolve().parent
         project_root = script_dir.parent
+        bundle_root = Path(getattr(sys, "_MEIPASS", project_root))
+        exe_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else project_root
 
         # Search paths (prioritize libs/ directory)
         search_paths = [
+            bundle_root / "libs" / "pcie7821_api.dll",   # PyInstaller onefile temp bundle
+            exe_dir / "libs" / "pcie7821_api.dll",       # External libs next to exe
             project_root / "libs" / "pcie7821_api.dll",  # Primary: libs/ folder
             script_dir / "pcie7821_api.dll",              # Fallback: same folder as this script
             project_root / "pcie7821_api.dll",            # Fallback: project root
@@ -162,7 +165,7 @@ class PCIe7821API:
                 return str(path)
 
         raise FileNotFoundError(
-            f"pcie7821_api.dll not found. Please copy it to: {project_root / 'libs'}"
+            f"pcie7821_api.dll not found. Please copy it to: {exe_dir / 'libs'}"
         )
 
     # ----- DLL FUNCTION PROTOTYPES -----

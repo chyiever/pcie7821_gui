@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from logging import Handler
 from pathlib import Path
 from typing import Optional
 
@@ -75,13 +76,96 @@ class ThreadFormatter(logging.Formatter):
         return super().format(record)
 
 
+class DailyTimestampFileHandler(Handler):
+    """
+    File handler that writes to D:\\eDAS-log and creates one file per day.
+
+    The active file name is always based on the moment the file is created.
+    On long-running sessions, the handler automatically switches to a new
+    timestamped file after the calendar date changes.
+    """
+
+    def __init__(self, log_dir: Path, encoding: str = "utf-8"):
+        super().__init__()
+        self.log_dir = Path(log_dir)
+        self.encoding = encoding
+        self._current_day: Optional[str] = None
+        self._delegate: Optional[logging.FileHandler] = None
+        self._delegate_lock = threading.Lock()
+
+    def _build_log_path(self, now: datetime) -> Path:
+        filename = now.strftime("%Y%m%d_%H%M%S") + ".log"
+        return self.log_dir / filename
+
+    def _ensure_delegate(self, now: Optional[datetime] = None) -> None:
+        now = now or datetime.now()
+        day_key = now.strftime("%Y-%m-%d")
+
+        with self._delegate_lock:
+            if self._delegate is not None and self._current_day == day_key:
+                return
+
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+
+            old_delegate = self._delegate
+            new_delegate = logging.FileHandler(
+                self._build_log_path(now),
+                encoding=self.encoding,
+            )
+            new_delegate.setLevel(self.level)
+            if self.formatter is not None:
+                new_delegate.setFormatter(self.formatter)
+
+            self._delegate = new_delegate
+            self._current_day = day_key
+
+            if old_delegate is not None:
+                old_delegate.close()
+
+    def setFormatter(self, fmt: logging.Formatter) -> None:
+        super().setFormatter(fmt)
+        with self._delegate_lock:
+            if self._delegate is not None:
+                self._delegate.setFormatter(fmt)
+
+    def setLevel(self, level: int) -> None:
+        super().setLevel(level)
+        with self._delegate_lock:
+            if self._delegate is not None:
+                self._delegate.setLevel(level)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._ensure_delegate()
+            if self._delegate is not None:
+                self._delegate.emit(record)
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        with self._delegate_lock:
+            if self._delegate is not None:
+                self._delegate.close()
+                self._delegate = None
+        super().close()
+
+
+def default_log_directory() -> Path:
+    """Return the preferred runtime log directory."""
+    preferred = Path("D:/eDAS-log")
+    if preferred.drive:
+        return preferred
+    return Path.cwd() / "eDAS-log"
+
+
 # ----- LOGGING SYSTEM SETUP -----
 # Central configuration functions for application-wide logging
 
 def setup_logging(
     level: int = logging.DEBUG,
     log_file: Optional[str] = None,
-    console: bool = True
+    console: bool = True,
+    auto_file: bool = False,
 ) -> logging.Logger:
     """
     Configure centralized logging system with console and file output.
@@ -137,12 +221,15 @@ def setup_logging(
 
     # ----- File Handler Setup -----
     if log_file:
-        # Ensure log directory exists (create parent directories if needed)
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Configure file handler with UTF-8 encoding for international support
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler = logging.FileHandler(log_path, encoding='utf-8')
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    elif auto_file:
+        file_handler = DailyTimestampFileHandler(default_log_directory())
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)

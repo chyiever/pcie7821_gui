@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QTabWidget
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot
-from PyQt5.QtGui import QFont, QColor, QPalette, QPixmap, QFontDatabase
+from PyQt5.QtGui import QFont, QColor, QPalette, QPixmap, QFontDatabase, QIcon
 import pyqtgraph as pg
 
 from config import (
@@ -49,6 +49,31 @@ log = get_logger("gui")
 ACQ_STALL_TIMEOUT_S = 8.0
 ACQ_RECOVERY_COOLDOWN_S = 20.0
 APP_DISPLAY_VERSION = "eDAS-pt1g-gh-26.6.6"
+
+
+def get_bundle_root() -> Path:
+    """Return the runtime bundle root for source and frozen builds."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parents[1]
+
+
+def get_logo_path() -> Path:
+    """Return the preferred window/taskbar icon path."""
+    bundle_root = get_bundle_root()
+    primary = bundle_root / "resources" / "eDAS-LOGO.png"
+    if primary.exists():
+        return primary
+    return bundle_root / "resources" / "logo.png"
+
+
+def get_header_logo_path() -> Path:
+    """Return the preferred page header logo path."""
+    bundle_root = get_bundle_root()
+    primary = bundle_root / "resources" / "logo.png"
+    if primary.exists():
+        return primary
+    return bundle_root / "resources" / "eDAS-LOGO.png"
 
 
 # ----- MAIN APPLICATION WINDOW -----
@@ -106,6 +131,9 @@ class MainWindow(QMainWindow):
 
         # Setup UI
         self.setWindowTitle(APP_DISPLAY_VERSION)
+        icon_path = get_logo_path()
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.setMinimumSize(1400, 950)  # Slightly increased height to accommodate all content
 
         log.debug("Setting up UI...")
@@ -219,11 +247,9 @@ class MainWindow(QMainWindow):
 
         # Logo
         logo_label = QLabel()
-        # Logo is in resources/ folder (one level up from src/)
-        project_root = os.path.dirname(os.path.dirname(__file__))
-        logo_path = os.path.join(project_root, "resources", "logo.png")
-        if os.path.exists(logo_path):
-            pixmap = QPixmap(logo_path)
+        logo_path = get_header_logo_path()
+        if logo_path.exists():
+            pixmap = QPixmap(str(logo_path))
             # Scale logo to fit header height
             scaled_pixmap = pixmap.scaledToHeight(40, Qt.SmoothTransformation)
             logo_label.setPixmap(scaled_pixmap)
@@ -233,9 +259,9 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(logo_label)
 
-        # Title - SimHei bold 28pt (Chinese UI text)
+        # Title - Arial bold 28pt
         title_label = QLabel("Enhanced Distributed Acoustic Sensing (eDAS)")
-        title_font = QFont("SimHei", 28, QFont.Bold)
+        title_font = QFont("Arial", 28, QFont.Bold)
         title_label.setFont(title_font)
         title_label.setAlignment(Qt.AlignCenter)
 
