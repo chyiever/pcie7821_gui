@@ -350,3 +350,27 @@ Space-Time 参数恢复改为原子设置 `vmin/vmax`，避免依次设置时因
 - 页头大 logo 与窗口/任务栏图标可以分离配置。
 
 最终产物已验证生成 `dist/eDAS26.6.14.exe`。关于 Windows 资源管理器图标与任务栏图标偶发不一致的问题，本次代码已尽量从 exe 资源、Qt 应用图标和 `AppUserModelID` 三层统一；若现场仍见旧图标，优先判断为 Windows 图标缓存或旧快捷方式缓存，需要通过重新固定任务栏或刷新 `explorer.exe` 进一步验证。
+
+## 2026-06-17 Tab1 时域图坐标轴修改
+
+### 本次工作目标
+
+本次根据现场显示语义要求，修正 Tab1 Time Plot 时域图横轴。此前曲线更新只传入 y 数据，pyqtgraph 默认使用 0 基样本序号作为横轴；修改后按 Raw、Phase-Time、Phase-Space 三种情况显式生成物理坐标数组，并随模式自动更新横轴标签。
+
+### 主要修改内容
+
+Raw 模式下时域图横轴改为 `Distance (m)`，坐标数组按 $x=[1,2,\ldots,\mathrm{Points}] \times 0.1 \times \mathrm{DataRate}$ 生成。`DataRate=4ns (250MHz)` 时点间距为 $0.4\ \mathrm{m}$，`DataRate=8ns (125MHz)` 时点间距为 $0.8\ \mathrm{m}$。
+
+Phase 模式且 `Mode=time` 时，横轴同样改为 `Distance (m)`，坐标数组按 $x=[1,2,\ldots,\lfloor\mathrm{Points}/\mathrm{Merge}\rfloor] \times 0.4 \times \mathrm{Rate2phase} \times \mathrm{Merge}$ 生成。例如 `Rate2phase=250M` 且 `Merge=20` 时，点间距为 $8\ \mathrm{m}$。
+
+Phase 模式且 `Mode=space` 时，横轴改为 `Time (s)`，坐标数组按 $x=[1,2,\ldots,frame\_num]/\mathrm{Scan}$ 生成；稳定显示时 `frame_num` 通常等于 `FramePlot`。例如 `Scan=2000Hz` 时，点间距为 $0.0005\ \mathrm{s}$。
+
+### 涉及文件
+
+- `src/main_window.py`
+- `docs/2026-6-17-tab1时域图坐标轴修改日志.md`
+- `dev_log.md`
+
+### 验证要求
+
+本次需要执行 Python 语法检查、坐标公式自检、UTF-8 中文自检和 Git 差异检查。现场联机验证时重点确认 Raw 的 `DataRate` 切换、Phase-Time 的 `Rate2phase` 与 `Merge` 联动，以及 Phase-Space 的 `Scan` 时间刻度是否与界面参数一致。
