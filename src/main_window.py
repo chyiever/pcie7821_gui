@@ -1109,6 +1109,76 @@ class MainWindow(QMainWindow):
         view_box.enableAutoRange(x=True, y=True)
         view_box.autoRange(padding=0.0)
 
+    def _curve_data_range(self, curves) -> Optional[tuple[float, float, float, float]]:
+        """Return finite x/y bounds for the currently populated curves."""
+        x_min = y_min = np.inf
+        x_max = y_max = -np.inf
+        has_data = False
+
+        for curve in curves:
+            x_data, y_data = curve.getData()
+            if x_data is None or y_data is None:
+                continue
+            x_arr = np.asarray(x_data)
+            y_arr = np.asarray(y_data)
+            if x_arr.size == 0 or y_arr.size == 0:
+                continue
+
+            count = min(x_arr.size, y_arr.size)
+            x_arr = x_arr[:count]
+            y_arr = y_arr[:count]
+            finite_mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+            if not finite_mask.any():
+                continue
+
+            finite_x = x_arr[finite_mask]
+            finite_y = y_arr[finite_mask]
+            x_min = min(x_min, float(finite_x.min()))
+            x_max = max(x_max, float(finite_x.max()))
+            y_min = min(y_min, float(finite_y.min()))
+            y_max = max(y_max, float(finite_y.max()))
+            has_data = True
+
+        if not has_data:
+            return None
+
+        if x_min == x_max:
+            pad = max(abs(x_min) * 0.01, 1.0)
+            x_min -= pad
+            x_max += pad
+        if y_min == y_max:
+            pad = max(abs(y_min) * 0.01, 1.0)
+            y_min -= pad
+            y_max += pad
+
+        return x_min, x_max, y_min, y_max
+
+    def _force_plot_range_to_curve_data(self, plot_key: str, curves, padding: float = 0.02) -> bool:
+        """Set a plot range from curve data instead of relying on cached item bounds."""
+        plot_widget = self._interactive_plot_widgets.get(plot_key)
+        if plot_widget is None:
+            return False
+
+        data_range = self._curve_data_range(curves)
+        if data_range is None:
+            return False
+
+        x_min, x_max, y_min, y_max = data_range
+        view_box = plot_widget.getViewBox()
+        self._plot_zoom_locked[plot_key] = False
+        view_box.enableAutoRange(x=True, y=True)
+        try:
+            view_box.setRange(
+                xRange=(x_min, x_max),
+                yRange=(y_min, y_max),
+                padding=padding,
+                disableAutoRange=False,
+            )
+        except TypeError:
+            view_box.setRange(xRange=(x_min, x_max), yRange=(y_min, y_max), padding=padding)
+            view_box.enableAutoRange(x=True, y=True)
+        return True
+
     def _setup_plots(self):
         """Initialize plot curves"""
         # Colors suitable for white background
@@ -2044,6 +2114,19 @@ class MainWindow(QMainWindow):
             return
         self._time_plot_pending_auto_range = False
         self._restore_plot_auto_range("plot1")
+        self._force_plot_range_to_curve_data("plot1", self.plot_curve_1)
+        expected_axis = self._time_plot_axis_kind
+        QTimer.singleShot(0, lambda axis=expected_axis: self._retry_time_plot_auto_range(axis))
+        QTimer.singleShot(50, lambda axis=expected_axis: self._retry_time_plot_auto_range(axis))
+
+    def _retry_time_plot_auto_range(self, expected_axis_kind: Optional[str]) -> None:
+        """Repeat Tab1 range restoration after Qt has processed the latest curve update."""
+        if expected_axis_kind != self._time_plot_axis_kind:
+            return
+        if self._plot_zoom_locked.get("plot1", False):
+            return
+        self._restore_plot_auto_range("plot1")
+        self._force_plot_range_to_curve_data("plot1", self.plot_curve_1)
 
     def _raw_distance_axis(self, point_count: int) -> np.ndarray:
         """Return Raw distance coordinates in meters, using 1-based point positions."""

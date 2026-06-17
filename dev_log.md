@@ -410,3 +410,30 @@ Phase 模式下 `Mode=space` 的数据抽取逻辑本身可以生成 `space_data
 ### 验证要求
 
 本次需要执行 `python -m py_compile src/main_window.py`、横轴切换 pending 自动范围自检、坐标公式自检、UTF-8 中文自检和 `git diff --check`。现场验证时应重点测试已经手动缩放过的 Tab1，在 `Mode=time` 与 `Mode=space` 之间来回切换时是否无需点击自动范围按钮即可显示波形。
+
+## 2026-06-18 Tab1 横轴切换自动范围三次优化
+
+### 问题背景
+
+现场继续验证后确认，前两轮 Tab1 横轴切换修复仍未完全解决问题。Phase 模式下从 `Mode=time` 切换到 `Mode=space` 后，仍可能需要先在绘图控件中画一个矩形放大，再点击自动范围按钮后才出现波形；从 `Mode=space` 切回 `Mode=time` 后，也可能需要点击自动范围按钮才能恢复显示。
+
+前两轮修复已经分别覆盖了“横轴单位变化时解除旧缩放锁定”和“新曲线 `setData(x, y)` 后再执行自动范围恢复”。本次继续出现问题，说明根因不再只是调用顺序，而是 pyqtgraph 的 ViewBox 自动范围、PlotDataItem 边界缓存和 Qt 事件循环之间存在异步窗口：即使程序已经在 `setData()` 后调用 `_restore_plot_auto_range()`，ViewBox 当时仍可能没有稳定拿到新曲线的真实数据边界。
+
+### 修改内容
+
+本次修改集中在 `src/main_window.py`，不改变采集链路和坐标公式：
+
+- 新增 `_curve_data_range()`，直接从当前 Tab1 曲线的 `getData()` 结果中计算有限 `x/y` 数据边界，避免只依赖 ViewBox 内部边界缓存。
+- 新增 `_force_plot_range_to_curve_data()`，在恢复自动范围后使用曲线真实边界对 `plot1` 执行确定性的 `setRange()`，让秒级时间轴或米级距离轴立即进入可视范围。
+- 扩展 `_apply_pending_time_plot_auto_range()`，在同步恢复后通过 `QTimer.singleShot(0, ...)` 和 `QTimer.singleShot(50, ...)` 再执行两次延迟恢复，覆盖曲线边界在 Qt 事件循环中稍晚更新的情况。
+- 延迟恢复会检查触发时的横轴类型是否仍与当前 `_time_plot_axis_kind` 一致，避免用户快速连续切换 `Time/Space` 时旧任务覆盖新模式视图。
+
+### 涉及文件
+
+- `src/main_window.py`
+- `docs/2026-6-17-tab1时域图坐标轴修改日志.md`
+- `dev_log.md`
+
+### 验证情况
+
+已执行 `python -m py_compile src/main_window.py`，语法检查通过。后续仍需执行 `git diff --check` 和 Git 提交推送。现场联机验证时，重点测试已手动缩放过的 Tab1：在 Phase 模式下连续执行 `Mode=time -> Mode=space -> Mode=time`，确认每次切换后无需手动画矩形、无需点击自动范围按钮，波形即可直接显示在新的 `Distance (m)` 或 `Time (s)` 横轴范围内。
