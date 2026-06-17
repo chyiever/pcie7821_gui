@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         self._interactive_plot_widgets: Dict[str, pg.PlotWidget] = {}
         self._plot_zoom_locked: Dict[str, bool] = {}
         self._time_plot_axis_kind: Optional[str] = None
+        self._time_plot_pending_auto_range = False
         self._settings_path = self._get_settings_path()
 
         # Parameters
@@ -2033,8 +2034,16 @@ class MainWindow(QMainWindow):
             return
 
         self._clear_waveform_plot()
+        self._time_plot_pending_auto_range = True
         self._restore_plot_auto_range("plot1")
         log.debug(f"Tab1 time plot axis changed: {previous_axis_kind} -> {axis_kind}")
+
+    def _apply_pending_time_plot_auto_range(self) -> None:
+        """Restore Tab1 view after new data has been written for a changed x-axis."""
+        if not self._time_plot_pending_auto_range:
+            return
+        self._time_plot_pending_auto_range = False
+        self._restore_plot_auto_range("plot1")
 
     def _raw_distance_axis(self, point_count: int) -> np.ndarray:
         """Return Raw distance coordinates in meters, using 1-based point positions."""
@@ -2087,6 +2096,7 @@ class MainWindow(QMainWindow):
                 space_data = np.array(space_data)
                 if waveform_enabled:
                     self.plot_curve_1[0].setData(time_axis[:len(space_data)], space_data)
+                    self._apply_pending_time_plot_auto_range()
 
                     # Clear other curves
                     for i in range(1, 4):
@@ -2112,6 +2122,7 @@ class MainWindow(QMainWindow):
                         self.plot_curve_1[ch].setData(time_axis[:len(space_data)], space_data)
 
                 if waveform_enabled:
+                    self._apply_pending_time_plot_auto_range()
                     for i in range(channel_num, 4):
                         self.plot_curve_1[i].setData([])
 
@@ -2126,6 +2137,8 @@ class MainWindow(QMainWindow):
                     end = start + point_num
                     if waveform_enabled and end <= len(display_data):
                         self.plot_curve_1[i].setData(distance_axis, display_data[start:end])
+                        if i == 0:
+                            self._apply_pending_time_plot_auto_range()
                     elif waveform_enabled:
                         self.plot_curve_1[i].setData([])
 
@@ -2141,6 +2154,8 @@ class MainWindow(QMainWindow):
                 for ch in range(min(channel_num, 4)):
                     if waveform_enabled and point_num <= len(display_data):
                         self.plot_curve_1[ch].setData(distance_axis, display_data[:point_num, ch])
+                if waveform_enabled:
+                    self._apply_pending_time_plot_auto_range()
 
         # Time-Space plot: independent from the Tab1 Mode control and driven by PLOT.
         # Update it only when Tab2 is active, avoiding unnecessary Tab1 interference.
@@ -2192,6 +2207,8 @@ class MainWindow(QMainWindow):
                 end = start + point_num
                 if waveform_enabled and end <= len(display_data):
                     self.plot_curve_1[i].setData(distance_axis, display_data[start:end])
+                    if i == 0:
+                        self._apply_pending_time_plot_auto_range()
                 elif waveform_enabled:
                     self.plot_curve_1[i].setData([])
 
@@ -2207,6 +2224,8 @@ class MainWindow(QMainWindow):
             for ch in range(min(channel_num, 4)):
                 if waveform_enabled and point_num <= len(display_data):
                     self.plot_curve_1[ch].setData(distance_axis, display_data[:point_num, ch])
+            if waveform_enabled:
+                self._apply_pending_time_plot_auto_range()
 
             # Spectrum: full-resolution data (Raw data: automatically uses Power Spectrum)
             if self.params.display.spectrum_enable and point_num <= len(display_data):
@@ -2761,4 +2780,3 @@ class MainWindow(QMainWindow):
             progress_bar.setStyleSheet("QProgressBar::chunk { background-color: orange; }")
         else:
             progress_bar.setStyleSheet("QProgressBar::chunk { background-color: green; }")
-

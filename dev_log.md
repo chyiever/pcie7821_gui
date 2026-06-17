@@ -392,3 +392,21 @@ Phase 模式下 `Mode=space` 的数据抽取逻辑本身可以生成 `space_data
 ### 验证要求
 
 本次需要继续执行 `python -m py_compile src/main_window.py`、坐标公式自检、横轴切换自动范围自检、UTF-8 中文自检和 `git diff --check`。现场验证时应先在 `Mode=time` 下缩放 Tab1，再切换到 `Mode=space`，确认横轴变为 `Time (s)` 后波形仍能自动出现在视图范围内。
+
+## 2026-06-17 Tab1 横轴切换自动范围二次优化
+
+### 问题原因
+
+现场进一步验证发现，Phase 模式下从 `Mode=time` 切换到 `Mode=space` 后，有时仍需要先在绘图控件中画一个矩形放大，再点击自动范围按钮，波形才会出现；从 `Mode=space` 切回 `Mode=time` 后也可能需要手动点击自动范围按钮。原因是上一轮修复只在模式切换瞬间调用 `_restore_plot_auto_range()`。此时旧曲线刚被清空，新模式对应的 `setData(x, y)` 尚未执行，ViewBox 没有新横轴数据边界可用于计算范围。
+
+### 修复内容
+
+本次在 `src/main_window.py` 中增加 `_time_plot_pending_auto_range` 状态和 `_apply_pending_time_plot_auto_range()` 方法。横轴类型在 `distance` 与 `time` 之间切换时，程序先清空旧曲线、解除缩放锁定，并设置 pending 标记；随后在 Phase-Space、Phase-Time 和 Raw 分支完成新曲线 `setData(x, y)` 后，再执行一次 `_restore_plot_auto_range()`。这样自动范围计算发生在新数据写入之后，等效于程序自动完成一次 `Auto/View All`，避免用户手动画矩形或手动点击自动范围按钮。
+
+### 文档更新
+
+已更新 `docs/2026-6-17-tab1时域图坐标轴修改日志.md` 的第 7 节，补充二次优化原因、两阶段自动范围恢复流程和对应公式化流程说明。
+
+### 验证要求
+
+本次需要执行 `python -m py_compile src/main_window.py`、横轴切换 pending 自动范围自检、坐标公式自检、UTF-8 中文自检和 `git diff --check`。现场验证时应重点测试已经手动缩放过的 Tab1，在 `Mode=time` 与 `Mode=space` 之间来回切换时是否无需点击自动范围按钮即可显示波形。
