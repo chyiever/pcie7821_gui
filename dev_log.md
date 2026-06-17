@@ -437,3 +437,28 @@ Phase 模式下 `Mode=space` 的数据抽取逻辑本身可以生成 `space_data
 ### 验证情况
 
 已执行 `python -m py_compile src/main_window.py`，语法检查通过。后续仍需执行 `git diff --check` 和 Git 提交推送。现场联机验证时，重点测试已手动缩放过的 Tab1：在 Phase 模式下连续执行 `Mode=time -> Mode=space -> Mode=time`，确认每次切换后无需手动画矩形、无需点击自动范围按钮，波形即可直接显示在新的 `Distance (m)` 或 `Time (s)` 横轴范围内。
+
+## 2026-06-18 Tab1 Phase time -> space 显示恢复四次优化
+
+### 问题背景
+
+三次优化后，现场反馈 `Mode=space -> Mode=time` 已经可以不点击 Auto 直接显示波形，但 `Mode=time -> Mode=space` 仍存在残留问题：切换后需要先在绘图控件中画一个矩形放大，再点击 Auto，Space 波形才开始出现。这个结果说明通用横轴切换逻辑已经部分生效，问题重点收敛到 Space 秒级时间轴曲线的绘制刷新。
+
+### 修改内容
+
+本次继续只修改 `src/main_window.py` 的 Tab1 显示恢复逻辑，不改变采集、保存和坐标公式：
+
+- 新增 `_configure_time_plot_curves_for_axis()`：Tab1 横轴切到 `time` 时关闭 `clipToView` 和自动降采样，避免 Space 小曲线在旧距离视图下先被裁剪成空路径；切回 `distance` 时恢复原来的实时大曲线优化。
+- 新增 `_time_plot_auto_range_frames_remaining`：横轴切换后不只恢复第一帧，而是在后续若干帧继续执行范围恢复，覆盖第一帧 ViewBox 或曲线边界未稳定的情况。
+- 扩展 `_apply_pending_time_plot_auto_range()` 的延迟重试，从 `0 ms`、`50 ms` 增加到 `0 ms`、`50 ms`、`150 ms`、`300 ms`。
+- 新增 `_refresh_plot_curve_items()`：在按曲线真实边界 `setRange()` 后主动刷新 PlotDataItem、PlotItem 和 ViewBox，避免旧裁剪/降采样路径保留空白显示。
+
+### 涉及文件
+
+- `src/main_window.py`
+- `docs/2026-6-17-tab1时域图坐标轴修改日志.md`
+- `dev_log.md`
+
+### 验证情况
+
+已执行 `python -m py_compile src/main_window.py`，语法检查通过。现场验证时重点复测 Phase 模式下 `Mode=time -> Mode=space`：先在 Time 距离轴中手动框选或缩放，再切换到 Space，确认不再需要手动画矩形和点击 Auto，秒级时间轴波形应直接出现。

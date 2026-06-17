@@ -103,6 +103,7 @@ class MainWindow(QMainWindow):
         self._plot_zoom_locked: Dict[str, bool] = {}
         self._time_plot_axis_kind: Optional[str] = None
         self._time_plot_pending_auto_range = False
+        self._time_plot_auto_range_frames_remaining = 0
         self._settings_path = self._get_settings_path()
 
         # Parameters
@@ -1093,6 +1094,21 @@ class MainWindow(QMainWindow):
         curve.setDownsampling(auto=True, method="peak")
         curve.setSkipFiniteCheck(True)
 
+    def _configure_time_plot_curves_for_axis(self, axis_kind: str) -> None:
+        """Tune Tab1 curve rendering for distance or time-axis data density."""
+        if not hasattr(self, "plot_curve_1"):
+            return
+        for curve in self.plot_curve_1:
+            try:
+                if axis_kind == "time":
+                    curve.setClipToView(False)
+                    curve.setDownsampling(auto=False)
+                    curve.setSkipFiniteCheck(True)
+                else:
+                    self._configure_realtime_curve(curve)
+            except Exception:
+                pass
+
     def _on_plot_manual_range_change(self, plot_key: str):
         plot_widget = self._interactive_plot_widgets.get(plot_key)
         if plot_widget is None:
@@ -1177,7 +1193,21 @@ class MainWindow(QMainWindow):
         except TypeError:
             view_box.setRange(xRange=(x_min, x_max), yRange=(y_min, y_max), padding=padding)
             view_box.enableAutoRange(x=True, y=True)
+        self._refresh_plot_curve_items(plot_widget, curves)
         return True
+
+    def _refresh_plot_curve_items(self, plot_widget: pg.PlotWidget, curves) -> None:
+        """Refresh curve drawing paths after a forced range change."""
+        for curve in curves:
+            try:
+                curve.updateItems()
+            except Exception:
+                pass
+        try:
+            plot_widget.getPlotItem().update()
+            plot_widget.getViewBox().update()
+        except Exception:
+            pass
 
     def _setup_plots(self):
         """Initialize plot curves"""
@@ -2096,6 +2126,7 @@ class MainWindow(QMainWindow):
         """Set Tab1 axis semantics and reset view when the x-axis unit changes."""
         previous_axis_kind = self._time_plot_axis_kind
         self._set_time_plot_bottom_label(label)
+        self._configure_time_plot_curves_for_axis(axis_kind)
         if previous_axis_kind == axis_kind:
             return
 
@@ -2105,25 +2136,40 @@ class MainWindow(QMainWindow):
 
         self._clear_waveform_plot()
         self._time_plot_pending_auto_range = True
+        self._time_plot_auto_range_frames_remaining = 8
         self._restore_plot_auto_range("plot1")
         log.debug(f"Tab1 time plot axis changed: {previous_axis_kind} -> {axis_kind}")
 
     def _apply_pending_time_plot_auto_range(self) -> None:
         """Restore Tab1 view after new data has been written for a changed x-axis."""
-        if not self._time_plot_pending_auto_range:
+        if (
+            not self._time_plot_pending_auto_range
+            and self._time_plot_auto_range_frames_remaining <= 0
+        ):
             return
+
+        if self._plot_zoom_locked.get("plot1", False):
+            self._time_plot_pending_auto_range = False
+            self._time_plot_auto_range_frames_remaining = 0
+            return
+
         self._time_plot_pending_auto_range = False
         self._restore_plot_auto_range("plot1")
-        self._force_plot_range_to_curve_data("plot1", self.plot_curve_1)
+        forced = self._force_plot_range_to_curve_data("plot1", self.plot_curve_1)
+        if forced and self._time_plot_auto_range_frames_remaining > 0:
+            self._time_plot_auto_range_frames_remaining -= 1
         expected_axis = self._time_plot_axis_kind
         QTimer.singleShot(0, lambda axis=expected_axis: self._retry_time_plot_auto_range(axis))
         QTimer.singleShot(50, lambda axis=expected_axis: self._retry_time_plot_auto_range(axis))
+        QTimer.singleShot(150, lambda axis=expected_axis: self._retry_time_plot_auto_range(axis))
+        QTimer.singleShot(300, lambda axis=expected_axis: self._retry_time_plot_auto_range(axis))
 
     def _retry_time_plot_auto_range(self, expected_axis_kind: Optional[str]) -> None:
         """Repeat Tab1 range restoration after Qt has processed the latest curve update."""
         if expected_axis_kind != self._time_plot_axis_kind:
             return
         if self._plot_zoom_locked.get("plot1", False):
+            self._time_plot_auto_range_frames_remaining = 0
             return
         self._restore_plot_auto_range("plot1")
         self._force_plot_range_to_curve_data("plot1", self.plot_curve_1)
