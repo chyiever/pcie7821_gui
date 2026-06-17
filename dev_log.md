@@ -374,3 +374,21 @@ Phase 模式且 `Mode=space` 时，横轴改为 `Time (s)`，坐标数组按 $x=
 ### 验证要求
 
 本次需要执行 Python 语法检查、坐标公式自检、UTF-8 中文自检和 Git 差异检查。现场联机验证时重点确认 Raw 的 `DataRate` 切换、Phase-Time 的 `Rate2phase` 与 `Merge` 联动，以及 Phase-Space 的 `Scan` 时间刻度是否与界面参数一致。
+
+## 2026-06-17 Phase Space 时域波形不可见修复
+
+### 问题原因
+
+Phase 模式下 `Mode=space` 的数据抽取逻辑本身可以生成 `space_data`，上一轮坐标轴修改后也会生成秒级时间轴 $x=[1,2,\ldots,frame\_num]/\mathrm{Scan}$。实际无法显示波形的主要原因是 Tab1 的 ViewBox 在手动框选、平移或滚轮缩放后会关闭自动范围；当横轴从 `Distance (m)` 的米级范围切换到 `Time (s)` 的秒级范围时，旧视图范围仍然保留，新曲线落在可见范围之外。
+
+### 修复内容
+
+本次在 `src/main_window.py` 中增加 `_time_plot_axis_kind` 状态和 `_set_time_plot_axis()` 方法，用于统一处理 Tab1 时域图横轴标签与横轴语义切换。当横轴类型在 `distance` 与 `time` 之间变化时，程序会清空旧曲线、解除 `plot1` 缩放锁定并恢复自动范围。`_on_mode_changed()` 也同步调用该方法，使用户切换 `Time/Space` 单选按钮后，下一帧 Phase-Space 波形可以直接显示在秒级时间轴范围内。
+
+### 文档更新
+
+已更新 `docs/2026-6-17-tab1时域图坐标轴修改日志.md`，补充 Phase Space 模式波形不可见的原因分析、修复方案和流程图。
+
+### 验证要求
+
+本次需要继续执行 `python -m py_compile src/main_window.py`、坐标公式自检、横轴切换自动范围自检、UTF-8 中文自检和 `git diff --check`。现场验证时应先在 `Mode=time` 下缩放 Tab1，再切换到 `Mode=space`，确认横轴变为 `Time (s)` 后波形仍能自动出现在视图范围内。

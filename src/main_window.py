@@ -101,6 +101,7 @@ class MainWindow(QMainWindow):
         self.tcp_tab3_manager = TCPTab3Manager()
         self._interactive_plot_widgets: Dict[str, pg.PlotWidget] = {}
         self._plot_zoom_locked: Dict[str, bool] = {}
+        self._time_plot_axis_kind: Optional[str] = None
         self._settings_path = self._get_settings_path()
 
         # Parameters
@@ -505,7 +506,7 @@ class MainWindow(QMainWindow):
         display_layout.addWidget(QLabel("Mode:"), 0, 0)
         self.mode_time_radio = QRadioButton("Time")
         self.mode_space_radio = QRadioButton("Space")
-        # Time-space閫夐」绉诲姩鍒癟ab2锛岃繖閲屽彧淇濈暀Time鍜孲pace
+        # Time-space moved to Tab2; Tab1 keeps Time and Space modes.
         self.mode_time_radio.setChecked(True)
         mode_group = QButtonGroup(self)
         mode_group.addButton(self.mode_time_radio, 0)
@@ -886,7 +887,7 @@ class MainWindow(QMainWindow):
 
         # Set specific labels for each plot with consistent smaller fonts
         # Plot 1: Time Domain
-        self._set_time_plot_bottom_label('Distance (m)')
+        self._set_time_plot_axis('Distance (m)', 'distance')
         self.plot_widget_1.setLabel('left', 'Amp.',
                                    color='k', **{'font-family': 'Times New Roman', 'font-size': '8pt'})
 
@@ -1152,13 +1153,13 @@ class MainWindow(QMainWindow):
         self.frame_load_num_spin.valueChanged.connect(self._update_file_estimates)
         self.frame_plot_num_spin.valueChanged.connect(self._update_file_estimates)
 
-        # 杩炴帴妯″紡鍒囨崲淇″彿
+        # Connect display mode signals.
         self.mode_time_radio.toggled.connect(self._on_mode_changed)
         self.mode_space_radio.toggled.connect(self._on_mode_changed)
         self.waveform_enable_check.toggled.connect(self._on_waveform_display_toggled)
         self.monitor_enable_check.toggled.connect(self._on_monitor_display_toggled)
 
-        # 杩炴帴region index鍙樺寲淇″彿
+        # Connect region index changes.
         self.region_index_spin.valueChanged.connect(self._on_region_changed)
 
         # 初始化分析类型标签
@@ -2020,6 +2021,21 @@ class MainWindow(QMainWindow):
             **{'font-family': 'Times New Roman', 'font-size': '8pt'},
         )
 
+    def _set_time_plot_axis(self, label: str, axis_kind: str) -> None:
+        """Set Tab1 axis semantics and reset view when the x-axis unit changes."""
+        previous_axis_kind = self._time_plot_axis_kind
+        self._set_time_plot_bottom_label(label)
+        if previous_axis_kind == axis_kind:
+            return
+
+        self._time_plot_axis_kind = axis_kind
+        if previous_axis_kind is None:
+            return
+
+        self._clear_waveform_plot()
+        self._restore_plot_auto_range("plot1")
+        log.debug(f"Tab1 time plot axis changed: {previous_axis_kind} -> {axis_kind}")
+
     def _raw_distance_axis(self, point_count: int) -> np.ndarray:
         """Return Raw distance coordinates in meters, using 1-based point positions."""
         spacing_m = 0.1 * float(self.params.upload.data_rate or 1)
@@ -2054,7 +2070,7 @@ class MainWindow(QMainWindow):
         log.debug(f"Display mode: {self.params.display.mode}, Region index: {self.params.display.region_index}")
 
         if self.params.display.mode == DisplayMode.SPACE:
-            self._set_time_plot_bottom_label('Time (s)')
+            self._set_time_plot_axis('Time (s)', 'time')
             time_axis = self._phase_time_axis(frame_num)
 
             # Space mode: extract single region over time
@@ -2100,7 +2116,7 @@ class MainWindow(QMainWindow):
                         self.plot_curve_1[i].setData([])
 
         else:
-            self._set_time_plot_bottom_label('Distance (m)')
+            self._set_time_plot_axis('Distance (m)', 'distance')
             distance_axis = self._phase_distance_axis(point_num)
 
             # Time mode: show multiple frames overlay
@@ -2166,7 +2182,7 @@ class MainWindow(QMainWindow):
         if frame_num <= 0:
             return
 
-        self._set_time_plot_bottom_label('Distance (m)')
+        self._set_time_plot_axis('Distance (m)', 'distance')
         distance_axis = self._raw_distance_axis(point_num)
 
         if channel_num == 1:
@@ -2494,12 +2510,14 @@ class MainWindow(QMainWindow):
                     # 只更新显示模式相关参数
                     if self.mode_space_radio.isChecked():
                         self.params.display.mode = DisplayMode.SPACE
+                        self._set_time_plot_axis('Time (s)', 'time')
                         log.debug("Display mode changed to SPACE")
                     else:
                         self.params.display.mode = DisplayMode.TIME
+                        self._set_time_plot_axis('Distance (m)', 'distance')
                         log.debug("Display mode changed to TIME")
 
-                    # 鏇存柊region index
+                    # Update region index.
                     self.params.display.region_index = self.region_index_spin.value()
                 else:
                     log.warning("Params not initialized, mode change ignored")
@@ -2743,8 +2761,4 @@ class MainWindow(QMainWindow):
             progress_bar.setStyleSheet("QProgressBar::chunk { background-color: orange; }")
         else:
             progress_bar.setStyleSheet("QProgressBar::chunk { background-color: green; }")
-
-
-
-
 
