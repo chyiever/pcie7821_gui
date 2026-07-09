@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -29,6 +30,7 @@ import pyqtgraph as pg
 
 from logger import get_logger
 from plot_interaction import ZoomablePlotViewBox
+from realtime_filter import FilterSpecError, RealtimeTimeAxisFilter, parse_filter_spec
 
 
 log = get_logger("time_space_plot")
@@ -110,6 +112,10 @@ class TimeSpacePlotWidget(QWidget):
         self._vmin = -0.02
         self._vmax = 0.02
         self._scan_rate_hz = 2000.0
+        self._filter_enabled = False
+        self._filter_spec_text = "1-"
+        self._filter_error_text = ""
+        self._time_axis_filter = RealtimeTimeAxisFilter(order=2)
 
         self._plot_enabled = False
         self._pending_update = False
@@ -230,9 +236,9 @@ class TimeSpacePlotWidget(QWidget):
         group.setFont(QFont("Times New Roman", 9))
 
         layout = QGridLayout(group)
-        layout.setHorizontalSpacing(15)
-        layout.setVerticalSpacing(8)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
+        layout.setContentsMargins(6, 6, 6, 6)
 
         row = 0
         distance_label = QLabel("Distance Range:")
@@ -246,7 +252,7 @@ class TimeSpacePlotWidget(QWidget):
         self.distance_start_spin = QSpinBox()
         self.distance_start_spin.setRange(0, 1000000)
         self.distance_start_spin.setValue(self._distance_start)
-        self.distance_start_spin.setMaximumWidth(60)
+        self.distance_start_spin.setMaximumWidth(58)
         self.distance_start_spin.setFont(QFont("Times New Roman", 8))
         self.distance_start_spin.valueChanged.connect(self._on_distance_start_changed)
         layout.addWidget(self.distance_start_spin, row, 2)
@@ -258,7 +264,7 @@ class TimeSpacePlotWidget(QWidget):
         self.distance_end_spin = QSpinBox()
         self.distance_end_spin.setRange(1, 1000000)
         self.distance_end_spin.setValue(self._distance_end)
-        self.distance_end_spin.setMaximumWidth(60)
+        self.distance_end_spin.setMaximumWidth(58)
         self.distance_end_spin.setFont(QFont("Times New Roman", 8))
         self.distance_end_spin.valueChanged.connect(self._on_distance_end_changed)
         layout.addWidget(self.distance_end_spin, row, 4)
@@ -270,7 +276,7 @@ class TimeSpacePlotWidget(QWidget):
         self.window_frames_spin = QSpinBox()
         self.window_frames_spin.setRange(1, self._max_window_frames)
         self.window_frames_spin.setValue(self._window_frames)
-        self.window_frames_spin.setMaximumWidth(50)
+        self.window_frames_spin.setMaximumWidth(48)
         self.window_frames_spin.setFont(QFont("Times New Roman", 8))
         self.window_frames_spin.valueChanged.connect(self._on_window_frames_changed)
         layout.addWidget(self.window_frames_spin, row, 6)
@@ -282,7 +288,7 @@ class TimeSpacePlotWidget(QWidget):
         self.time_downsample_spin = QSpinBox()
         self.time_downsample_spin.setRange(1, 1000)
         self.time_downsample_spin.setValue(self._time_downsample)
-        self.time_downsample_spin.setMaximumWidth(50)
+        self.time_downsample_spin.setMaximumWidth(48)
         self.time_downsample_spin.setFont(QFont("Times New Roman", 8))
         self.time_downsample_spin.valueChanged.connect(self._on_time_downsample_changed)
         layout.addWidget(self.time_downsample_spin, row, 8)
@@ -294,7 +300,7 @@ class TimeSpacePlotWidget(QWidget):
         self.space_downsample_spin = QSpinBox()
         self.space_downsample_spin.setRange(1, 100)
         self.space_downsample_spin.setValue(self._space_downsample)
-        self.space_downsample_spin.setMaximumWidth(50)
+        self.space_downsample_spin.setMaximumWidth(48)
         self.space_downsample_spin.setFont(QFont("Times New Roman", 8))
         self.space_downsample_spin.valueChanged.connect(self._on_space_downsample_changed)
         layout.addWidget(self.space_downsample_spin, row, 10)
@@ -313,7 +319,7 @@ class TimeSpacePlotWidget(QWidget):
         self.vmin_spin.setDecimals(6)
         self.vmin_spin.setSingleStep(0.001)
         self.vmin_spin.setValue(self._vmin)
-        self.vmin_spin.setMaximumWidth(85)
+        self.vmin_spin.setMaximumWidth(82)
         self.vmin_spin.setFont(QFont("Times New Roman", 8))
         self.vmin_spin.valueChanged.connect(self._on_vmin_changed)
         layout.addWidget(self.vmin_spin, row, 2)
@@ -327,7 +333,7 @@ class TimeSpacePlotWidget(QWidget):
         self.vmax_spin.setDecimals(6)
         self.vmax_spin.setSingleStep(0.001)
         self.vmax_spin.setValue(self._vmax)
-        self.vmax_spin.setMaximumWidth(85)
+        self.vmax_spin.setMaximumWidth(82)
         self.vmax_spin.setFont(QFont("Times New Roman", 8))
         self.vmax_spin.valueChanged.connect(self._on_vmax_changed)
         layout.addWidget(self.vmax_spin, row, 4)
@@ -337,7 +343,7 @@ class TimeSpacePlotWidget(QWidget):
         layout.addWidget(colormap_label, row, 5)
 
         self.colormap_combo = QComboBox()
-        self.colormap_combo.setMaximumWidth(80)
+        self.colormap_combo.setMaximumWidth(76)
         self.colormap_combo.setFont(QFont("Times New Roman", 8))
         for name, value in COLORMAP_OPTIONS:
             self.colormap_combo.addItem(name, value)
@@ -345,21 +351,40 @@ class TimeSpacePlotWidget(QWidget):
         self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
         layout.addWidget(self.colormap_combo, row, 6)
 
+        filter_label = QLabel("Filter:")
+        filter_label.setFont(QFont("Times New Roman", 8))
+        layout.addWidget(filter_label, row, 7)
+
+        self.filter_spec_edit = QLineEdit(self._filter_spec_text)
+        self.filter_spec_edit.setMaximumWidth(70)
+        self.filter_spec_edit.setFont(QFont("Times New Roman", 8))
+        self.filter_spec_edit.setToolTip("Examples: 1- high-pass, -10 low-pass, 2-10 band-pass")
+        self.filter_spec_edit.editingFinished.connect(self._on_filter_spec_changed)
+        layout.addWidget(self.filter_spec_edit, row, 8)
+
+        self.filter_btn = QPushButton("FILTER")
+        self.filter_btn.setFont(QFont("Times New Roman", 8, QFont.Bold))
+        self.filter_btn.setMaximumWidth(68)
+        self.filter_btn.setCheckable(True)
+        self.filter_btn.clicked.connect(self._on_filter_button_clicked)
+        self._update_filter_button_style()
+        layout.addWidget(self.filter_btn, row, 9)
+
         reset_btn = QPushButton("Reset to Defaults")
         reset_btn.setFont(QFont("Times New Roman", 8))
-        reset_btn.setMaximumWidth(120)
+        reset_btn.setMaximumWidth(104)
         reset_btn.clicked.connect(self._reset_to_defaults)
-        layout.addWidget(reset_btn, row, 7)
+        layout.addWidget(reset_btn, row, 10)
 
         self.plot_btn = QPushButton("PLOT")
         self.plot_btn.setFont(QFont("Times New Roman", 8, QFont.Bold))
-        self.plot_btn.setMaximumWidth(60)
+        self.plot_btn.setMaximumWidth(56)
         self.plot_btn.setCheckable(True)
         self.plot_btn.clicked.connect(self._on_plot_button_clicked)
         self._update_plot_button_style()
-        layout.addWidget(self.plot_btn, row, 8)
+        layout.addWidget(self.plot_btn, row, 11)
 
-        layout.setColumnStretch(11, 1)
+        layout.setColumnStretch(12, 1)
         return group
 
     def _get_colormap(self, colormap_name: str) -> Optional[pg.ColorMap]:
@@ -427,8 +452,20 @@ class TimeSpacePlotWidget(QWidget):
             self.image_item.setImage(np.zeros((1, 1)), autoLevels=False)
             self.image_item.setLevels((self._vmin, self._vmax))
 
+    def _reset_filter_state(self):
+        self._time_axis_filter.reset_state()
+
+    def _set_filter_error(self, message: str):
+        self._filter_error_text = message
+        if hasattr(self, "filter_spec_edit"):
+            self.filter_spec_edit.setToolTip(
+                message or "Examples: 1- high-pass, -10 low-pass, 2-10 band-pass"
+            )
+        self._update_filter_button_style()
+
     def _on_plot_button_clicked(self, checked: bool):
         self._plot_enabled = checked
+        self._reset_filter_state()
         if not checked:
             self._pending_update = False
             self._display_update_timer.stop()
@@ -466,11 +503,56 @@ class TimeSpacePlotWidget(QWidget):
                 """
             )
 
+    def _update_filter_button_style(self):
+        if self._filter_enabled and self._filter_error_text:
+            self.filter_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #F57C00;
+                    color: white;
+                    border: 1px solid #E65100;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #EF6C00;
+                }
+                """
+            )
+        elif self._filter_enabled:
+            self.filter_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #1976D2;
+                    color: white;
+                    border: 1px solid #1565C0;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #1565C0;
+                }
+                """
+            )
+        else:
+            self.filter_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #9E9E9E;
+                    color: white;
+                    border: 1px solid #757575;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #757575;
+                }
+                """
+            )
+
     def _on_distance_start_changed(self, value: int):
         self._distance_start = value
         if self._distance_end <= self._distance_start:
             self.distance_end_spin.setValue(self._distance_start + 1)
             return
+        self._reset_filter_state()
         self._invalidate_display_buffer(clear_image=True)
         self.parametersChanged.emit()
 
@@ -479,6 +561,7 @@ class TimeSpacePlotWidget(QWidget):
             self.distance_end_spin.setValue(self._distance_start + 1)
             return
         self._distance_end = value
+        self._reset_filter_state()
         self._invalidate_display_buffer(clear_image=True)
         self.parametersChanged.emit()
 
@@ -489,6 +572,7 @@ class TimeSpacePlotWidget(QWidget):
 
     def _on_space_downsample_changed(self, value: int):
         self._space_downsample = value
+        self._reset_filter_state()
         self._invalidate_display_buffer(clear_image=True)
         self.parametersChanged.emit()
 
@@ -521,6 +605,41 @@ class TimeSpacePlotWidget(QWidget):
         self._apply_color_levels()
         self.parametersChanged.emit()
 
+    def _on_filter_spec_changed(self):
+        text = self.filter_spec_edit.text().strip()
+        self._filter_spec_text = text
+        self._time_axis_filter.reset_design()
+        if self._filter_enabled:
+            self._invalidate_display_buffer(clear_image=True)
+            try:
+                filter_spec = parse_filter_spec(text)
+                self._time_axis_filter.configure(filter_spec, self._scan_rate_hz)
+                self._set_filter_error("")
+            except FilterSpecError as exc:
+                self._set_filter_error(str(exc))
+                log.warning("Invalid time-space filter parameter: %s", exc)
+        else:
+            self._set_filter_error("")
+        self.parametersChanged.emit()
+
+    def _on_filter_button_clicked(self, checked: bool):
+        self._filter_enabled = checked
+        self._time_axis_filter.reset_design()
+        self._invalidate_display_buffer(clear_image=True)
+        if checked:
+            self._filter_spec_text = self.filter_spec_edit.text().strip()
+            try:
+                filter_spec = parse_filter_spec(self._filter_spec_text)
+                self._time_axis_filter.configure(filter_spec, self._scan_rate_hz)
+                self._set_filter_error("")
+            except FilterSpecError as exc:
+                self._set_filter_error(str(exc))
+                log.warning("Time-space filter enabled with invalid parameter: %s", exc)
+        else:
+            self._set_filter_error("")
+        self._update_filter_button_style()
+        self.parametersChanged.emit()
+
     def _reset_to_defaults(self):
         self.window_frames_spin.setValue(5)
         self.distance_start_spin.setValue(40)
@@ -530,6 +649,12 @@ class TimeSpacePlotWidget(QWidget):
         self.colormap_combo.setCurrentText("Jet")
         self.vmin_spin.setValue(-0.02)
         self.vmax_spin.setValue(0.02)
+        self.filter_spec_edit.setText("1-")
+        self._filter_spec_text = "1-"
+        self.filter_btn.setChecked(False)
+        self._filter_enabled = False
+        self._set_filter_error("")
+        self._time_axis_filter.reset_design()
         self._invalidate_display_buffer(clear_image=True)
         self.parametersChanged.emit()
 
@@ -547,7 +672,33 @@ class TimeSpacePlotWidget(QWidget):
 
     def set_scan_rate(self, scan_rate_hz: float):
         if scan_rate_hz > 0:
-            self._scan_rate_hz = float(scan_rate_hz)
+            new_scan_rate = float(scan_rate_hz)
+            if abs(self._scan_rate_hz - new_scan_rate) > 1e-12:
+                self._scan_rate_hz = new_scan_rate
+                self._time_axis_filter.reset_design()
+                if self._filter_enabled:
+                    self._invalidate_display_buffer(clear_image=True)
+
+    def _apply_realtime_filter(self, display_block: np.ndarray) -> np.ndarray:
+        if not self._filter_enabled:
+            return display_block
+
+        try:
+            filter_spec = parse_filter_spec(self._filter_spec_text)
+            filtered = self._time_axis_filter.process(
+                display_block,
+                filter_spec,
+                self._scan_rate_hz,
+            )
+            if self._filter_error_text:
+                self._set_filter_error("")
+            return filtered
+        except FilterSpecError as exc:
+            message = str(exc)
+            if message != self._filter_error_text:
+                log.warning("Time-space filter skipped: %s", message)
+            self._set_filter_error(message)
+            return display_block
 
     def update_data(self, data: np.ndarray) -> bool:
         if not self._plot_enabled:
@@ -583,6 +734,7 @@ class TimeSpacePlotWidget(QWidget):
         display_block = data_block[:, start_idx:end_idx]
         if self._space_downsample > 1:
             display_block = display_block[:, :: self._space_downsample]
+        display_block = self._apply_realtime_filter(display_block)
         if self._time_downsample > 1:
             display_block = display_block[:: self._time_downsample, :]
 
@@ -672,6 +824,12 @@ class TimeSpacePlotWidget(QWidget):
             self._view_box.autoRange(padding=0.0)
 
     def get_parameters(self):
+        filter_spec_text = (
+            self.filter_spec_edit.text().strip()
+            if hasattr(self, "filter_spec_edit")
+            else self._filter_spec_text
+        )
+        self._filter_spec_text = filter_spec_text
         return {
             "window_frames": self._window_frames,
             "distance_range_start": self._distance_start,
@@ -681,6 +839,8 @@ class TimeSpacePlotWidget(QWidget):
             "colormap_type": self._colormap,
             "vmin": self._vmin,
             "vmax": self._vmax,
+            "filter_enabled": self._filter_enabled,
+            "filter_spec": filter_spec_text,
         }
 
     def set_parameters(self, params):
@@ -699,6 +859,23 @@ class TimeSpacePlotWidget(QWidget):
                 if value == params["colormap_type"]:
                     self.colormap_combo.setCurrentText(name)
                     break
+        if "filter_spec" in params:
+            self._filter_spec_text = str(params["filter_spec"])
+            self.filter_spec_edit.setText(self._filter_spec_text)
+        if "filter_enabled" in params:
+            enabled = bool(params["filter_enabled"])
+            self._filter_enabled = enabled
+            self.filter_btn.setChecked(enabled)
+            self._time_axis_filter.reset_design()
+            if enabled:
+                try:
+                    filter_spec = parse_filter_spec(self._filter_spec_text)
+                    self._time_axis_filter.configure(filter_spec, self._scan_rate_hz)
+                    self._set_filter_error("")
+                except FilterSpecError as exc:
+                    self._set_filter_error(str(exc))
+            else:
+                self._set_filter_error("")
         if "vmin" in params or "vmax" in params:
             vmin = float(params.get("vmin", self._vmin))
             vmax = float(params.get("vmax", self._vmax))

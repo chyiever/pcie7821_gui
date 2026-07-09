@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='eDAS26.6.18',
+    name='eDAS26.7.9',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

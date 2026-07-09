@@ -171,6 +171,8 @@ class TimeSpaceParams:
         colormap_type: Colormap type for 2D visualization
         vmin: Minimum value for color mapping
         vmax: Maximum value for color mapping
+        filter_enabled: Enable display-only realtime temporal filtering
+        filter_spec: Cutoff text, e.g. "1-", "-10", or "2-10"
 
     Performance: Larger windows and lower downsampling provide better visualization
                 but require more memory and processing power.
@@ -183,6 +185,8 @@ class TimeSpaceParams:
     colormap_type: str = "jet"              # PyQtGraph colormap name
     vmin: float = -0.02                     # Color range minimum (updated for phase data)
     vmax: float = 0.02                      # Color range maximum (updated for phase data)
+    filter_enabled: bool = False            # Display-only filter switch for Tab2
+    filter_spec: str = "1-"                 # 1- high-pass, -10 low-pass, 2-10 band-pass
 
 
 @dataclass

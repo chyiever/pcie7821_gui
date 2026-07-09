@@ -462,3 +462,53 @@ Phase 模式下 `Mode=space` 的数据抽取逻辑本身可以生成 `space_data
 ### 验证情况
 
 已执行 `python -m py_compile src/main_window.py`，语法检查通过。现场验证时重点复测 Phase 模式下 `Mode=time -> Mode=space`：先在 Time 距离轴中手动框选或缩放，再切换到 Space，确认不再需要手动画矩形和点击 Auto，秒级时间轴波形应直接出现。
+
+## 2026-07-09 Tab2 Space-Time 实时滤波预处理
+
+### 问题背景
+
+现场需要在 Tab2 Space-Time 图绘制前增加数据流实时滤波，用于观察特定频带内的时空变化。该功能必须保持显示侧边界清晰：只能影响 Tab2 的二维图像显示，不能改变保存数据，也不能改变 Tab1 的时域曲线、PSD 或 Monitor 图。
+
+同时，滤波对象不是单个空间点，而是 Space-Time 图中所有实际绘制的位置点的时间序列。由于 Tab2 属于实时刷新控件，不能为每个点写 Python 循环，也不能对每个显示窗口独立做零相位滤波，否则会带来明显卡顿或窗口边沿突跳。
+
+### 修改内容
+
+本次新增 `src/realtime_filter.py`，封装显示侧实时滤波能力。该模块提供 `parse_filter_spec()` 解析 `1-`、`-10`、`2-10` 三类参数，并通过 `RealtimeTimeAxisFilter` 使用 `scipy.signal.butter(..., output="sos")` 和 `scipy.signal.sosfilt()` 对 `frames x positions` 矩阵沿时间轴执行向量化 IIR 滤波。
+
+`src/time_space_plot.py` 中新增 Tab2 第二行滤波控件：`Filter` 参数输入框和 `FILTER` 开关按钮。滤波接入点位于 `_build_display_block()` 内部，执行顺序为：距离范围裁剪、空间降采样、实时滤波、时间降采样、转置并写入滚动显示缓冲。这样滤波处理的是实际要绘制的每个位置点，同时仍使用真实 `Scan(Hz)` 作为滤波采样率，避免先 `Time DS` 后滤波导致低频截止语义失真。
+
+为了避免每个实时窗口边沿突跳，滤波器保留每个位置点的 SOS 状态，并在后续数据包中继续使用上一包返回的状态。只有滤波参数、采样率、距离范围、空间降采样或 PLOT 状态变化时才重置状态。对于 `0.1-` 这类低频高通，即使单包长度只有 1 秒，滤波仍按连续数据流处理；启动阶段允许有秒级到十秒级的自然稳定过程，但不会把每个 1 秒包当成独立窗口重新滤波。
+
+`src/config.py` 的 `TimeSpaceParams` 新增 `filter_enabled` 和 `filter_spec`，`src/main_window.py` 同步补齐 Tab2 参数保存与恢复。`build_exe.py` 和 `eDAS26.6.18.spec` 已补充 `realtime_filter` hidden import，避免后续打包遗漏新模块。
+
+### 与既有 exe 的功能差异
+
+本次已按当前源码打包生成 `dist/eDAS26.7.9.exe`。该 exe 与之前已生成的 `eDAS26.6.18.exe`、`eDAS26.6.14.exe` 的主要功能差异如下：
+
+- 相比 `eDAS26.6.18.exe`，`eDAS26.7.9.exe` 新增 Tab2 Space-Time 图显示前的实时滤波功能。用户可在 Tab2 绘图参数第二行使用 `Filter` 输入框和 `FILTER` 按钮，对 Space-Time 图实际绘制的所有位置点时域数据执行显示侧滤波。
+- `eDAS26.7.9.exe` 支持 `1-` 高通、`-10` 低通、`2-10` 带通等参数格式，也支持类似 `0.1-` 的低频高通输入。无效参数或超过当前 `Scan(Hz)` Nyquist 频率的参数会被提示并跳过滤波。
+- `eDAS26.7.9.exe` 的滤波状态会跨实时数据包保存，避免每个窗口独立滤波导致边沿突跳；`eDAS26.6.18.exe` 和 `eDAS26.6.14.exe` 没有该 Tab2 滤波状态链路。
+- 该滤波只影响 Tab2 Space-Time 图像缓冲，不改变保存文件，不改变 Tab1 时域图、PSD 或 Monitor 图。旧 exe 的保存和 Tab1 显示行为因此可作为对照基线。
+- 相比 `eDAS26.6.14.exe`，`eDAS26.7.9.exe` 同时包含 2026-06-18 版本已完成的 Tab1 Phase `time -> space` 显示恢复优化；`eDAS26.6.14.exe` 不包含后续 6 月 17 日至 6 月 18 日围绕 Tab1 横轴切换和自动范围恢复的多轮修正。
+- 本次打包使用 `python build_exe.py --name eDAS26.7.9 --skip-clean`，未删除或覆盖 `dist` 目录下既有的 `eDAS26.6.14.exe` 和 `eDAS26.6.18.exe`。
+
+### 涉及文件
+
+- `src/realtime_filter.py`
+- `src/time_space_plot.py`
+- `src/config.py`
+- `src/main_window.py`
+- `build_exe.py`
+- `eDAS26.6.18.spec`
+- `docs/2026-07-09-Tab2-Space-Time实时滤波功能开发日志.md`
+- `dev_log.md`
+
+### 验证情况
+
+已执行 `python -m py_compile src\realtime_filter.py src\time_space_plot.py src\config.py src\main_window.py`，语法检查通过。
+
+已执行小型滤波自检，覆盖 `1-`、`-10`、`2-10` 和 `0.1-` 参数解析，并确认连续两次处理 1 秒矩阵数据时输出形状正确、结果为有限值、输入数组未被原地修改。
+
+已执行 `git diff --check`，未发现空白错误；命令仅提示 Windows 环境下 LF/CRLF 行尾转换。
+
+现场联机验证时，重点确认 Filter 关闭时行为与旧版本一致；Filter 开启后只改变 Tab2 Space-Time 图；`0.1-` 在连续观察时不出现每个包边沿突跳；超过 Nyquist 的截止频率会提示无效并跳过滤波。

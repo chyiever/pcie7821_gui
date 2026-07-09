@@ -170,6 +170,7 @@ def build_hidden_imports() -> List[str]:
         "data_saver",
         "spectrum_analyzer",
         "time_space_plot",
+        "realtime_filter",
         "plot_interaction",
         "tcp_tab3",
         "tcp_tab3.tcp_types",

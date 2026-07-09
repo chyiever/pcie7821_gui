@@ -1459,6 +1459,8 @@ class MainWindow(QMainWindow):
                     "colormap_type": params.time_space.colormap_type,
                     "vmin": params.time_space.vmin,
                     "vmax": params.time_space.vmax,
+                    "filter_enabled": getattr(params.time_space, "filter_enabled", False),
+                    "filter_spec": getattr(params.time_space, "filter_spec", "1-"),
                 }
             )
             self.time_space_widget.set_scan_rate(params.basic.scan_rate)
@@ -1568,6 +1570,8 @@ class MainWindow(QMainWindow):
             params.time_space.colormap_type = ts_params['colormap_type']
             params.time_space.vmin = ts_params['vmin']
             params.time_space.vmax = ts_params['vmax']
+            params.time_space.filter_enabled = ts_params.get('filter_enabled', False)
+            params.time_space.filter_spec = ts_params.get('filter_spec', "1-")
 
         # Save params
         params.save.enable = self.save_enable_check.isChecked()
