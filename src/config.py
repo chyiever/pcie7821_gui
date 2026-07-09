@@ -231,7 +231,7 @@ class SaveParams:
         enable: Enable/disable automatic data saving
         path: Directory path for data files (must exist and be writable)
         file_prefix: Optional prefix for generated filenames
-        frames_per_file: Automatic file splitting threshold
+        blocks_per_file: Automatic file splitting threshold, counted in complete acquisition blocks
 
     Filename Format: {seq}-eDAS-{rate}Hz-{points}pt-{timestamp}.{ms}.bin
     Storage Format: Raw int32 phase data (4 bytes per point)
@@ -241,7 +241,7 @@ class SaveParams:
     enable: bool = False
     path: str = "D:/eDAS_DATA"               # Default storage directory
     file_prefix: str = ""                    # Optional filename prefix
-    frames_per_file: int = 10                # Auto-split after N frames
+    blocks_per_file: int = 10                # Auto-split after N complete acquisition blocks
 
 
 @dataclass

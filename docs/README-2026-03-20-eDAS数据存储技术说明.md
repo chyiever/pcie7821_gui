@@ -14,7 +14,7 @@
 flowchart LR
     A[DLL 缓冲区] --> B[AcquisitionThread 读取完整块]
     B --> C[MainWindow 完整块处理器]
-    C --> D[FrameBasedFileSaver.save]
+    C --> D[BlockBasedFileSaver.save_block]
     D --> E[queue.Queue 非阻塞入队]
     E --> F[后台保存线程]
     F --> G[当前 bin 文件]
@@ -24,7 +24,7 @@ flowchart LR
 
 ## 3. 当前保存的数据类型与物理语义
 
-当前代码中的保存器 `DataSaver`/`FrameBasedFileSaver` 最终都会把输入数据写成二进制字节流。若传入的是 NumPy 数组，则 `_write_data()` 会在写入前判断数据类型；当 `dtype` 不是 `int32` 时，会先执行 `astype(np.int32)`，随后调用 `tobytes()` 写文件。这意味着当前主保存格式的逻辑基线是“按 `int32` 保存”。
+当前代码中的保存器 `DataSaver`/`BlockBasedFileSaver` 最终都会把输入数据写成二进制字节流。若传入的是 NumPy 数组，则 `_write_data()` 会在写入前判断数据类型；当 `dtype` 不是 `int32` 时，会先执行 `astype(np.int32)`，随后调用 `tobytes()` 写文件。这意味着当前主保存格式的逻辑基线是“按 `int32` 保存”。
 
 这里需要分清三个层面的数据语义。第一，硬件原始 ADC 或 IQ 数据在底层可能是 `int16`；第二，PHASE 数据在 DLL 与采集线程侧已经是 `int32`；第三，GUI 勾选 `rad` 后显示的弧度值只是显示态，不是保存态。因此，磁盘文件中的主保存值不是“屏幕上看到的最终物理单位”，而是“保存器接收到的原始整型块，必要时统一扩成 `int32` 后的二进制表示”。
 
@@ -46,7 +46,21 @@ PHASE 数据在到达保存器之前，已经可能经历过底层相位链路�
 
 ## 6. 分文件策略
 
-当前主保存器是 `FrameBasedFileSaver`。它的设计思路是按“收到多少个完整采集块”来决定何时切换到下一个文件，而不是按固定时长、固定字节数或 GUI 刷新次数切换。这样设计的直接好处是，文件边界与采集块边界一致，不容易在切换文件时把同一块数据一分为二，也更容易基于 `FrameLoad` 和 `frames_per_file` 估算单文件大小与持续时间。
+当前主保存器是 `BlockBasedFileSaver`。它的设计思路是按“收到多少个完整采集块”来决定何时切换到下一个文件，而不是按固定时长、固定字节数或 GUI 刷新次数切换。这样设计的直接好处是，文件边界与采集块边界一致，不容易在切换文件时把同一块数据一分为二，也更容易基于 `FrameLoad` 和 `blocks_per_file` 估算单文件大小与持续时间。
+
+界面上的保存切分参数已经命名为 `Blocks/File`。这里的 `Block` 指一次 `FrameLoad` 读取形成的完整采集块，关系是：
+
+$$
+1\ \mathrm{Block} = \mathrm{FrameLoad}\ \mathrm{frames}
+$$
+
+因此 `Blocks/File` 不是“每个文件多少单帧”，而是“每个文件保存多少个完整采集块”。例如 `ScanRate=1000 Hz`、`FrameLoad=1000` 时，一个完整块覆盖
+
+$$
+T_{\mathrm{block}} = \frac{1000}{1000}=1\ \mathrm{s}
+$$
+
+若此时 `Blocks/File=10`，程序会约每秒把一个完整块追加写入当前 `.bin`，写满 10 个块后切到下一个文件。换句话说，写入节奏约为 1 秒一次，分文件节奏约为 10 秒一次；它不是攒够 10 秒后才一次性写盘。
 
 如果把每个完整采集块的元素数记为 $N_{\mathrm{block}}$，单点字节数记为 $S_{\mathrm{point}}$，则一个块的字节数是
 
@@ -54,19 +68,39 @@ $$
 B_{\mathrm{block}} = N_{\mathrm{block}} \times S_{\mathrm{point}}
 $$
 
-若每个文件保存 `frames_per_file` 个完整块，则单文件理论大小约为
+若每个文件保存 `blocks_per_file` 个完整块，则单文件理论大小约为
 
 $$
-B_{\mathrm{file}} = \mathrm{frames\_per\_file} \times B_{\mathrm{block}}
+B_{\mathrm{file}} = \mathrm{blocks\_per\_file} \times B_{\mathrm{block}}
 $$
 
-这里要注意，变量名 `frames_per_file` 在当前项目语境里更接近“每文件保存多少个完整采集块”，而不是严格意义上的单帧。由于上位机每次读取到的是一块 `FrameLoad` 帧组成的完整块，文件分割实际上也是围绕这个块粒度工作。后续命名若有机会进一步澄清，可考虑在不破坏兼容性的前提下改成更接近“blocks_per_file”的语义。
+单个 `.bin` 文件达到 200 MB 通常不是导致界面卡顿的直接原因，因为当前保存链路不会攒够 200 MB 后一次性写入，而是每个完整块到达后由后台保存线程持续追加写当前文件。`Blocks/File` 设大只会降低切文件频率、增大单文件体积；真正需要关注的是持续写入速率、保存队列是否堆积，以及分文件或停止保存时 `flush/close` 是否明显耗时。一般来说，本机 SSD 上 100 MB 到 300 MB 的单文件大小比较合理；超过 1 GB 虽然也可能工作，但离线拷贝、解析和异常恢复都会更麻烦，不建议作为默认值。
 
 ## 7. 队列、背压与丢块策略
 
-保存器前端使用 `queue.Queue(maxsize=buffer_size)`，采集侧或主窗口侧调用 `save()` 时使用 `put_nowait()` 非阻塞入队。如果队列已满，当前块会被直接丢弃，并增加 `dropped_blocks` 计数，同时输出告警日志。这个策略意味着：在保存链路无法跟上持续采集速率时，程序不会因为等待磁盘而阻塞前台线程，而是宁可丢失部分待保存块。
+保存器前端使用 `queue.Queue(maxsize=buffer_size)`，采集侧或主窗口侧调用 `save_block()` 时最终使用 `put_nowait()` 非阻塞入队。如果队列已满，当前块会被直接丢弃，并增加 `dropped_blocks` 计数，同时输出告警日志。这个策略意味着：在保存链路无法跟上持续采集速率时，程序不会因为等待磁盘而阻塞前台线程，而是宁可丢失部分待保存块。
 
 这种取舍在工程上是合理的，因为在当前架构里，保存线程的阻塞不能反向拖死 GUI 或采集线程。但它也带来一个很现实的结论：只要磁盘吞吐、文件系统抖动或目标路径问题让后台写盘明显落后，保存结果就不再天然等于“完整采集历史”。因此，正式实验前应先用目标参数组合做持续写盘测试，而不是默认保存一定可靠。
+
+平均每秒保存量主要由每帧有效点数、`ScanRate`、通道数和保存字节数决定，而不是由 `FrameLoad` 或 `Blocks/File` 决定。估算公式为：
+
+$$
+R_{\mathrm{save}} =
+\mathrm{points\_per\_frame} \times
+\mathrm{ScanRate} \times
+\mathrm{ChannelNum} \times
+S_{\mathrm{point}}
+$$
+
+当前保存器会把非 `int32` 的 NumPy 数组转成 `int32` 后落盘，因此保守估算时可先取 $S_{\mathrm{point}}=4$ 字节。`FrameLoad` 改变的是单块大小和单块周期：
+
+$$
+T_{\mathrm{block}} = \frac{\mathrm{FrameLoad}}{\mathrm{ScanRate}}
+$$
+
+如果 `last_write_ms` 长期明显小于 `T_{\mathrm{block}}`，并且保存队列接近 0、`dropped_blocks=0`，说明保存链路健康。反之，如果 `last_write_ms` 经常接近或超过单块周期，`Storage queue` 持续上涨，或者 `dropped_blocks` 增加，就说明保存链路已经跟不上持续采集速率。
+
+工程建议是：长期正式保存尽量控制在 30 到 80 MB/s；本机 SSD 上 50 到 150 MB/s 通常需要结合日志确认；超过 150 MB/s 不应默认可靠，必须做持续测试；机械硬盘、移动硬盘、U 盘或网络盘建议更保守，优先控制在 30 到 60 MB/s。现场判断时不要只看磁盘标称速度，因为程序还包含 DLL 读取、NumPy 数组传递、可能的 `int32` 转换、后台队列和 GUI 线程等额外开销。
 
 从后续演进角度看，如果要提升可靠性，可以从三条线入手。第一，增加更明确的保存状态提示，例如连续告警、红色状态栏或自动停止策略。第二，引入可选的阻塞/非阻塞模式，允许不同场景在实时性和完整性之间做选择。第三，在后台保存器中增加更明确的错误恢复协议，而不仅仅是持续记录异常。
 
@@ -84,7 +118,7 @@ $$
 
 ## 10. 离线解析建议
 
-由于当前文件格式不自描述，离线解析前至少要确认以下条件：数据源是 Raw 还是 PHASE，保存时是否启用了单通道 PHASE 裁剪，`FrameLoad` 与每块实际点数是多少，通道数是多少，以及当前文件是一块一写还是多块拼接。若是 PHASE 单通道文件，常见恢复方式是先按 `int32` 读入一维数组，再根据
+由于当前文件格式不自描述，离线解析前至少要确认以下条件：数据源是 Raw 还是 PHASE，保存时是否启用了单通道 PHASE 裁剪，`FrameLoad` 与每块实际点数是多少，通道数是多少，`Blocks/File` 设置是多少，以及当前文件是一块一写还是多块拼接。若是 PHASE 单通道文件，常见恢复方式是先按 `int32` 读入一维数组，再根据
 
 $$
 \mathrm{points\_per\_block} = \mathrm{frame\_load} \times \mathrm{effective\_points\_per\_frame}

@@ -298,42 +298,46 @@ class DataSaver:
         self.stop()
 
 
-# ----- FRAME-BASED FILE SAVER -----
-# Primary saver: splits files after N frames for manageable file sizes.
+# ----- BLOCK-BASED FILE SAVER -----
+# Primary saver: splits files after N complete acquisition blocks for manageable file sizes.
 # Filename: {seq}-eDAS-{rate}Hz-{points}pt-{timestamp}.{ms}.bin
 
-class FrameBasedFileSaver(DataSaver):
+class BlockBasedFileSaver(DataSaver):
     """
-    Frame-based file saver that creates new files after N frames.
-    Each frame is treated as one data package.
+    Block-based file saver that creates new files after N acquisition blocks.
+    One block is the complete payload produced by one FrameLoad read.
 
     Filename format: {seq}-eDAS-{rate}Hz-{points}pt-{timestamp}.{ms}.bin
     Example: 0000001-eDAS-1000Hz-0162pt-20260126T014051.256.bin
     """
 
     def __init__(self, save_path: str = "D:/eDAS_DATA",
-                 frames_per_file: int = 10,
-                 buffer_size: int = 200):
+                 blocks_per_file: int = 10,
+                 buffer_size: int = 200,
+                 frames_per_file: Optional[int] = None):
         """
-        Initialize frame-based file saver.
+        Initialize block-based file saver.
 
         Args:
             save_path: Directory to save files (default D:/eDAS_DATA)
-            frames_per_file: Number of frames per file (default 10)
+            blocks_per_file: Number of complete acquisition blocks per file (default 10)
             buffer_size: Maximum number of data blocks in queue (increased to 200)
+            frames_per_file: Backward-compatible alias for blocks_per_file
         """
         super().__init__(save_path, buffer_size)
-        self.frames_per_file = frames_per_file
-        self._frame_count = 0
+        if frames_per_file is not None:
+            blocks_per_file = frames_per_file
+        self.blocks_per_file = blocks_per_file
+        self._block_count = 0
         self._total_bytes_all_files = 0
         self._total_files_created = 0
         self._scan_rate = 2000
         self._points_per_frame = 0
-        self._frames_per_file = frames_per_file
+        self._blocks_per_file = blocks_per_file
 
     def start(self, file_no: Optional[int] = None, scan_rate: int = 2000,
               points_per_frame: int = 0) -> str:
-        """Start saving with frame-based splitting capability"""
+        """Start saving with block-based splitting capability"""
         if self._running:
             return self._current_filename
 
@@ -348,7 +352,7 @@ class FrameBasedFileSaver(DataSaver):
 
         self._scan_rate = scan_rate
         self._points_per_frame = points_per_frame
-        self._frame_count = 0
+        self._block_count = 0
         self._total_files_created = 1
 
         # Create filename: seq-eDAS-rateHz-pointspt-timestamp.ms.bin
@@ -358,7 +362,7 @@ class FrameBasedFileSaver(DataSaver):
         filepath = self.save_path / self._current_filename
         self._file_handle = open(filepath, 'wb')
 
-        log.info(f"Started frame-based saving to {filepath}")
+        log.info(f"Started block-based saving to {filepath}")
 
         # Reset statistics
         self._bytes_written = 0
@@ -379,30 +383,34 @@ class FrameBasedFileSaver(DataSaver):
 
         return self._current_filename
 
-    def save_frame(self, frame_data: np.ndarray) -> bool:
+    def save_block(self, block_data: np.ndarray) -> bool:
         """
-        Save one frame of data and check for file splitting.
+        Save one complete acquisition block and check for file splitting.
 
         Args:
-            frame_data: Frame data array
+            block_data: Complete acquisition block array
 
         Returns:
-            True if frame was saved successfully
+            True if block was queued successfully
         """
         if not self._running:
             return False
 
-        success = self.save(frame_data)
+        success = self.save(block_data)
 
         if success:
-            self._frame_count += 1
-            log.debug(f"Saved frame {self._frame_count}/{self.frames_per_file}")
+            self._block_count += 1
+            log.debug(f"Saved block {self._block_count}/{self.blocks_per_file}")
 
-            if self._frame_count >= self.frames_per_file:
+            if self._block_count >= self.blocks_per_file:
                 if self._split_file():
-                    self._frame_count = 0
+                    self._block_count = 0
 
         return success
+
+    def save_frame(self, frame_data: np.ndarray) -> bool:
+        """Backward-compatible alias for older callers; the payload is a block."""
+        return self.save_block(frame_data)
 
     def _generate_filename(self) -> str:
         """Generate filename with new format"""
@@ -446,7 +454,7 @@ class FrameBasedFileSaver(DataSaver):
         """Stop and update total statistics"""
         super().stop()
         log.info(f"Total files created: {self._total_files_created}, "
-                 f"Total frames saved: {(self._total_files_created - 1) * self.frames_per_file + self._frame_count}, "
+                 f"Total blocks saved: {(self._total_files_created - 1) * self.blocks_per_file + self._block_count}, "
                  f"Total bytes: {self.total_bytes_all_files}")
 
     @property
@@ -460,19 +468,37 @@ class FrameBasedFileSaver(DataSaver):
         return self._total_files_created
 
     @property
+    def block_count(self) -> int:
+        """Get current block count in active file"""
+        return self._block_count
+
+    @property
+    def blocks_per_file(self) -> int:
+        """Get blocks per file setting"""
+        return self._blocks_per_file
+
+    @blocks_per_file.setter
+    def blocks_per_file(self, value: int):
+        """Set blocks per file"""
+        self._blocks_per_file = value
+
+    @property
     def frame_count(self) -> int:
-        """Get current frame count in active file"""
-        return self._frame_count
+        """Backward-compatible alias for block_count."""
+        return self.block_count
 
     @property
     def frames_per_file(self) -> int:
-        """Get frames per file setting"""
-        return self._frames_per_file
+        """Backward-compatible alias for blocks_per_file."""
+        return self.blocks_per_file
 
     @frames_per_file.setter
     def frames_per_file(self, value: int):
-        """Set frames per file"""
-        self._frames_per_file = value
+        """Backward-compatible alias for blocks_per_file."""
+        self.blocks_per_file = value
+
+
+FrameBasedFileSaver = BlockBasedFileSaver
 
 
 # ----- TIME-BASED FILE SAVER (LEGACY) -----

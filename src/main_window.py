@@ -36,7 +36,7 @@ from config import (
 )
 from pcie7821_api import PCIe7821API, PCIe7821Error
 from acquisition_thread import AcquisitionThread, SimulatedAcquisitionThread
-from data_saver import FrameBasedFileSaver
+from data_saver import BlockBasedFileSaver
 from spectrum_analyzer import RealTimeSpectrumAnalyzer
 from time_space_plot import create_time_space_widget
 from tcp_tab3 import TCPTab3Manager
@@ -95,7 +95,7 @@ class MainWindow(QMainWindow):
         # Initialize components
         self.api: Optional[PCIe7821API] = None
         self.acq_thread: Optional[AcquisitionThread] = None
-        self.data_saver: Optional[FrameBasedFileSaver] = None
+        self.data_saver: Optional[BlockBasedFileSaver] = None
         self.spectrum_analyzer = RealTimeSpectrumAnalyzer()
         self.time_space_widget = None
         self.tcp_tab3_manager = TCPTab3Manager()
@@ -596,15 +596,15 @@ class MainWindow(QMainWindow):
         path_layout.addWidget(self.browse_btn)
         save_layout.addLayout(path_layout, 0, 2, 1, 2)
 
-        # Row 1: Frames per File | File Size Estimate
-        save_layout.addWidget(QLabel("Frames/File:"), 1, 0)
-        self.frames_per_file_spin = QSpinBox()
-        self.frames_per_file_spin.setRange(1, 100000)
-        self.frames_per_file_spin.setValue(self.params.save.frames_per_file)
-        self.frames_per_file_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.frames_per_file_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        self.frames_per_file_spin.valueChanged.connect(self._update_file_estimates)
-        save_layout.addWidget(self.frames_per_file_spin, 1, 1)
+        # Row 1: Blocks per File | File Size Estimate
+        save_layout.addWidget(QLabel("Blocks/File:"), 1, 0)
+        self.blocks_per_file_spin = QSpinBox()
+        self.blocks_per_file_spin.setRange(1, 100000)
+        self.blocks_per_file_spin.setValue(self.params.save.blocks_per_file)
+        self.blocks_per_file_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.blocks_per_file_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        self.blocks_per_file_spin.valueChanged.connect(self._update_file_estimates)
+        save_layout.addWidget(self.blocks_per_file_spin, 1, 1)
 
         save_layout.addWidget(QLabel("Est. Size:"), 1, 2)
         self.file_size_label = QLabel("~26MB/file")
@@ -1241,7 +1241,7 @@ class MainWindow(QMainWindow):
         self.crop_distance_start_spin.valueChanged.connect(self._update_calculated_values)
         self.crop_distance_end_spin.valueChanged.connect(self._update_calculated_values)
         self.rate2phase_combo.currentIndexChanged.connect(self._update_calculated_values)
-        self.frames_per_file_spin.valueChanged.connect(self._update_file_estimates)
+        self.blocks_per_file_spin.valueChanged.connect(self._update_file_estimates)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.data_source_combo.currentIndexChanged.connect(self._sync_tcp_tab3_availability)
         self.channel_combo.currentIndexChanged.connect(self._sync_tcp_tab3_availability)
@@ -1385,6 +1385,9 @@ class MainWindow(QMainWindow):
         """Best-effort dataclass merge used by local settings restore."""
         if not isinstance(values, dict):
             return
+        if isinstance(target, SaveParams) and "blocks_per_file" not in values and "frames_per_file" in values:
+            values = dict(values)
+            values["blocks_per_file"] = values["frames_per_file"]
         for field in fields(target):
             if field.name not in values:
                 continue
@@ -1462,7 +1465,7 @@ class MainWindow(QMainWindow):
 
         self.save_enable_check.setChecked(params.save.enable)
         self.save_path_edit.setText(params.save.path)
-        self.frames_per_file_spin.setValue(params.save.frames_per_file)
+        self.blocks_per_file_spin.setValue(params.save.blocks_per_file)
 
         self._sync_display_control_states()
         self._update_phase_crop_controls()
@@ -1569,7 +1572,7 @@ class MainWindow(QMainWindow):
         # Save params
         params.save.enable = self.save_enable_check.isChecked()
         params.save.path = self.save_path_edit.text()
-        params.save.frames_per_file = self.frames_per_file_spin.value()
+        params.save.blocks_per_file = self.blocks_per_file_spin.value()
 
         return params
 
@@ -1828,12 +1831,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to start acquisition: {e}")
                 return
 
-        # Start data saver if enabled (frame-based)
+        # Start data saver if enabled (block-based)
         if params.save.enable:
-            log.info(f"Starting frame-based data saver to {params.save.path}")
-            self.data_saver = FrameBasedFileSaver(
+            log.info(f"Starting block-based data saver to {params.save.path}")
+            self.data_saver = BlockBasedFileSaver(
                 params.save.path,
-                frames_per_file=params.save.frames_per_file,
+                blocks_per_file=params.save.blocks_per_file,
                 buffer_size=OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
             )
             # Calculate points per frame for filename
@@ -1981,7 +1984,7 @@ class MainWindow(QMainWindow):
 
         saver = self.data_saver
         if saver is not None and saver.is_running:
-            save_ok = saver.save_frame(data)
+            save_ok = saver.save_block(data)
             if not save_ok:
                 log.warning(f"Save enqueue failed at full block #{self._full_data_count}")
 
@@ -2784,7 +2787,7 @@ class MainWindow(QMainWindow):
     def _update_file_estimates(self):
         """Update file size and duration estimates"""
         try:
-            frames_per_file = self.frames_per_file_spin.value()
+            blocks_per_file = self.blocks_per_file_spin.value()
             frame_load_num = self.frame_load_num_spin.value()
             scan_rate = self.scan_rate_spin.value()
             point_num = self.point_num_spin.value()
@@ -2806,7 +2809,7 @@ class MainWindow(QMainWindow):
 
             # One saved block corresponds to one acquisition callback.
             block_size_mb = points_per_frame * max(1, frame_load_num) * channel_num * 4 / (1024 * 1024)
-            file_size_mb = block_size_mb * frames_per_file
+            file_size_mb = block_size_mb * blocks_per_file
 
             # Update label
             self.file_size_label.setText(f"~{file_size_mb:.1f}MB/file")
