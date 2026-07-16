@@ -579,3 +579,29 @@ The FILTER parameter now controls both the Tab1 phase waveform and the Tab2 Time
 ### Verification
 
 Completed before commit: `python -m py_compile src\main_window.py src\time_space_plot.py src\realtime_filter.py`, shared FILTER self-test, UTF-8 Chinese mojibake self-check, and `git diff --check`. The Chinese self-check scans modified UTF-8 files for CJK lines containing `?` and for U+FFFD replacement characters.
+
+## 2026-07-17 Packaged eDAS26.7.17 executable
+
+### Packaging request
+
+A dated Windows executable was required after the latest `dev` branch UI and shared FILTER changes. The package must keep previous executables in `dist/` and follow the earlier packaging convention.
+
+### Packaging command
+
+```powershell
+python build_exe.py --name eDAS26.7.17 --skip-clean
+```
+
+The `--skip-clean` flag was used deliberately so previous executable files in `dist/` were not removed.
+
+### Output
+
+- Generated executable: `dist/eDAS26.7.17.exe`
+- Reported size: 77.26 MB
+- Generated spec file: `eDAS26.7.17.spec`
+- Previous executables confirmed still present: `eDAS26.6.14.exe`, `eDAS26.6.18.exe`, and `eDAS26.7.9.exe`
+- The build directory was removed by the packaging script after successful packaging.
+
+### Source control
+
+`dist/` remains ignored by Git, so the executable is a local delivery artifact and is not committed to the source repository. The generated `eDAS26.7.17.spec` is retained with the source, matching the existing versioned spec-file pattern.
