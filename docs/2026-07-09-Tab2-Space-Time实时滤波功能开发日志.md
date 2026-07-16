@@ -1,5 +1,8 @@
 # Tab2 Space-Time 实时滤波功能开发日志
 
+
+Update note, 2026-07-17: the `Filter` input and `FILTER` button described below were moved out of Tab2 and into the left-side main Display Control area. The controls are now shared by Tab1 phase waveform and Tab2 Time-Space. Tab2 keeps an independent IIR filter state and receives the shared settings through `set_filter_settings()`.
+
 ## 1. 修改背景
 
 本次需求是在 Tab2 的 Space-Time 图绘制前增加一个数据流实时滤波预处理能力。该滤波只用于二维图像显示，不允许影响保存数据，也不允许影响 Tab1 的时域曲线、频谱或 Monitor 显示。
@@ -131,4 +134,3 @@ git diff --check
 3. 输入 `-10`、`2-10`，确认图像响应符合低通和带通预期。
 4. 输入 `0.1-`，连续观察至少数十秒，确认没有每个包边界突跳，但允许启动阶段缓慢稳定。
 5. 输入超过 Nyquist 的截止频率，确认按钮提示参数无效且程序不崩溃。
-

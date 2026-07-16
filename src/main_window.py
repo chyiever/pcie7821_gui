@@ -101,6 +101,9 @@ class MainWindow(QMainWindow):
         self._tab1_phase_filter = RealtimeTimeAxisFilter(order=2)
         self._tab1_phase_filter_signature = None
         self._tab1_phase_filter_error_text = ""
+        self._filter_enabled = False
+        self._filter_spec_text = "1-"
+        self._filter_error_text = ""
         self.time_space_widget = None
         self.tcp_tab3_manager = TCPTab3Manager()
         self._interactive_plot_widgets: Dict[str, pg.PlotWidget] = {}
@@ -548,32 +551,63 @@ class MainWindow(QMainWindow):
         self.frame_plot_num_spin.setMaximumWidth(INPUT_MAX_WIDTH)
         display_layout.addWidget(self.frame_plot_num_spin, 1, 3)
 
-        # Row 2: waveform / monitor display switches
+        # Row 2: waveform / PSD / monitor / rad switches
+        display_switch_layout = QHBoxLayout()
+        display_switch_layout.setSpacing(24)
+        display_switch_layout.setContentsMargins(0, 0, 0, 0)
+
         self.waveform_enable_check = QCheckBox("Waveform")
         self.waveform_enable_check.setToolTip("Enable time/space waveform plot updates")
         self.waveform_enable_check.setChecked(False)
-        display_layout.addWidget(self.waveform_enable_check, 2, 0, 1, 2)
+        display_switch_layout.addWidget(self.waveform_enable_check)
+
+        self.spectrum_enable_check = QCheckBox("PSD")
+        self.spectrum_enable_check.setToolTip("Enable PSD plot updates")
+        self.spectrum_enable_check.setChecked(True)
+        display_switch_layout.addWidget(self.spectrum_enable_check)
 
         self.monitor_enable_check = QCheckBox("Monitor")
         self.monitor_enable_check.setToolTip("Enable monitor plot updates")
         self.monitor_enable_check.setChecked(False)
-        display_layout.addWidget(self.monitor_enable_check, 2, 2, 1, 2)
-
-        # Row 3: spectrum / analysis / rad
-        self.spectrum_enable_check = QCheckBox("Spectrum")
-        self.spectrum_enable_check.setChecked(True)
-        display_layout.addWidget(self.spectrum_enable_check, 3, 0)
-
-        # Analysis type info label (shows Power/PSD based on data type)
-        self.analysis_type_label = QLabel("Power")
-        self.analysis_type_label.setStyleSheet("QLabel { color: blue; font-weight: bold; }")
-        self.analysis_type_label.setToolTip("Analysis type: Raw data -> Power Spectrum, Phase data -> PSD")
-        display_layout.addWidget(self.analysis_type_label, 3, 1)
+        display_switch_layout.addWidget(self.monitor_enable_check)
 
         self.rad_check = QCheckBox("rad")
         self.rad_check.setToolTip("Convert phase data to radians for display only: display = data / 32767 * pi\n(Storage always saves original int32 data)")
         self.rad_check.setChecked(True)  # Default checked
-        display_layout.addWidget(self.rad_check, 3, 2, 1, 2)
+        display_switch_layout.addWidget(self.rad_check)
+        display_switch_layout.addStretch(1)
+        display_layout.addLayout(display_switch_layout, 2, 0, 1, 4)
+
+        # Kept for status/tooltips, no longer shown as a separate option label.
+        self.analysis_type_label = QLabel("PSD")
+        self.analysis_type_label.setVisible(False)
+
+        # Row 3: shared filter controls for Tab1 phase waveform and Tab2 Time-Space
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(8)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_label = QLabel("Filter:")
+        filter_label.setFont(QFont("Times New Roman", 8))
+        filter_layout.addWidget(filter_label)
+
+        self.filter_spec_edit = QLineEdit(self._filter_spec_text)
+        self.filter_spec_edit.setMaximumWidth(86)
+        self.filter_spec_edit.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.filter_spec_edit.setFont(QFont("Times New Roman", 8))
+        self.filter_spec_edit.setToolTip("Examples: 1- high-pass, -10 low-pass, 2-10 band-pass")
+        self.filter_spec_edit.editingFinished.connect(self._on_filter_spec_changed)
+        filter_layout.addWidget(self.filter_spec_edit)
+
+        self.filter_btn = QPushButton("FILTER")
+        self.filter_btn.setFont(QFont("Times New Roman", 8, QFont.Bold))
+        self.filter_btn.setMaximumWidth(76)
+        self.filter_btn.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.filter_btn.setCheckable(True)
+        self.filter_btn.clicked.connect(self._on_filter_button_clicked)
+        self._update_shared_filter_button_style()
+        filter_layout.addWidget(self.filter_btn)
+        filter_layout.addStretch(1)
+        display_layout.addLayout(filter_layout, 3, 0, 1, 4)
 
         layout.addWidget(display_group)
 
@@ -1332,12 +1366,13 @@ class MainWindow(QMainWindow):
         data_source = self.data_source_combo.currentData() or DataSource.PHASE
         is_phase = (data_source == DataSource.PHASE)
 
+        self.analysis_type_label.setText("PSD")
         if is_phase:
-            self.analysis_type_label.setText("PSD")
             self.analysis_type_label.setToolTip("Phase data: PSD analysis using scipy.welch")
+            self.spectrum_enable_check.setToolTip("Enable phase PSD plot updates")
         else:
-            self.analysis_type_label.setText("Power")
-            self.analysis_type_label.setToolTip("Raw data: Power spectrum analysis")
+            self.analysis_type_label.setToolTip("Raw data: power spectrum analysis")
+            self.spectrum_enable_check.setToolTip("Enable raw power spectrum plot updates")
 
     def _connect_time_space_signals(self):
         """Connect time-space widget signals after widget is created"""
@@ -1452,6 +1487,11 @@ class MainWindow(QMainWindow):
         self.rad_check.setChecked(params.display.rad_enable)
         self.waveform_enable_check.setChecked(params.display.waveform_plot_enabled)
         self.monitor_enable_check.setChecked(params.display.monitor_plot_enabled)
+        self._filter_spec_text = str(getattr(params.time_space, "filter_spec", "1-")).strip()
+        self._filter_enabled = bool(getattr(params.time_space, "filter_enabled", False))
+        self.filter_spec_edit.setText(self._filter_spec_text)
+        self.filter_btn.setChecked(self._filter_enabled)
+        self._set_shared_filter_error("")
 
         if self.time_space_widget is not None:
             self.time_space_widget.set_parameters(
@@ -1469,6 +1509,7 @@ class MainWindow(QMainWindow):
                 }
             )
             self.time_space_widget.set_scan_rate(params.basic.scan_rate)
+            self._sync_shared_filter_settings(reset_tab1=False)
 
         self.save_enable_check.setChecked(params.save.enable)
         self.save_path_edit.setText(params.save.path)
@@ -1575,8 +1616,10 @@ class MainWindow(QMainWindow):
             params.time_space.colormap_type = ts_params['colormap_type']
             params.time_space.vmin = ts_params['vmin']
             params.time_space.vmax = ts_params['vmax']
-            params.time_space.filter_enabled = ts_params.get('filter_enabled', False)
-            params.time_space.filter_spec = ts_params.get('filter_spec', "1-")
+
+        filter_enabled, filter_spec = self._get_shared_filter_settings()
+        params.time_space.filter_enabled = filter_enabled
+        params.time_space.filter_spec = filter_spec
 
         # Save params
         params.save.enable = self.save_enable_check.isChecked()
@@ -2210,20 +2253,109 @@ class MainWindow(QMainWindow):
         self._tab1_phase_filter_signature = None
         self._tab1_phase_filter_error_text = ""
 
-    def _get_tab2_filter_settings(self) -> tuple[bool, str]:
-        """Read the Tab2 FILTER switch and cutoff text without sharing filter state."""
-        widget = self.time_space_widget
-        if widget is not None and hasattr(widget, "get_filter_settings"):
-            try:
-                enabled, spec_text = widget.get_filter_settings()
-                return bool(enabled), str(spec_text).strip()
-            except Exception as exc:
-                log.warning(f"Failed to read Tab2 FILTER settings for Tab1 waveform: {exc}")
+    def _get_shared_filter_settings(self) -> tuple[bool, str]:
+        """Read the shared FILTER switch and cutoff text from the main control panel."""
+        if hasattr(self, "filter_spec_edit"):
+            self._filter_spec_text = self.filter_spec_edit.text().strip()
+        else:
+            self._filter_spec_text = str(self._filter_spec_text).strip()
+        return bool(self._filter_enabled), self._filter_spec_text
 
-        time_space_params = getattr(self.params, "time_space", None)
-        enabled = bool(getattr(time_space_params, "filter_enabled", False))
-        spec_text = str(getattr(time_space_params, "filter_spec", "1-")).strip()
-        return enabled, spec_text
+    def _validate_shared_filter_spec(self, spec_text: str) -> None:
+        """Validate the shared filter text against the current scan rate."""
+        filter_spec = parse_filter_spec(spec_text)
+        validator = RealtimeTimeAxisFilter(order=2)
+        validator.configure(filter_spec, float(self.params.basic.scan_rate or 0.0))
+
+    def _set_shared_filter_error(self, message: str) -> None:
+        self._filter_error_text = message
+        if hasattr(self, "filter_spec_edit"):
+            self.filter_spec_edit.setToolTip(
+                message or "Examples: 1- high-pass, -10 low-pass, 2-10 band-pass"
+            )
+        self._update_shared_filter_button_style()
+
+    def _update_shared_filter_button_style(self) -> None:
+        if not hasattr(self, "filter_btn"):
+            return
+        if self._filter_enabled and self._filter_error_text:
+            self.filter_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #F57C00;
+                    color: white;
+                    border: 1px solid #E65100;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #EF6C00;
+                }
+                """
+            )
+        elif self._filter_enabled:
+            self.filter_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #1976D2;
+                    color: white;
+                    border: 1px solid #1565C0;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #1565C0;
+                }
+                """
+            )
+        else:
+            self.filter_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #9E9E9E;
+                    color: white;
+                    border: 1px solid #757575;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #757575;
+                }
+                """
+            )
+
+    def _sync_shared_filter_settings(self, reset_tab1: bool = True) -> None:
+        enabled, spec_text = self._get_shared_filter_settings()
+        self.params.time_space.filter_enabled = enabled
+        self.params.time_space.filter_spec = spec_text
+        if self.time_space_widget is not None and hasattr(self.time_space_widget, "set_filter_settings"):
+            self.time_space_widget.set_filter_settings(enabled, spec_text)
+        if reset_tab1:
+            self._reset_tab1_phase_filter()
+
+    def _on_filter_spec_changed(self):
+        self._filter_spec_text = self.filter_spec_edit.text().strip()
+        if self._filter_enabled:
+            try:
+                self._validate_shared_filter_spec(self._filter_spec_text)
+                self._set_shared_filter_error("")
+            except FilterSpecError as exc:
+                self._set_shared_filter_error(str(exc))
+                log.warning("Invalid shared filter parameter: %s", exc)
+        else:
+            self._set_shared_filter_error("")
+        self._sync_shared_filter_settings()
+
+    def _on_filter_button_clicked(self, checked: bool):
+        self._filter_enabled = bool(checked)
+        self._filter_spec_text = self.filter_spec_edit.text().strip()
+        if self._filter_enabled:
+            try:
+                self._validate_shared_filter_spec(self._filter_spec_text)
+                self._set_shared_filter_error("")
+            except FilterSpecError as exc:
+                self._set_shared_filter_error(str(exc))
+                log.warning("Shared filter enabled with invalid parameter: %s", exc)
+        else:
+            self._set_shared_filter_error("")
+        self._sync_shared_filter_settings()
 
     def _apply_tab1_phase_waveform_filter(
         self,
@@ -2232,8 +2364,8 @@ class MainWindow(QMainWindow):
         point_num: int,
         channel_num: int,
     ) -> np.ndarray:
-        """Filter only the Tab1 phase waveform data using the Tab2 FILTER settings."""
-        enabled, spec_text = self._get_tab2_filter_settings()
+        """Filter only the Tab1 phase waveform data using the shared FILTER settings."""
+        enabled, spec_text = self._get_shared_filter_settings()
         if not enabled:
             if self._tab1_phase_filter_signature is not None or self._tab1_phase_filter_error_text:
                 self._reset_tab1_phase_filter()
@@ -2824,13 +2956,14 @@ class MainWindow(QMainWindow):
 
         self._sync_display_control_states()
 
-        # Update analysis type label
+        # Update spectrum option tooltip. The visible option text stays PSD.
+        self.analysis_type_label.setText("PSD")
         if is_phase:
-            self.analysis_type_label.setText("PSD")
             self.analysis_type_label.setToolTip("Phase data: PSD analysis using scipy.welch")
+            self.spectrum_enable_check.setToolTip("Enable phase PSD plot updates")
         else:
-            self.analysis_type_label.setText("Power")
-            self.analysis_type_label.setToolTip("Raw data: Power spectrum analysis")
+            self.analysis_type_label.setToolTip("Raw data: power spectrum analysis")
+            self.spectrum_enable_check.setToolTip("Enable raw power spectrum plot updates")
 
         if not is_phase:
             self.mode_time_radio.setChecked(True)

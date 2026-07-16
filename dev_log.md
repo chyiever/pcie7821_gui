@@ -551,3 +551,31 @@ Phase 模式下 `Mode=space` 的数据抽取逻辑本身可以生成 `space_data
 ### 验证情况
 
 已执行 `python -m py_compile src\main_window.py src\time_space_plot.py src\realtime_filter.py`，语法检查通过。已执行 `git diff --check`，未发现空白错误，命令仅提示 Windows 环境下 LF/CRLF 行尾转换。已执行小型数据流自检，确认 Tab1 phase 波形滤波 helper 返回新数组、不原地修改输入数组；PSD 源数据仍保持未滤波；FILTER 关闭时波形数据回退为原显示数据。
+
+## 2026-07-17 Main Display FILTER UI relocation
+
+### Background
+
+The FILTER parameter now controls both the Tab1 phase waveform and the Tab2 Time-Space image. Keeping the `Filter` input and `FILTER` button inside Tab2 made the scope look narrower than it really is. The left-side Display Control options also needed a cleaner single-row layout.
+
+### Changes
+
+- Changed the visible spectrum refresh option from `Spectrum` plus a separate `Power/PSD` label to a single `PSD` checkbox.
+- Placed `Waveform`, `PSD`, `Monitor`, and `rad` on one row with spacing between options.
+- Moved the shared `Filter` input and `FILTER` button to the next row in the left-side Display Control group.
+- Removed the `Filter` input and `FILTER` button from the Tab2 parameter row.
+- Added `TimeSpacePlotWidget.set_filter_settings()` so Tab2 receives the shared settings from `MainWindow` while keeping its own IIR filter state.
+- Kept Tab1 phase waveform and Tab2 Time-Space state independent; they share only the main-panel switch and parameter text.
+- Changed Tab2 `Reset to Defaults` so it no longer resets the shared FILTER controls.
+
+### Files
+
+- `src/main_window.py`
+- `src/time_space_plot.py`
+- `docs/2026-7-17????????.md`
+- `docs/2026-07-09-Tab2-Space-Time??????????.md`
+- `dev_log.md`
+
+### Verification
+
+Completed before commit: `python -m py_compile src\main_window.py src\time_space_plot.py src\realtime_filter.py`, shared FILTER self-test, UTF-8 Chinese mojibake self-check, and `git diff --check`. The Chinese self-check scans modified UTF-8 files for CJK lines containing `?` and for U+FFFD replacement characters.

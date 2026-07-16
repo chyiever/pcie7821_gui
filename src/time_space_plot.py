@@ -19,7 +19,6 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -351,30 +350,11 @@ class TimeSpacePlotWidget(QWidget):
         self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
         layout.addWidget(self.colormap_combo, row, 6)
 
-        filter_label = QLabel("Filter:")
-        filter_label.setFont(QFont("Times New Roman", 8))
-        layout.addWidget(filter_label, row, 7)
-
-        self.filter_spec_edit = QLineEdit(self._filter_spec_text)
-        self.filter_spec_edit.setMaximumWidth(70)
-        self.filter_spec_edit.setFont(QFont("Times New Roman", 8))
-        self.filter_spec_edit.setToolTip("Examples: 1- high-pass, -10 low-pass, 2-10 band-pass")
-        self.filter_spec_edit.editingFinished.connect(self._on_filter_spec_changed)
-        layout.addWidget(self.filter_spec_edit, row, 8)
-
-        self.filter_btn = QPushButton("FILTER")
-        self.filter_btn.setFont(QFont("Times New Roman", 8, QFont.Bold))
-        self.filter_btn.setMaximumWidth(68)
-        self.filter_btn.setCheckable(True)
-        self.filter_btn.clicked.connect(self._on_filter_button_clicked)
-        self._update_filter_button_style()
-        layout.addWidget(self.filter_btn, row, 9)
-
         reset_btn = QPushButton("Reset to Defaults")
         reset_btn.setFont(QFont("Times New Roman", 8))
         reset_btn.setMaximumWidth(104)
         reset_btn.clicked.connect(self._reset_to_defaults)
-        layout.addWidget(reset_btn, row, 10)
+        layout.addWidget(reset_btn, row, 7)
 
         self.plot_btn = QPushButton("PLOT")
         self.plot_btn.setFont(QFont("Times New Roman", 8, QFont.Bold))
@@ -382,9 +362,9 @@ class TimeSpacePlotWidget(QWidget):
         self.plot_btn.setCheckable(True)
         self.plot_btn.clicked.connect(self._on_plot_button_clicked)
         self._update_plot_button_style()
-        layout.addWidget(self.plot_btn, row, 11)
+        layout.addWidget(self.plot_btn, row, 8)
 
-        layout.setColumnStretch(12, 1)
+        layout.setColumnStretch(9, 1)
         return group
 
     def _get_colormap(self, colormap_name: str) -> Optional[pg.ColorMap]:
@@ -461,7 +441,8 @@ class TimeSpacePlotWidget(QWidget):
             self.filter_spec_edit.setToolTip(
                 message or "Examples: 1- high-pass, -10 low-pass, 2-10 band-pass"
             )
-        self._update_filter_button_style()
+        if hasattr(self, "filter_btn"):
+            self._update_filter_button_style()
 
     def _on_plot_button_clicked(self, checked: bool):
         self._plot_enabled = checked
@@ -504,6 +485,8 @@ class TimeSpacePlotWidget(QWidget):
             )
 
     def _update_filter_button_style(self):
+        if not hasattr(self, "filter_btn"):
+            return
         if self._filter_enabled and self._filter_error_text:
             self.filter_btn.setStyleSheet(
                 """
@@ -649,12 +632,6 @@ class TimeSpacePlotWidget(QWidget):
         self.colormap_combo.setCurrentText("Jet")
         self.vmin_spin.setValue(-0.02)
         self.vmax_spin.setValue(0.02)
-        self.filter_spec_edit.setText("1-")
-        self._filter_spec_text = "1-"
-        self.filter_btn.setChecked(False)
-        self._filter_enabled = False
-        self._set_filter_error("")
-        self._time_axis_filter.reset_design()
         self._invalidate_display_buffer(clear_image=True)
         self.parametersChanged.emit()
 
@@ -844,14 +821,31 @@ class TimeSpacePlotWidget(QWidget):
         }
 
     def get_filter_settings(self) -> Tuple[bool, str]:
-        """Return the current FILTER switch and cutoff text for other display paths."""
-        filter_spec_text = (
-            self.filter_spec_edit.text().strip()
-            if hasattr(self, "filter_spec_edit")
-            else self._filter_spec_text
-        )
-        self._filter_spec_text = filter_spec_text
-        return self._filter_enabled, filter_spec_text
+        """Return the current shared FILTER switch and cutoff text."""
+        return self._filter_enabled, self._filter_spec_text
+
+    def set_filter_settings(self, enabled: bool, spec_text: str):
+        """Receive the shared FILTER settings from the main control panel."""
+        enabled = bool(enabled)
+        spec_text = str(spec_text).strip()
+        changed = enabled != self._filter_enabled or spec_text != self._filter_spec_text
+        was_enabled = self._filter_enabled
+        self._filter_enabled = enabled
+        self._filter_spec_text = spec_text
+        if changed:
+            self._time_axis_filter.reset_design()
+            if enabled or was_enabled:
+                self._invalidate_display_buffer(clear_image=True)
+
+        if enabled:
+            try:
+                filter_spec = parse_filter_spec(self._filter_spec_text)
+                self._time_axis_filter.configure(filter_spec, self._scan_rate_hz)
+                self._set_filter_error("")
+            except FilterSpecError as exc:
+                self._set_filter_error(str(exc))
+        else:
+            self._set_filter_error("")
 
     def set_parameters(self, params):
         if "window_frames" in params:
@@ -869,23 +863,11 @@ class TimeSpacePlotWidget(QWidget):
                 if value == params["colormap_type"]:
                     self.colormap_combo.setCurrentText(name)
                     break
-        if "filter_spec" in params:
-            self._filter_spec_text = str(params["filter_spec"])
-            self.filter_spec_edit.setText(self._filter_spec_text)
-        if "filter_enabled" in params:
-            enabled = bool(params["filter_enabled"])
-            self._filter_enabled = enabled
-            self.filter_btn.setChecked(enabled)
-            self._time_axis_filter.reset_design()
-            if enabled:
-                try:
-                    filter_spec = parse_filter_spec(self._filter_spec_text)
-                    self._time_axis_filter.configure(filter_spec, self._scan_rate_hz)
-                    self._set_filter_error("")
-                except FilterSpecError as exc:
-                    self._set_filter_error(str(exc))
-            else:
-                self._set_filter_error("")
+        if "filter_spec" in params or "filter_enabled" in params:
+            self.set_filter_settings(
+                params.get("filter_enabled", self._filter_enabled),
+                params.get("filter_spec", self._filter_spec_text),
+            )
         if "vmin" in params or "vmax" in params:
             vmin = float(params.get("vmin", self._vmin))
             vmax = float(params.get("vmax", self._vmax))
