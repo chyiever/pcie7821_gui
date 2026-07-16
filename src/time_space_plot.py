@@ -843,6 +843,16 @@ class TimeSpacePlotWidget(QWidget):
             "filter_spec": filter_spec_text,
         }
 
+    def get_filter_settings(self) -> Tuple[bool, str]:
+        """Return the current FILTER switch and cutoff text for other display paths."""
+        filter_spec_text = (
+            self.filter_spec_edit.text().strip()
+            if hasattr(self, "filter_spec_edit")
+            else self._filter_spec_text
+        )
+        self._filter_spec_text = filter_spec_text
+        return self._filter_enabled, filter_spec_text
+
     def set_parameters(self, params):
         if "window_frames" in params:
             self.window_frames_spin.setValue(int(params["window_frames"]))

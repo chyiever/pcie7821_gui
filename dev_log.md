@@ -512,3 +512,42 @@ Phase 模式下 `Mode=space` 的数据抽取逻辑本身可以生成 `space_data
 已执行 `git diff --check`，未发现空白错误；命令仅提示 Windows 环境下 LF/CRLF 行尾转换。
 
 现场联机验证时，重点确认 Filter 关闭时行为与旧版本一致；Filter 开启后只改变 Tab2 Space-Time 图；`0.1-` 在连续观察时不出现每个包边沿突跳；超过 Nyquist 的截止频率会提示无效并跳过滤波。
+
+## 2026-07-17 Tab1 Phase 时域曲线复用 Tab2 FILTER 配置
+
+### 问题背景
+
+现场需要把 Tab2 的 `FILTER` 开关和 `Filter` 参数扩展为 Tab1 phase 时域曲线的显示滤波配置，同时保持保存数据和 Tab1 phase PSD 的既有边界不变。也就是说，Tab1 波形曲线可以按 Tab2 参数观察滤波后的 phase 显示结果，但保存文件仍然保存未 Rad、未 GUI FILTER 的原始 phase `int32` 块，PSD 仍然基于未经过 Tab1/Tab2 FILTER 的显示数据计算。
+
+### 修改内容
+
+本次修改集中在显示侧数据分流：
+
+- `src/time_space_plot.py` 新增 `get_filter_settings()`，用于向主窗口暴露当前 Tab2 `FILTER` 开关和 `Filter` 文本，不暴露也不共享 Tab2 自己的滤波器状态。
+- `src/main_window.py` 引入 `RealtimeTimeAxisFilter`，在主窗口内新增 Tab1 phase 波形专用滤波器 `_tab1_phase_filter`。
+- `_update_phase_display()` 中保留原始 `display_data` 作为 PSD 和 Tab2 Time-Space 的输入；额外派生 `waveform_display_data`，只供 Tab1 `plot_curve_1.setData(...)` 使用。
+- Phase `Mode=space` 下，Tab1 波形曲线使用滤波后的某空间点时间序列，PSD 仍使用未滤波的 `space_data`。
+- Phase `Mode=time` 下，Tab1 多帧距离曲线使用滤波后的波形数据，PSD 仍使用未滤波的 `display_data[-point_num:]`。
+- Tab1 和 Tab2 只共享 FILTER 配置，不共享 IIR 状态，避免两个绘图路径因输入窗口、列数和刷新时机不同而互相污染状态。
+- 采集开始、Tab1 波形显示开关切换、Tab2 参数变化、滤波配置变化或参数无效时会重置 Tab1 独立滤波状态。
+
+### 数据流边界
+
+最新版本的数据流边界如下：
+
+- 保存数据：不经过 Rad，不经过 Tab1 phase 波形滤波，不经过 Tab2 FILTER。
+- Tab1 phase 时域曲线：若 `Rad` 开启，先使用 Rad 转换后的显示数据；若 Tab2 `FILTER` 开启，再按 Tab2 `Filter` 参数进行 Tab1 独立实时滤波。
+- Tab1 phase PSD：若 `Rad` 开启，使用 Rad 转换后的显示数据；不经过 Tab1 phase 波形滤波，也不经过 Tab2 FILTER。
+- Tab2 Time-Space：若 `Rad` 开启，使用 Rad 转换后的显示数据；若 Tab2 `FILTER` 开启，使用 Tab2 自己的实时滤波器状态，只影响 Tab2 图像缓冲。
+- Raw、Monitor、Tab3 TCP：不使用 Tab2 FILTER。
+
+### 涉及文件
+
+- `src/main_window.py`
+- `src/time_space_plot.py`
+- `docs/2026-7-17滤波配置与数据流.md`
+- `dev_log.md`
+
+### 验证情况
+
+已执行 `python -m py_compile src\main_window.py src\time_space_plot.py src\realtime_filter.py`，语法检查通过。已执行 `git diff --check`，未发现空白错误，命令仅提示 Windows 环境下 LF/CRLF 行尾转换。已执行小型数据流自检，确认 Tab1 phase 波形滤波 helper 返回新数组、不原地修改输入数组；PSD 源数据仍保持未滤波；FILTER 关闭时波形数据回退为原显示数据。

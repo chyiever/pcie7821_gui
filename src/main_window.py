@@ -38,6 +38,7 @@ from pcie7821_api import PCIe7821API, PCIe7821Error
 from acquisition_thread import AcquisitionThread, SimulatedAcquisitionThread
 from data_saver import BlockBasedFileSaver
 from spectrum_analyzer import RealTimeSpectrumAnalyzer
+from realtime_filter import FilterSpecError, RealtimeTimeAxisFilter, parse_filter_spec
 from time_space_plot import create_time_space_widget
 from tcp_tab3 import TCPTab3Manager
 from logger import get_logger
@@ -97,6 +98,9 @@ class MainWindow(QMainWindow):
         self.acq_thread: Optional[AcquisitionThread] = None
         self.data_saver: Optional[BlockBasedFileSaver] = None
         self.spectrum_analyzer = RealTimeSpectrumAnalyzer()
+        self._tab1_phase_filter = RealtimeTimeAxisFilter(order=2)
+        self._tab1_phase_filter_signature = None
+        self._tab1_phase_filter_error_text = ""
         self.time_space_widget = None
         self.tcp_tab3_manager = TCPTab3Manager()
         self._interactive_plot_widgets: Dict[str, pg.PlotWidget] = {}
@@ -1297,6 +1301,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(bool)
     def _on_waveform_display_toggled(self, enabled: bool):
         """Enable or disable waveform rendering on plot 1."""
+        self._reset_tab1_phase_filter()
         if not enabled:
             self._clear_waveform_plot()
 
@@ -1864,6 +1869,7 @@ class MainWindow(QMainWindow):
         self._last_data_time = time.time()
         self._recovery_in_progress = False
         self._last_raw_display_time = 0  # Force immediate first update
+        self._reset_tab1_phase_filter()
 
         # Create and start acquisition thread
         log.info("Creating acquisition thread...")
@@ -2198,6 +2204,104 @@ class MainWindow(QMainWindow):
         scan_rate = max(1.0, float(self.params.basic.scan_rate or 1))
         return np.arange(1, int(frame_count) + 1, dtype=float) / scan_rate
 
+    def _reset_tab1_phase_filter(self) -> None:
+        """Reset the independent Tab1 phase waveform filter state."""
+        self._tab1_phase_filter.reset_design()
+        self._tab1_phase_filter_signature = None
+        self._tab1_phase_filter_error_text = ""
+
+    def _get_tab2_filter_settings(self) -> tuple[bool, str]:
+        """Read the Tab2 FILTER switch and cutoff text without sharing filter state."""
+        widget = self.time_space_widget
+        if widget is not None and hasattr(widget, "get_filter_settings"):
+            try:
+                enabled, spec_text = widget.get_filter_settings()
+                return bool(enabled), str(spec_text).strip()
+            except Exception as exc:
+                log.warning(f"Failed to read Tab2 FILTER settings for Tab1 waveform: {exc}")
+
+        time_space_params = getattr(self.params, "time_space", None)
+        enabled = bool(getattr(time_space_params, "filter_enabled", False))
+        spec_text = str(getattr(time_space_params, "filter_spec", "1-")).strip()
+        return enabled, spec_text
+
+    def _apply_tab1_phase_waveform_filter(
+        self,
+        display_data: np.ndarray,
+        frame_num: int,
+        point_num: int,
+        channel_num: int,
+    ) -> np.ndarray:
+        """Filter only the Tab1 phase waveform data using the Tab2 FILTER settings."""
+        enabled, spec_text = self._get_tab2_filter_settings()
+        if not enabled:
+            if self._tab1_phase_filter_signature is not None or self._tab1_phase_filter_error_text:
+                self._reset_tab1_phase_filter()
+            return display_data
+
+        try:
+            filter_spec = parse_filter_spec(spec_text)
+            sample_rate_hz = float(self.params.basic.scan_rate or 0.0)
+            filter_signature = (spec_text, sample_rate_hz)
+            if self._tab1_phase_filter_signature != filter_signature:
+                self._tab1_phase_filter.reset_design()
+                self._tab1_phase_filter_signature = filter_signature
+
+            expected_rows = int(frame_num) * int(point_num)
+            if expected_rows <= 0:
+                return display_data
+
+            if channel_num == 1:
+                flat = np.asarray(display_data).reshape(-1)
+                if flat.size < expected_rows:
+                    return display_data
+                source_matrix = flat[-expected_rows:].reshape(frame_num, point_num)
+                filtered_matrix = self._tab1_phase_filter.process(
+                    source_matrix,
+                    filter_spec,
+                    sample_rate_hz,
+                )
+                if flat.size == expected_rows:
+                    result = filtered_matrix.reshape(-1)
+                else:
+                    result = np.asarray(flat, dtype=np.float64).copy()
+                    result[-expected_rows:] = filtered_matrix.reshape(-1)
+                self._tab1_phase_filter_error_text = ""
+                return result
+
+            matrix = np.asarray(display_data)
+            if matrix.ndim == 1:
+                matrix = matrix.reshape(-1, channel_num)
+            if matrix.shape[0] < expected_rows:
+                return display_data
+
+            source_cube = matrix[-expected_rows:, :].reshape(frame_num, point_num, channel_num)
+            filter_input = source_cube.reshape(frame_num, point_num * channel_num)
+            filtered = self._tab1_phase_filter.process(
+                filter_input,
+                filter_spec,
+                sample_rate_hz,
+            )
+            filtered_matrix = filtered.reshape(frame_num, point_num, channel_num).reshape(
+                expected_rows,
+                channel_num,
+            )
+            if matrix.shape[0] == expected_rows:
+                result = filtered_matrix
+            else:
+                result = np.asarray(matrix, dtype=np.float64).copy()
+                result[-expected_rows:, :] = filtered_matrix
+            self._tab1_phase_filter_error_text = ""
+            return result
+        except FilterSpecError as exc:
+            message = str(exc)
+            if message != self._tab1_phase_filter_error_text:
+                log.warning("Tab1 phase waveform filter skipped: %s", message)
+            self._tab1_phase_filter_error_text = message
+            self._tab1_phase_filter.reset_design()
+            self._tab1_phase_filter_signature = None
+            return display_data
+
     def _update_phase_display(self, data: np.ndarray, channel_num: int):
         """Update display for phase data"""
         point_num = self._get_effective_phase_point_count()
@@ -2210,6 +2314,15 @@ class MainWindow(QMainWindow):
         )
         if frame_num <= 0:
             return
+
+        waveform_display_data = display_data
+        if waveform_enabled:
+            waveform_display_data = self._apply_tab1_phase_waveform_filter(
+                display_data,
+                frame_num,
+                point_num,
+                channel_num,
+            )
 
         # Debug output to identify mode
         log.debug(f"Display mode: {self.params.display.mode}, Region index: {self.params.display.region_index}")
@@ -2224,14 +2337,21 @@ class MainWindow(QMainWindow):
             if channel_num == 1:
                 # Extract region data across frames
                 space_data = []
+                waveform_space_data = []
                 for i in range(frame_num):
                     idx = region_idx + point_num * i
                     if idx < len(display_data):
                         space_data.append(display_data[idx])
+                    if idx < len(waveform_display_data):
+                        waveform_space_data.append(waveform_display_data[idx])
 
                 space_data = np.array(space_data)
+                waveform_space_data = np.array(waveform_space_data)
                 if waveform_enabled:
-                    self.plot_curve_1[0].setData(time_axis[:len(space_data)], space_data)
+                    self.plot_curve_1[0].setData(
+                        time_axis[:len(waveform_space_data)],
+                        waveform_space_data,
+                    )
                     self._apply_pending_time_plot_auto_range()
 
                     # Clear other curves
@@ -2246,13 +2366,17 @@ class MainWindow(QMainWindow):
                 # Multi-channel space mode
                 if len(display_data.shape) == 1:
                     display_data = display_data.reshape(-1, channel_num)
+                if len(waveform_display_data.shape) == 1:
+                    waveform_matrix = waveform_display_data.reshape(-1, channel_num)
+                else:
+                    waveform_matrix = waveform_display_data
 
                 for ch in range(min(channel_num, 2)):
                     space_data = []
                     for i in range(frame_num):
                         idx = region_idx + point_num * i
-                        if idx < len(display_data):
-                            space_data.append(display_data[idx, ch])
+                        if idx < len(waveform_matrix):
+                            space_data.append(waveform_matrix[idx, ch])
                     if waveform_enabled:
                         space_data = np.array(space_data)
                         self.plot_curve_1[ch].setData(time_axis[:len(space_data)], space_data)
@@ -2271,8 +2395,8 @@ class MainWindow(QMainWindow):
                 for i in range(min(4, frame_num)):
                     start = i * point_num
                     end = start + point_num
-                    if waveform_enabled and end <= len(display_data):
-                        self.plot_curve_1[i].setData(distance_axis, display_data[start:end])
+                    if waveform_enabled and end <= len(waveform_display_data):
+                        self.plot_curve_1[i].setData(distance_axis, waveform_display_data[start:end])
                         if i == 0:
                             self._apply_pending_time_plot_auto_range()
                     elif waveform_enabled:
@@ -2285,11 +2409,15 @@ class MainWindow(QMainWindow):
             else:
                 if len(display_data.shape) == 1:
                     display_data = display_data.reshape(-1, channel_num)
+                if len(waveform_display_data.shape) == 1:
+                    waveform_matrix = waveform_display_data.reshape(-1, channel_num)
+                else:
+                    waveform_matrix = waveform_display_data
 
                 # Show first frame of each channel
                 for ch in range(min(channel_num, 4)):
-                    if waveform_enabled and point_num <= len(display_data):
-                        self.plot_curve_1[ch].setData(distance_axis, display_data[:point_num, ch])
+                    if waveform_enabled and point_num <= len(waveform_matrix):
+                        self.plot_curve_1[ch].setData(distance_axis, waveform_matrix[:point_num, ch])
                 if waveform_enabled:
                     self._apply_pending_time_plot_auto_range()
 
@@ -2828,6 +2956,7 @@ class MainWindow(QMainWindow):
         try:
             if self.time_space_widget is not None:
                 self.params = self._collect_params()
+                self._reset_tab1_phase_filter()
                 log.debug("Time-space parameters updated")
         except Exception as e:
             log.warning(f"Error updating time-space parameters: {e}")
