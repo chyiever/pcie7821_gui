@@ -1280,6 +1280,8 @@ class MainWindow(QMainWindow):
         self.crop_distance_end_spin.valueChanged.connect(self._update_calculated_values)
         self.rate2phase_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.blocks_per_file_spin.valueChanged.connect(self._update_file_estimates)
+        self.save_enable_check.toggled.connect(self._on_save_enable_toggled)
+        self.save_path_edit.editingFinished.connect(self._on_save_path_edited)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.data_source_combo.currentIndexChanged.connect(self._sync_tcp_tab3_availability)
         self.channel_combo.currentIndexChanged.connect(self._sync_tcp_tab3_availability)
@@ -1511,9 +1513,9 @@ class MainWindow(QMainWindow):
             self.time_space_widget.set_scan_rate(params.basic.scan_rate)
             self._sync_shared_filter_settings(reset_tab1=False)
 
-        self.save_enable_check.setChecked(params.save.enable)
         self.save_path_edit.setText(params.save.path)
         self.blocks_per_file_spin.setValue(params.save.blocks_per_file)
+        self._set_save_enable_checked(params.save.enable)
 
         self._sync_display_control_states()
         self._update_phase_crop_controls()
@@ -1839,6 +1841,103 @@ class MainWindow(QMainWindow):
 
     # ----- ACQUISITION CONTROL (START / STOP) -----
 
+    def _is_acquisition_running(self) -> bool:
+        """Return True while the active acquisition thread is running."""
+        thread = self.acq_thread
+        return thread is not None and bool(getattr(thread, "is_running", False))
+
+    def _get_save_points_per_frame(self, params: Optional[AllParams] = None) -> int:
+        """Return the frame width used in saved-data filenames."""
+        params = params or self.params
+        if params.upload.data_source == DataSource.PHASE:
+            return self._get_effective_phase_point_count(params)
+        return params.basic.point_num_per_scan
+
+    def _set_save_enable_checked(self, checked: bool):
+        """Update the save checkbox without recursively starting/stopping storage."""
+        previous = self.save_enable_check.blockSignals(True)
+        self.save_enable_check.setChecked(checked)
+        self.save_enable_check.blockSignals(previous)
+
+    def _start_data_saver(self, params: Optional[AllParams] = None) -> bool:
+        """Start storage immediately, creating the target directory if needed."""
+        if self.data_saver is not None and self.data_saver.is_running:
+            return True
+
+        params = params or self.params
+        save_path = self.save_path_edit.text().strip() or params.save.path
+        blocks_per_file = self.blocks_per_file_spin.value()
+        params.save.enable = True
+        params.save.path = save_path
+        params.save.blocks_per_file = blocks_per_file
+
+        log.info(f"Starting block-based data saver to {save_path}")
+        saver = BlockBasedFileSaver(
+            save_path,
+            blocks_per_file=blocks_per_file,
+            buffer_size=OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
+        )
+
+        try:
+            filename = saver.start(
+                scan_rate=params.basic.scan_rate,
+                points_per_frame=self._get_save_points_per_frame(params)
+            )
+        except Exception as exc:
+            log.exception(f"Failed to start data saver: {exc}")
+            try:
+                saver.stop()
+            except Exception as stop_exc:
+                log.warning(f"Error cleaning up failed data saver: {stop_exc}")
+            self.data_saver = None
+            self.params.save.enable = False
+            self.save_status_label.setText("Save: Off")
+            self._set_save_enable_checked(False)
+            QMessageBox.critical(self, "Storage Error", f"Failed to start data saving:\n{exc}")
+            return False
+
+        self.data_saver = saver
+        self.params.save.enable = True
+        self.params.save.path = save_path
+        self.params.save.blocks_per_file = blocks_per_file
+        self.save_status_label.setText(f"Save: {filename}")
+        return True
+
+    def _stop_data_saver(self):
+        """Stop the active storage worker and close the current file."""
+        saver = self.data_saver
+        if saver is None:
+            self.save_status_label.setText("Save: Off")
+            return
+
+        log.debug("Stopping data saver...")
+        self.data_saver = None
+        try:
+            saver.stop()
+        except Exception as exc:
+            log.warning(f"Error stopping data saver: {exc}")
+        self.save_status_label.setText("Save: Off")
+
+    @pyqtSlot(bool)
+    def _on_save_enable_toggled(self, enabled: bool):
+        """Apply save-enable changes immediately when acquisition is already running."""
+        self.params.save.enable = enabled
+        self.params.save.path = self.save_path_edit.text().strip()
+        self.params.save.blocks_per_file = self.blocks_per_file_spin.value()
+
+        if enabled:
+            if self._is_acquisition_running():
+                self._start_data_saver(self.params)
+            return
+
+        self._stop_data_saver()
+        self.params.save.enable = False
+
+    @pyqtSlot()
+    def _on_save_path_edited(self):
+        """Keep the pending save path synchronized with the UI."""
+        self.params.save.path = self.save_path_edit.text().strip()
+
     @pyqtSlot()
     def _on_start(self):
         """Handle start button click"""
@@ -1883,24 +1982,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to start acquisition: {e}")
                 return
 
-        # Start data saver if enabled (block-based)
+        # Start data saver if enabled (block-based). This also creates missing directories.
         if params.save.enable:
-            log.info(f"Starting block-based data saver to {params.save.path}")
-            self.data_saver = BlockBasedFileSaver(
-                params.save.path,
-                blocks_per_file=params.save.blocks_per_file,
-                buffer_size=OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
-            )
-            # Calculate points per frame for filename
-            if params.upload.data_source == DataSource.PHASE:
-                points_per_frame = self._get_effective_phase_point_count(params)
-            else:
-                points_per_frame = params.basic.point_num_per_scan
-            filename = self.data_saver.start(
-                scan_rate=params.basic.scan_rate,
-                points_per_frame=points_per_frame
-            )
-            self.save_status_label.setText(f"Save: {filename}")
+            if not self._start_data_saver(params):
+                if not self.simulation_mode and self.api is not None:
+                    try:
+                        self.api.stop()
+                    except Exception as exc:
+                        log.warning(f"Error stopping device after storage start failure: {exc}")
+                return
         else:
             self.save_status_label.setText("Save: Off")
 
@@ -1982,13 +2072,7 @@ class MainWindow(QMainWindow):
             stopping_thread.set_full_data_handler(None)
             stopping_thread.clear_latest_display_data()
 
-        if self.data_saver is not None:
-            log.debug("Stopping data saver...")
-            try:
-                self.data_saver.stop()
-            except Exception as e:
-                log.warning(f"Error stopping data saver: {e}")
-            self.data_saver = None
+        self._stop_data_saver()
 
         self.tcp_tab3_manager.stop_session()
 

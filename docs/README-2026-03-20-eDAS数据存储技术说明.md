@@ -76,6 +76,17 @@ $$
 
 单个 `.bin` 文件达到 200 MB 通常不是导致界面卡顿的直接原因，因为当前保存链路不会攒够 200 MB 后一次性写入，而是每个完整块到达后由后台保存线程持续追加写当前文件。`Blocks/File` 设大只会降低切文件频率、增大单文件体积；真正需要关注的是持续写入速率、保存队列是否堆积，以及分文件或停止保存时 `flush/close` 是否明显耗时。一般来说，本机 SSD 上 100 MB 到 300 MB 的单文件大小比较合理；超过 1 GB 虽然也可能工作，但离线拷贝、解析和异常恢复都会更麻烦，不建议作为默认值。
 
+
+### 6.1 Runtime Save Enable and Missing Directory Creation
+
+As of the 2026-07-17 fix, enabling storage while acquisition is already running is an active operation, not only a pending UI setting. `save_enable_check.toggled` is connected to `_on_save_enable_toggled()`. When the active acquisition thread is running, that handler calls `_start_data_saver(self.params)`, using the current `Path` and `Blocks/File` values from the main window.
+
+The actual directory creation remains inside `BlockBasedFileSaver.start()`. Before opening the `.bin` file, it calls `self.save_path.mkdir(parents=True, exist_ok=True)`, so a missing target folder, including nested folders, is created automatically. Starting acquisition with `Enable` already checked and enabling storage during an active run now share the same `_start_data_saver()` path, which keeps directory creation, filename setup, status updates, and error handling consistent.
+
+Only full data blocks received after the saver has successfully started are queued to disk. Earlier blocks are not replayed. If runtime storage startup fails, the UI rolls `Save` back to `Off`, clears the `Enable` checkbox, and shows a storage error dialog. If storage startup fails during the acquisition start sequence, the code attempts to stop device acquisition before returning. Stopping acquisition closes the active saver but preserves the `Enable` configuration for the next run; unchecking `Enable` during a run stops the saver and disables storage configuration.
+
+This change does not alter saved payload semantics. Saved data still comes from the complete acquisition block path and is not affected by GUI `rad`, Tab1/Tab2 display FILTER, or PSD processing.
+
 ## 7. 队列、背压与丢块策略
 
 保存器前端使用 `queue.Queue(maxsize=buffer_size)`，采集侧或主窗口侧调用 `save_block()` 时最终使用 `put_nowait()` 非阻塞入队。如果队列已满，当前块会被直接丢弃，并增加 `dropped_blocks` 计数，同时输出告警日志。这个策略意味着：在保存链路无法跟上持续采集速率时，程序不会因为等待磁盘而阻塞前台线程，而是宁可丢失部分待保存块。

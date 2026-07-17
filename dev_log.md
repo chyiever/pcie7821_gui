@@ -572,8 +572,8 @@ The FILTER parameter now controls both the Tab1 phase waveform and the Tab2 Time
 
 - `src/main_window.py`
 - `src/time_space_plot.py`
-- `docs/2026-7-17????????.md`
-- `docs/2026-07-09-Tab2-Space-Time??????????.md`
+- `docs/2026-7-17滤波配置与数据流.md`
+- `docs/2026-07-09-Tab2-Space-Time实时滤波功能开发日志.md`
 - `dev_log.md`
 
 ### Verification
@@ -605,3 +605,28 @@ The `--skip-clean` flag was used deliberately so previous executable files in `d
 ### Source control
 
 `dist/` remains ignored by Git, so the executable is a local delivery artifact and is not committed to the source repository. The generated `eDAS26.7.17.spec` is retained with the source, matching the existing versioned spec-file pattern.
+
+## 2026-07-17 Runtime storage enable creates missing directories
+
+### Background
+
+A runtime storage bug was reported: while acquisition was already running, enabling storage with a target folder that did not exist failed to create the folder automatically. The saver implementation already had `mkdir(parents=True, exist_ok=True)` in `BlockBasedFileSaver.start()`, but the running UI path did not actually start a saver when `Enable` was toggled.
+
+### Changes
+
+- Connected `save_enable_check.toggled` to `_on_save_enable_toggled()` in `src/main_window.py`.
+- Added `_start_data_saver()` so startup-time storage and runtime storage enable share the same saver creation path.
+- Runtime enable now uses the current `Path` and `Blocks/File`, then calls `BlockBasedFileSaver.start()`, which creates missing directories before opening the first `.bin` file.
+- Added `_stop_data_saver()` to close the active saver consistently. Manual acquisition stop closes the file but keeps the `Enable` setting for the next run; runtime uncheck stops the saver and disables storage.
+- Adjusted local parameter restore order so save path and block count are applied before setting `Enable` with signals blocked.
+- Saved payload semantics are unchanged: complete acquisition blocks are saved without GUI `rad`, Tab1/Tab2 display FILTER, or PSD processing.
+
+### Files
+
+- `src/main_window.py`
+- `docs/README-2026-03-20-eDAS数据存储技术说明.md`
+- `dev_log.md`
+
+### Verification
+
+Completed `python -m py_compile src\main_window.py src\data_saver.py`. Completed a runtime storage path creation regression check with a missing nested folder and confirmed the directory plus first `.bin` file were created. Also asserted that `Save Enable` is connected to the runtime saver startup path. Completed `git diff --check` and the UTF-8 Chinese mojibake self-check.
