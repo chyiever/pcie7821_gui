@@ -32,11 +32,13 @@ flowchart LR
 
 ## 4. 保存前的数据是否会被二次处理
 
-当前版本对保存前数据的处理相当克制，这是一种有意为之的设计。保存链路不会做文本化、不会做压缩、不会做 GUI `rad` 弧度转换、不会做额外滤波、不会做 PSD 计算，也不会为了显示方便而重排成特殊可视化结构。它做的事情主要有三类：必要时统一 `dtype`，把 NumPy 数组序列化为连续字节流，以及按配置控制分文件边界。
+当前版本对保存前数据的处理相当克制，这是一种有意为之的设计。保存链路不会做文本化、不会做压缩、不会做 GUI `rad` 弧度转换、不会做额外滤波、不会做 PSD 计算，也不会为了显示方便而重排成特殊可视化结构。除 2026-07-20 新增的可选 `Save DS` 抽点外，它做的事情主要有三类：必要时统一 `dtype`，把 NumPy 数组序列化为连续字节流，以及按配置控制分文件边界。
 
 PHASE 数据在到达保存器之前，已经可能经历过底层相位链路处理，例如 `rate2phase`、`space_avg_order`、`merge_point_num`、`diff_order`、`detrend_bw` 和 `polarization_diversity` 等。这些处理发生在 FPGA 或 DLL 所代表的底层链路中，不是保存器附加做的。因此，保存器保存的是“当前上传链路输出的原始块”，而不是最初 ADC 的绝对原始值。
 
 单通道 PHASE 空间裁剪是另一个必须说明的点。当前代码会在采集线程中根据 `crop_distance_start` 和 `crop_distance_end` 对单通道 PHASE 数据做软件裁剪，然后再进入后续显示、保存和通信链路。也就是说，若用户启用了裁剪，保存到磁盘的数据块本身已经是裁剪后的点数，而不是完整未裁剪的点数。后续离线解析文件时，必须把这一事实纳入数据形状恢复逻辑。
+
+此外，`Save DS` 是保存侧专用的抽点因子，默认 `1` 表示不降采样；设置为 `N` 时，程序在完整块进入 `BlockBasedFileSaver.save_block()` 之前，对每帧点位执行 `0, N, 2N, ...` 的简单抽取。这个过程不调用滤波器，不改变 Tab1 波形、PSD、Tab1/Tab2 FILTER 显示结果，也不改变 Tab3 TCP 发送数据。多通道数据按帧内行抽取并保留完整通道列，避免破坏通道交错关系。
 
 ## 5. 文件格式、字节序与元数据问题
 
@@ -85,7 +87,7 @@ The actual directory creation remains inside `BlockBasedFileSaver.start()`. Befo
 
 Only full data blocks received after the saver has successfully started are queued to disk. Earlier blocks are not replayed. If runtime storage startup fails, the UI rolls `Save` back to `Off`, clears the `Enable` checkbox, and shows a storage error dialog. If storage startup fails during the acquisition start sequence, the code attempts to stop device acquisition before returning. Stopping acquisition closes the active saver but preserves the `Enable` configuration for the next run; unchecking `Enable` during a run stops the saver and disables storage configuration.
 
-This change does not alter saved payload semantics. Saved data still comes from the complete acquisition block path and is not affected by GUI `rad`, Tab1/Tab2 display FILTER, or PSD processing.
+This runtime-enable change does not route saved data through the GUI display path. Saved data still comes from the complete acquisition block path and is not affected by GUI `rad`, Tab1/Tab2 display FILTER, or PSD processing. The optional `Save DS` point-picking step is the only storage-side reduction and it is applied immediately before enqueueing data to the saver.
 
 ## 7. 队列、背压与丢块策略
 
@@ -93,11 +95,11 @@ This change does not alter saved payload semantics. Saved data still comes from 
 
 这种取舍在工程上是合理的，因为在当前架构里，保存线程的阻塞不能反向拖死 GUI 或采集线程。但它也带来一个很现实的结论：只要磁盘吞吐、文件系统抖动或目标路径问题让后台写盘明显落后，保存结果就不再天然等于“完整采集历史”。因此，正式实验前应先用目标参数组合做持续写盘测试，而不是默认保存一定可靠。
 
-平均每秒保存量主要由每帧有效点数、`ScanRate`、通道数和保存字节数决定，而不是由 `FrameLoad` 或 `Blocks/File` 决定。估算公式为：
+平均每秒保存量主要由每帧有效点数、`Save DS` 后的保留点数、`ScanRate`、通道数和保存字节数决定，而不是由 `FrameLoad` 或 `Blocks/File` 决定。若保存降采样因子为 $d_{save}$，估算公式为：
 
 $$
 R_{\mathrm{save}} =
-\mathrm{points\_per\_frame} \times
+\left\lceil \frac{\mathrm{points\_per\_frame}}{d_{save}} \right\rceil \times
 \mathrm{ScanRate} \times
 \mathrm{ChannelNum} \times
 S_{\mathrm{point}}
@@ -135,7 +137,7 @@ $$
 \mathrm{points\_per\_block} = \mathrm{frame\_load} \times \mathrm{effective\_points\_per\_frame}
 $$
 
-恢复成二维矩阵，其中 `effective_points_per_frame` 需要结合 `merge_point_num` 和裁剪范围计算。如果要还原到 GUI 中看到的弧度，可再按
+恢复成二维矩阵，其中 `effective_points_per_frame` 需要结合 `merge_point_num`、裁剪范围和 `Save DS` 后的保留点数计算。如果要还原到 GUI 中看到的弧度，可再按
 
 $$
 \phi_{\mathrm{rad}} = \frac{\phi_{\mathrm{int32}}}{32767} \pi

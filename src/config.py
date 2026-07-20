@@ -236,6 +236,7 @@ class SaveParams:
         path: Directory path for data files (must exist and be writable)
         file_prefix: Optional prefix for generated filenames
         blocks_per_file: Automatic file splitting threshold, counted in complete acquisition blocks
+        storage_downsample_factor: Storage-only point picking factor (1=no downsampling)
 
     Filename Format: {seq}-eDAS-{rate}Hz-{points}pt-{timestamp}.{ms}.bin
     Storage Format: Raw int32 phase data (4 bytes per point)
@@ -246,6 +247,7 @@ class SaveParams:
     path: str = "D:/eDAS_DATA"               # Default storage directory
     file_prefix: str = ""                    # Optional filename prefix
     blocks_per_file: int = 10                # Auto-split after N complete acquisition blocks
+    storage_downsample_factor: int = 1       # Save every Nth point; display/filter paths are unaffected
 
 
 @dataclass

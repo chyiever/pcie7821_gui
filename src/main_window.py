@@ -132,6 +132,7 @@ class MainWindow(QMainWindow):
         self._recovery_in_progress = False
         self._last_recovery_time = 0.0
         self._full_data_count = 0
+        self._save_file_count_this_run = 0
         self._tcp_settings_snapshot: Dict[str, Any] = {}
 
         # System monitoring
@@ -617,24 +618,40 @@ class MainWindow(QMainWindow):
         save_layout.setSpacing(4)
         save_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Row 0: Enable | Path
-        self.save_enable_check = QCheckBox("Enable")
+        # Row 0: save toggle button | Path | storage-only downsample
+        self.save_enable_check = QPushButton("SAVE")
+        self.save_enable_check.setCheckable(True)
+        self.save_enable_check.setFont(QFont("Times New Roman", 8, QFont.Bold))
+        self.save_enable_check.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.save_enable_check.setMaximumWidth(78)
+        self.save_enable_check.setToolTip("Toggle data storage. Save DS only affects files written to disk.")
+        self._update_save_button_style()
         save_layout.addWidget(self.save_enable_check, 0, 0)
 
         save_layout.addWidget(QLabel("Path:"), 0, 1)
         path_layout = QHBoxLayout()
-        path_layout.setSpacing(2)
+        path_layout.setSpacing(4)
         self.save_path_edit = QLineEdit(self.params.save.path)  # Use default path from config
         self.save_path_edit.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.browse_btn = QPushButton("...")
         self.browse_btn.setMaximumWidth(25)
         self.browse_btn.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.browse_btn.clicked.connect(self._browse_save_path)
-        path_layout.addWidget(self.save_path_edit)
+        path_layout.addWidget(self.save_path_edit, 1)
         path_layout.addWidget(self.browse_btn)
-        save_layout.addLayout(path_layout, 0, 2, 1, 2)
+        self.save_downsample_label = QLabel("Save DS:")
+        self.save_downsample_label.setToolTip("Storage-only downsample factor: save every Nth point without filtering.")
+        path_layout.addWidget(self.save_downsample_label)
+        self.save_downsample_spin = QSpinBox()
+        self.save_downsample_spin.setRange(1, 100000)
+        self.save_downsample_spin.setValue(self.params.save.storage_downsample_factor)
+        self.save_downsample_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.save_downsample_spin.setMaximumWidth(72)
+        self.save_downsample_spin.setToolTip("Storage-only downsample factor. 10 means keep 1 point from every 10 points.")
+        path_layout.addWidget(self.save_downsample_spin)
+        save_layout.addLayout(path_layout, 0, 2, 1, 3)
 
-        # Row 1: Blocks per File | File Size Estimate
+        # Row 1: Blocks per File | File Size Estimate | Files in this run
         save_layout.addWidget(QLabel("Blocks/File:"), 1, 0)
         self.blocks_per_file_spin = QSpinBox()
         self.blocks_per_file_spin.setRange(1, 100000)
@@ -649,6 +666,9 @@ class MainWindow(QMainWindow):
         self.file_size_label.setStyleSheet("font-weight: normal; color: #666666;")
         save_layout.addWidget(self.file_size_label, 1, 3)
 
+        self.saved_file_count_label = QLabel("Files: 0")
+        self.saved_file_count_label.setStyleSheet("font-weight: normal; color: #666666;")
+        save_layout.addWidget(self.saved_file_count_label, 1, 4)
         layout.addWidget(save_group)
 
         # Control Buttons
@@ -1280,6 +1300,7 @@ class MainWindow(QMainWindow):
         self.crop_distance_end_spin.valueChanged.connect(self._update_calculated_values)
         self.rate2phase_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.blocks_per_file_spin.valueChanged.connect(self._update_file_estimates)
+        self.save_downsample_spin.valueChanged.connect(self._on_storage_downsample_changed)
         self.save_enable_check.toggled.connect(self._on_save_enable_toggled)
         self.save_path_edit.editingFinished.connect(self._on_save_path_edited)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
@@ -1515,8 +1536,8 @@ class MainWindow(QMainWindow):
 
         self.save_path_edit.setText(params.save.path)
         self.blocks_per_file_spin.setValue(params.save.blocks_per_file)
+        self.save_downsample_spin.setValue(max(1, int(getattr(params.save, "storage_downsample_factor", 1) or 1)))
         self._set_save_enable_checked(params.save.enable)
-
         self._sync_display_control_states()
         self._update_phase_crop_controls()
         self._update_calculated_values()
@@ -1627,6 +1648,7 @@ class MainWindow(QMainWindow):
         params.save.enable = self.save_enable_check.isChecked()
         params.save.path = self.save_path_edit.text()
         params.save.blocks_per_file = self.blocks_per_file_spin.value()
+        params.save.storage_downsample_factor = self.save_downsample_spin.value()
 
         return params
 
@@ -1666,6 +1688,9 @@ class MainWindow(QMainWindow):
                 return False, f"CropStart must be smaller than total PHASE points ({total_points})"
             if crop_end > 0 and crop_end <= crop_start:
                 return False, "CropEnd must be greater than CropStart"
+
+        if params.save.storage_downsample_factor <= 0:
+            return False, "Save DS must be greater than 0."
 
         return True, ""
 
@@ -1846,18 +1871,129 @@ class MainWindow(QMainWindow):
         thread = self.acq_thread
         return thread is not None and bool(getattr(thread, "is_running", False))
 
-    def _get_save_points_per_frame(self, params: Optional[AllParams] = None) -> int:
-        """Return the frame width used in saved-data filenames."""
+    @staticmethod
+    def _downsampled_point_count(point_count: int, factor: int) -> int:
+        """Return the number of points kept by storage-only point picking."""
+        point_count = max(0, int(point_count))
+        factor = max(1, int(factor))
+        if point_count <= 0:
+            return 0
+        return (point_count + factor - 1) // factor
+
+    def _get_storage_downsample_factor(self, params: Optional[AllParams] = None) -> int:
+        """Return the storage-only downsample factor from captured parameters."""
+        params = params or self.params
+        return max(1, int(getattr(params.save, "storage_downsample_factor", 1) or 1))
+
+    def _get_save_source_points_per_frame(self, params: Optional[AllParams] = None) -> int:
+        """Return saved-data frame width before the storage-only downsample."""
         params = params or self.params
         if params.upload.data_source == DataSource.PHASE:
             return self._get_effective_phase_point_count(params)
         return params.basic.point_num_per_scan
 
+    def _get_save_points_per_frame(self, params: Optional[AllParams] = None) -> int:
+        """Return the frame width written to disk and encoded in saved-data filenames."""
+        params = params or self.params
+        return self._downsampled_point_count(
+            self._get_save_source_points_per_frame(params),
+            self._get_storage_downsample_factor(params),
+        )
+
     def _set_save_enable_checked(self, checked: bool):
-        """Update the save checkbox without recursively starting/stopping storage."""
+        """Update the save toggle button without recursively starting/stopping storage."""
         previous = self.save_enable_check.blockSignals(True)
         self.save_enable_check.setChecked(checked)
         self.save_enable_check.blockSignals(previous)
+        self._update_save_button_style()
+
+    def _set_storage_downsample_enabled(self, enabled: bool):
+        """Keep storage downsampling fixed while a save file is open."""
+        if hasattr(self, "save_downsample_spin"):
+            self.save_downsample_spin.setEnabled(enabled)
+        if hasattr(self, "save_downsample_label"):
+            self.save_downsample_label.setEnabled(enabled)
+
+    def _update_save_button_style(self):
+        """Style the save toggle like the other small action buttons."""
+        if not hasattr(self, "save_enable_check"):
+            return
+
+        saver = self.data_saver
+        active = saver is not None and saver.is_running
+        checked = self.save_enable_check.isChecked()
+        if active:
+            self.save_enable_check.setText("SAVING")
+            self.save_enable_check.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #1976D2;
+                    color: white;
+                    border: 1px solid #1565C0;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #1565C0;
+                }
+                """
+            )
+        elif checked:
+            self.save_enable_check.setText("SAVE ON")
+            self.save_enable_check.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #4CAF50;
+                    color: white;
+                    border: 1px solid #3d8b40;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #45a049;
+                }
+                """
+            )
+        else:
+            self.save_enable_check.setText("SAVE")
+            self.save_enable_check.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #9E9E9E;
+                    color: white;
+                    border: 1px solid #757575;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #757575;
+                }
+                """
+            )
+
+    def _refresh_save_status_display(self):
+        """Refresh save status text and this-run file count."""
+        saver = self.data_saver
+        active = saver is not None and saver.is_running
+        if saver is not None:
+            files_created = int(getattr(saver, "total_files_created", 0) or 0)
+            self._save_file_count_this_run = files_created
+        else:
+            files_created = int(getattr(self, "_save_file_count_this_run", 0) or 0)
+
+        if hasattr(self, "saved_file_count_label"):
+            self.saved_file_count_label.setText(f"Files: {files_created}")
+
+        if hasattr(self, "save_status_label"):
+            if active:
+                filename = getattr(saver, "current_filename", "")
+                self.save_status_label.setText(f"Save: {filename}" if filename else "Save: On")
+            elif self.params.save.enable:
+                self.save_status_label.setText("Save: Ready")
+            else:
+                self.save_status_label.setText("Save: Off")
+
+        self._update_save_button_style()
 
     def _start_data_saver(self, params: Optional[AllParams] = None) -> bool:
         """Start storage immediately, creating the target directory if needed."""
@@ -1867,11 +2003,17 @@ class MainWindow(QMainWindow):
         params = params or self.params
         save_path = self.save_path_edit.text().strip() or params.save.path
         blocks_per_file = self.blocks_per_file_spin.value()
+        storage_downsample_factor = self.save_downsample_spin.value()
         params.save.enable = True
         params.save.path = save_path
         params.save.blocks_per_file = blocks_per_file
+        params.save.storage_downsample_factor = storage_downsample_factor
+        self._save_file_count_this_run = 0
 
-        log.info(f"Starting block-based data saver to {save_path}")
+        log.info(
+            f"Starting block-based data saver to {save_path}, "
+            f"blocks_per_file={blocks_per_file}, save_ds={storage_downsample_factor}"
+        )
         saver = BlockBasedFileSaver(
             save_path,
             blocks_per_file=blocks_per_file,
@@ -1891,8 +2033,9 @@ class MainWindow(QMainWindow):
                 log.warning(f"Error cleaning up failed data saver: {stop_exc}")
             self.data_saver = None
             self.params.save.enable = False
-            self.save_status_label.setText("Save: Off")
+            self._set_storage_downsample_enabled(True)
             self._set_save_enable_checked(False)
+            self._refresh_save_status_display()
             QMessageBox.critical(self, "Storage Error", f"Failed to start data saving:\n{exc}")
             return False
 
@@ -1900,14 +2043,17 @@ class MainWindow(QMainWindow):
         self.params.save.enable = True
         self.params.save.path = save_path
         self.params.save.blocks_per_file = blocks_per_file
-        self.save_status_label.setText(f"Save: {filename}")
+        self.params.save.storage_downsample_factor = storage_downsample_factor
+        self._set_storage_downsample_enabled(False)
+        self._refresh_save_status_display()
         return True
 
     def _stop_data_saver(self):
         """Stop the active storage worker and close the current file."""
         saver = self.data_saver
         if saver is None:
-            self.save_status_label.setText("Save: Off")
+            self._set_storage_downsample_enabled(True)
+            self._refresh_save_status_display()
             return
 
         log.debug("Stopping data saver...")
@@ -1916,27 +2062,42 @@ class MainWindow(QMainWindow):
             saver.stop()
         except Exception as exc:
             log.warning(f"Error stopping data saver: {exc}")
-        self.save_status_label.setText("Save: Off")
+        self._save_file_count_this_run = int(
+            getattr(saver, "total_files_created", self._save_file_count_this_run) or 0
+        )
+        self._set_storage_downsample_enabled(True)
+        self._refresh_save_status_display()
 
     @pyqtSlot(bool)
     def _on_save_enable_toggled(self, enabled: bool):
-        """Apply save-enable changes immediately when acquisition is already running."""
+        """Apply save-toggle changes immediately when acquisition is already running."""
         self.params.save.enable = enabled
         self.params.save.path = self.save_path_edit.text().strip()
         self.params.save.blocks_per_file = self.blocks_per_file_spin.value()
+        self.params.save.storage_downsample_factor = self.save_downsample_spin.value()
 
         if enabled:
+            if not self._is_acquisition_running():
+                self._save_file_count_this_run = 0
             if self._is_acquisition_running():
                 self._start_data_saver(self.params)
+            self._refresh_save_status_display()
             return
 
-        self._stop_data_saver()
         self.params.save.enable = False
+        self._stop_data_saver()
+        self._refresh_save_status_display()
 
     @pyqtSlot()
     def _on_save_path_edited(self):
         """Keep the pending save path synchronized with the UI."""
         self.params.save.path = self.save_path_edit.text().strip()
+
+    @pyqtSlot(int)
+    def _on_storage_downsample_changed(self, value: int):
+        """Keep the pending storage-only downsample factor synchronized with the UI."""
+        self.params.save.storage_downsample_factor = max(1, int(value))
+        self._update_file_estimates()
 
     @pyqtSlot()
     def _on_start(self):
@@ -1992,7 +2153,8 @@ class MainWindow(QMainWindow):
                         log.warning(f"Error stopping device after storage start failure: {exc}")
                 return
         else:
-            self.save_status_label.setText("Save: Off")
+            self._save_file_count_this_run = 0
+            self._refresh_save_status_display()
 
         # Reset counters
         self._data_count = 0
@@ -2076,7 +2238,7 @@ class MainWindow(QMainWindow):
 
         self.tcp_tab3_manager.stop_session()
 
-        self.save_status_label.setText("Save: Off")
+        self._refresh_save_status_display()
         if self.acq_thread is stopping_thread:
             self.acq_thread = None
         log.info(
@@ -2121,9 +2283,57 @@ class MainWindow(QMainWindow):
 
         saver = self.data_saver
         if saver is not None and saver.is_running:
-            save_ok = saver.save_block(data)
+            save_data = self._downsample_data_for_storage(data, data_source, channel_num)
+            save_ok = saver.save_block(save_data)
             if not save_ok:
                 log.warning(f"Save enqueue failed at full block #{self._full_data_count}")
+
+    def _downsample_data_for_storage(self, data: np.ndarray, data_source: int, channel_num: int) -> np.ndarray:
+        """Apply storage-only point picking without changing display, filter, or TCP data."""
+        factor = self._get_storage_downsample_factor(self.params)
+        if factor <= 1:
+            return data
+
+        points_per_frame = self._get_save_source_points_per_frame(self.params)
+        if points_per_frame <= 0:
+            return data
+
+        channel_num = max(1, int(channel_num or 1))
+        arr = np.asarray(data)
+        try:
+            if channel_num == 1:
+                flat = arr.reshape(-1)
+                frame_count = flat.size // points_per_frame
+                if frame_count <= 0:
+                    return np.ascontiguousarray(flat[::factor])
+
+                valid_points = frame_count * points_per_frame
+                sampled = flat[:valid_points].reshape(frame_count, points_per_frame)[:, ::factor].reshape(-1)
+                if valid_points < flat.size:
+                    tail = flat[valid_points::factor]
+                    if tail.size:
+                        sampled = np.concatenate((sampled, tail))
+                return np.ascontiguousarray(sampled)
+
+            matrix = arr.reshape(-1, channel_num)
+            frame_count = matrix.shape[0] // points_per_frame
+            if frame_count <= 0:
+                return np.ascontiguousarray(matrix[::factor, :])
+
+            valid_rows = frame_count * points_per_frame
+            sampled = (
+                matrix[:valid_rows, :]
+                .reshape(frame_count, points_per_frame, channel_num)[:, ::factor, :]
+                .reshape(-1, channel_num)
+            )
+            if valid_rows < matrix.shape[0]:
+                tail = matrix[valid_rows::factor, :]
+                if tail.size:
+                    sampled = np.concatenate((sampled, tail), axis=0)
+            return np.ascontiguousarray(sampled)
+        except Exception as exc:
+            log.warning(f"Storage downsample failed; saving original block instead: {exc}")
+            return data
 
     def _drain_latest_display_data(self):
         """Consume at most one latest display snapshot per GUI timer tick."""
@@ -2856,8 +3066,9 @@ class MainWindow(QMainWindow):
                 if hasattr(self, 'polling_label'):
                     self.polling_label.setText("Poll: --ms")
 
-            # Update file size estimates
+            # Update file size estimates and storage run count
             self._update_file_estimates()
+            self._refresh_save_status_display()
             self._log_acquisition_diagnostics("periodic")
             self._log_storage_queue_status()
 
@@ -3134,33 +3345,37 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _update_file_estimates(self):
-        """Update file size and duration estimates"""
+        """Update storage file size estimates after storage-only downsampling."""
         try:
             blocks_per_file = self.blocks_per_file_spin.value()
             frame_load_num = self.frame_load_num_spin.value()
-            scan_rate = self.scan_rate_spin.value()
             point_num = self.point_num_spin.value()
             merge_points = self.merge_points_spin.value()
-            channel_num = self.channel_combo.currentData()
+            channel_num = self.channel_combo.currentData() or 1
             data_source = self.data_source_combo.currentData() or DataSource.PHASE
+            storage_downsample_factor = self.save_downsample_spin.value()
 
             if data_source == DataSource.PHASE and channel_num == 1:
                 total_points = calculate_phase_point_num(point_num, merge_points)
-                points_per_frame = calculate_cropped_point_count(
+                source_points_per_frame = calculate_cropped_point_count(
                     total_points,
                     self.crop_distance_start_spin.value(),
                     self.crop_distance_end_spin.value(),
                 )
             elif data_source == DataSource.PHASE:
-                points_per_frame = calculate_phase_point_num(point_num, merge_points)
+                source_points_per_frame = calculate_phase_point_num(point_num, merge_points)
             else:
-                points_per_frame = point_num
+                source_points_per_frame = point_num
+
+            points_per_frame = self._downsampled_point_count(
+                source_points_per_frame,
+                storage_downsample_factor,
+            )
 
             # One saved block corresponds to one acquisition callback.
             block_size_mb = points_per_frame * max(1, frame_load_num) * channel_num * 4 / (1024 * 1024)
             file_size_mb = block_size_mb * blocks_per_file
 
-            # Update label
             self.file_size_label.setText(f"~{file_size_mb:.1f}MB/file")
 
         except Exception as e:

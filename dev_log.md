@@ -630,3 +630,36 @@ A runtime storage bug was reported: while acquisition was already running, enabl
 ### Verification
 
 Completed `python -m py_compile src\main_window.py src\data_saver.py`. Completed a runtime storage path creation regression check with a missing nested folder and confirmed the directory plus first `.bin` file were created. Also asserted that `Save Enable` is connected to the runtime saver startup path. Completed `git diff --check` and the UTF-8 Chinese mojibake self-check.
+
+## 2026-07-20 Storage-only downsample and SAVE button
+
+### Background
+
+现场需要在不影响实时波形、PSD、Tab1/Tab2 FILTER 和 TCP 通信的前提下，降低落盘数据量。这个需求不能复用显示侧 Time-Space 降采样，也不能用滤波重采样代替；保存链路只允许做简单、可解释的抽点：`Save DS = N` 时，每帧每 N 个点保留 1 个点。
+
+同时，保存开关从复选框改为按钮，避免用户把它误解成只在启动前生效的静态配置。界面需要实时显示本轮保存已经创建的 `.bin` 文件数量，停止保存后保留最后的本轮计数，下一轮保存启动时再清零。
+
+### Changes
+
+- `src/config.py` 的 `SaveParams` 新增 `storage_downsample_factor`，默认值为 `1`，并进入本地参数保存/恢复。
+- `src/main_window.py` 将 `Data Save` 区域的 `Enable` 复选框替换为可切换 `SAVE` 按钮，按钮样式与现有小型功能按钮保持一致：未启用为灰色，待下一轮保存为绿色，正在保存为蓝色 `SAVING`。
+- 在保存路径旁新增 `Save DS` 数值框，范围为 `1` 到 `100000`。该参数只在保存文件打开前锁定；保存进行中禁用，避免同一个 `.bin` 文件内出现前后点数不一致。
+- 保存入队前新增 `_downsample_data_for_storage()`：单通道数据按每帧点位抽取；多通道数据按帧内空间/时间行抽取并保留完整通道列，避免直接对扁平数组抽样导致通道交错错位。
+- 文件名中的 `pt` 和 `Est. Size` 现在使用降采样后的每帧点数，便于离线解析时识别实际保存形状。
+- 新增 `Files: N` 本轮文件计数显示，活动保存时从 `BlockBasedFileSaver.total_files_created` 实时刷新，停止后保留最后计数。
+
+### Files
+
+- `src/config.py`
+- `src/main_window.py`
+- `docs/README-2026-03-20-eDAS数据存储技术说明.md`
+- `user_read.md`
+- `dev_log.md`
+
+### Verification
+
+已执行 `python -m py_compile src\main_window.py src\config.py`，语法检查通过。已执行 `git diff --check`，未发现空白错误，命令仅提示 Windows 环境下 LF/CRLF 行尾转换。已执行不启动 GUI 的数组自检，覆盖单通道 PHASE 和双通道 Raw：确认 `Save DS` 按帧内点位抽取，返回连续数组，多通道通道列不被打乱。
+
+### Git and packaging
+
+本次源代码修改将在 `dev` 分支提交并推送到 GitHub。推送完成后按请求使用当天日期时间命名 exe，并通过 `build_exe.py --skip-clean` 保留既有 `dist/` 中的历史 exe。
