@@ -663,3 +663,13 @@ Completed `python -m py_compile src\main_window.py src\data_saver.py`. Completed
 ### Git and packaging
 
 本次源代码修改将在 `dev` 分支提交并推送到 GitHub。推送完成后按请求使用当天日期时间命名 exe，并通过 `build_exe.py --skip-clean` 保留既有 `dist/` 中的历史 exe。
+
+### Packaging output
+
+已执行：
+
+```powershell
+python build_exe.py --name eDAS20260720-173900 --skip-clean
+```
+
+输出文件为 `dist/eDAS20260720-173900.exe`，大小 `81,018,519` 字节，修改时间为 `2026/7/20 17:43:08`。打包后确认旧版本 `eDAS26.6.14.exe`、`eDAS26.6.18.exe`、`eDAS26.7.9.exe`、`eDAS26.7.17.exe` 仍保留在 `dist/` 目录中。本次 PyInstaller 规格文件 `eDAS20260720-173900.spec` 按历史版本规格文件惯例保留在源码仓库。
