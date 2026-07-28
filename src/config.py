@@ -73,6 +73,15 @@ class DisplayMode(IntEnum):
     TIME_SPACE = 2 # Time-space 2D plot with rolling window
 
 
+STORAGE_FORMAT_BIN = "bin"
+STORAGE_FORMAT_BITSHUFFLE_ZSTD = "bz"
+
+STORAGE_FORMAT_OPTIONS: List[Tuple[str, str]] = [
+    ("BIN (.bin)", STORAGE_FORMAT_BIN),
+    ("Bitshuffle+Zstd (.bz)", STORAGE_FORMAT_BITSHUFFLE_ZSTD),
+]
+
+
 # ----- PARAMETER DATA STRUCTURES -----
 # Organized parameter groups using dataclasses for type safety and defaults
 
@@ -235,11 +244,16 @@ class SaveParams:
         enable: Enable/disable automatic data saving
         path: Directory path for data files (must exist and be writable)
         file_prefix: Optional prefix for generated filenames
-        blocks_per_file: Automatic file splitting threshold, counted in complete acquisition blocks
+        blocks_per_file: Automatic .bin splitting threshold, counted in complete acquisition blocks
         storage_downsample_factor: Storage-only point picking factor (1=no downsampling)
+        storage_format: File format, either raw .bin or compressed .bz
+        bz_zstd_level: Zstd level for .bz packets
+        bz_bitshuffle_block_values: Bitshuffle block size in int32 values
+        bz_packet_frames: Frames per compressed packet; 0 means scan_rate frames, about 1 second
+        bz_file_duration_s: Target .bz file duration before rotating to a new file
 
     Filename Format: {seq}-eDAS-{rate}Hz-{points}pt-{timestamp}.{ms}.bin
-    Storage Format: Raw int32 phase data (4 bytes per point)
+    Storage Format: Raw int32 .bin or packetized Bitshuffle+Zstd .bz
 
     Note: Ensure sufficient disk space - typical rate ~50-200 MB/min
     """
@@ -248,6 +262,11 @@ class SaveParams:
     file_prefix: str = ""                    # Optional filename prefix
     blocks_per_file: int = 10                # Auto-split after N complete acquisition blocks
     storage_downsample_factor: int = 1       # Save every Nth point; display/filter paths are unaffected
+    storage_format: str = STORAGE_FORMAT_BIN # "bin" keeps the original raw binary saver
+    bz_zstd_level: int = 3                   # Default Zstd compression level for .bz
+    bz_bitshuffle_block_values: int = 65536  # Bitshuffle block size in int32 values
+    bz_packet_frames: int = 0                # 0 = scan_rate frames, usually a 1 second packet
+    bz_file_duration_s: int = 60             # Rotate .bz files after about 60 seconds
 
 
 @dataclass

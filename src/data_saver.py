@@ -11,10 +11,16 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 import numpy as np
 
 from logger import get_logger
+from bz_format import (
+    BitshuffleZstdCompressor,
+    CompressedPacket,
+    RawPacket,
+    pack_bz_file_header,
+)
 
 log = get_logger("data_saver")
 
@@ -497,6 +503,492 @@ class BlockBasedFileSaver(DataSaver):
         """Backward-compatible alias for blocks_per_file."""
         self.blocks_per_file = value
 
+
+
+# ----- BITSHUFFLE + ZSTD FILE SAVER -----
+# Packetizes int32 acquisition data and writes self-describing .bz files.
+
+class BitshuffleZstdFileSaver(DataSaver):
+    """
+    Real-time packetized saver using Bitshuffle + Zstd.
+
+    The producer path remains non-blocking. Acquisition blocks are queued into a
+    bounded raw queue, a compression thread aggregates frames into packet-sized
+    matrices, and a writer thread appends packet headers plus compressed payloads
+    to .bz files.
+    """
+
+    def __init__(self, save_path: str = "D:/eDAS_DATA",
+                 file_duration_s: int = 60,
+                 packet_frames: int = 0,
+                 zstd_level: int = 3,
+                 bitshuffle_block_values: int = 65536,
+                 buffer_size: int = 200,
+                 compressed_queue_size: int = 8):
+        super().__init__(save_path, buffer_size)
+        self.file_duration_s = max(1, int(file_duration_s))
+        self.packet_frames = max(0, int(packet_frames))
+        self.zstd_level = int(zstd_level)
+        self.bitshuffle_block_values = max(1, int(bitshuffle_block_values))
+        self.compressed_queue_size = max(1, int(compressed_queue_size))
+        self._compressed_queue: queue.Queue = queue.Queue(maxsize=self.compressed_queue_size)
+        self._compress_thread: Optional[threading.Thread] = None
+        self._writer_thread: Optional[threading.Thread] = None
+        self._compressor: Optional[BitshuffleZstdCompressor] = None
+        self._pending_chunks: List[np.ndarray] = []
+        self._pending_frames = 0
+        self._packet_index = 0
+        self._points_per_frame = 0
+        self._packet_points_per_frame = 0
+        self._channel_num = 1
+        self._data_source = 0
+        self._storage_downsample_factor = 1
+        self._resolved_packet_frames = 0
+        self._file_frames_per_file = 0
+        self._file_frames_written = 0
+        self._total_bytes_all_files = 0
+        self._total_files_created = 0
+        self._packets_compressed = 0
+        self._packets_written = 0
+        self._last_compress_ms = 0.0
+        self._max_compress_ms = 0.0
+        self._last_compression_ratio = 0.0
+        self._compression_not_realtime_count = 0
+        self._dropped_samples = 0
+
+    def start(self, file_no: Optional[int] = None, scan_rate: int = 2000,
+              points_per_frame: int = 0, channel_num: int = 1,
+              data_source: int = 0, storage_downsample_factor: int = 1) -> str:
+        """Start .bz saving with packetized compression."""
+        if self._running:
+            return self._current_filename
+        if points_per_frame <= 0:
+            raise ValueError("points_per_frame must be greater than 0 for .bz storage")
+
+        self.save_path.mkdir(parents=True, exist_ok=True)
+        if file_no is not None:
+            self._file_no = file_no
+        else:
+            self._file_no += 1
+
+        self._scan_rate = max(1, int(scan_rate))
+        self._points_per_frame = max(1, int(points_per_frame))
+        self._channel_num = max(1, int(channel_num or 1))
+        self._data_source = int(data_source)
+        self._storage_downsample_factor = max(1, int(storage_downsample_factor or 1))
+        self._packet_points_per_frame = self._points_per_frame * self._channel_num
+        self._resolved_packet_frames = self.packet_frames if self.packet_frames > 0 else self._scan_rate
+        self._file_frames_per_file = max(1, int(round(self.file_duration_s * self._scan_rate)))
+
+        self._bytes_written = 0
+        self._blocks_written = 0
+        self._dropped_blocks = 0
+        self._enqueue_count = 0
+        self._max_queue_size_seen = 0
+        self._last_write_ms = 0.0
+        self._last_write_bytes = 0
+        self._pending_chunks = []
+        self._pending_frames = 0
+        self._packet_index = 0
+        self._file_frames_written = 0
+        self._total_bytes_all_files = 0
+        self._total_files_created = 0
+        self._packets_compressed = 0
+        self._packets_written = 0
+        self._last_compress_ms = 0.0
+        self._max_compress_ms = 0.0
+        self._last_compression_ratio = 0.0
+        self._compression_not_realtime_count = 0
+        self._dropped_samples = 0
+
+        self._clear_queue(self._data_queue)
+        self._clear_queue(self._compressed_queue)
+        self._compressor = BitshuffleZstdCompressor(
+            zstd_level=self.zstd_level,
+            block_values=self.bitshuffle_block_values,
+        )
+        self._open_new_file()
+
+        self._running = True
+        self._compress_thread = threading.Thread(target=self._compression_loop, daemon=True)
+        self._writer_thread = threading.Thread(target=self._writer_loop, daemon=True)
+        self._compress_thread.start()
+        self._writer_thread.start()
+
+        log.info(
+            f"Started Bitshuffle+Zstd saving to {self.save_path / self._current_filename} "
+            f"(zstd_level={self.zstd_level}, bitshuffle_block={self.bitshuffle_block_values}, "
+            f"packet_frames={self._resolved_packet_frames}, file_duration_s={self.file_duration_s}, "
+            f"raw_queue=0/{self.buffer_size}, compressed_queue=0/{self.compressed_queue_size}, cache=False)"
+        )
+        return self._current_filename
+
+    def _clear_queue(self, target_queue: queue.Queue):
+        while not target_queue.empty():
+            try:
+                target_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _generate_filename(self) -> str:
+        now = datetime.now()
+        timestamp_str = now.strftime("%Y%m%dT%H%M%S")
+        milliseconds = int((now.timestamp() % 1) * 1000)
+        return (f"{self._file_no:07d}-eDAS-{self._scan_rate:04d}Hz-"
+                f"{self._points_per_frame:04d}pt-{timestamp_str}.{milliseconds:03d}.bz")
+
+    def _open_new_file(self):
+        self._current_filename = self._generate_filename()
+        filepath = self.save_path / self._current_filename
+        self._file_handle = open(filepath, "wb", buffering=1024 * 1024)
+        header = pack_bz_file_header(
+            scan_rate_hz=self._scan_rate,
+            points_per_frame=self._points_per_frame,
+            channel_num=self._channel_num,
+            data_source=self._data_source,
+            storage_downsample_factor=self._storage_downsample_factor,
+            packet_frames=self._resolved_packet_frames,
+            file_duration_s=self.file_duration_s,
+            zstd_level=self.zstd_level,
+            bitshuffle_block_values=self.bitshuffle_block_values,
+        )
+        self._file_handle.write(header)
+        self._bytes_written = len(header)
+        self._file_frames_written = 0
+        self._total_files_created += 1
+        log.info(f"Opened .bz file: {filepath}")
+
+    def _rotate_file(self):
+        if self._file_handle is not None:
+            self._file_handle.flush()
+            self._file_handle.close()
+        self._total_bytes_all_files += self._bytes_written
+        self._file_no += 1
+        self._open_new_file()
+
+    def save_block(self, block_data: np.ndarray) -> bool:
+        """Queue one complete acquisition block for .bz packetization."""
+        return self.save(block_data)
+
+    def save_frame(self, frame_data: np.ndarray) -> bool:
+        """Backward-compatible alias for older callers."""
+        return self.save_block(frame_data)
+
+    def save(self, data: np.ndarray) -> bool:
+        if not self._running:
+            return False
+        try:
+            self._data_queue.put_nowait(data)
+            self._enqueue_count += 1
+            queue_size = self._data_queue.qsize()
+            self._max_queue_size_seen = max(self._max_queue_size_seen, queue_size)
+            if (
+                self._enqueue_count <= 3
+                or self._enqueue_count % 20 == 0
+                or queue_size >= max(1, self.buffer_size // 2)
+            ):
+                has_cache = self._has_cache()
+                block_bytes = int(data.nbytes) if isinstance(data, np.ndarray) else len(data)
+                log.debug(
+                    f"Queued .bz raw block #{self._enqueue_count}: bytes={block_bytes}, "
+                    f"raw_queue={queue_size}/{self.buffer_size}, "
+                    f"compressed_queue={self._compressed_queue.qsize()}/{self.compressed_queue_size}, "
+                    f"pending_frames={self._pending_frames}, cache={has_cache}"
+                )
+            return True
+        except queue.Full:
+            self._dropped_blocks += 1
+            self._compression_not_realtime_count += 1
+            block_bytes = int(data.nbytes) if isinstance(data, np.ndarray) else len(data)
+            log.warning(
+                f"BZ raw queue full; compression is not realtime, dropping acquisition block: "
+                f"bytes={block_bytes}, dropped={self._dropped_blocks}, "
+                f"raw_queue={self._data_queue.qsize()}/{self.buffer_size}, "
+                f"compressed_queue={self._compressed_queue.qsize()}/{self.compressed_queue_size}"
+            )
+            return False
+
+    def stop(self):
+        """Stop .bz saving after draining queued raw blocks and the final tail packet."""
+        if not self._running:
+            return
+
+        self._running = False
+        try:
+            self._data_queue.put(None, timeout=1.0)
+        except queue.Full:
+            log.warning("BZ raw queue full while stopping; waiting to enqueue sentinel")
+            self._data_queue.put(None)
+
+        if self._compress_thread is not None:
+            self._compress_thread.join(timeout=20.0)
+            if self._compress_thread.is_alive():
+                log.error("BZ compression thread did not stop within timeout")
+            self._compress_thread = None
+
+        if self._writer_thread is not None:
+            self._writer_thread.join(timeout=20.0)
+            if self._writer_thread.is_alive():
+                log.error("BZ writer thread did not stop within timeout")
+            self._writer_thread = None
+
+        if self._file_handle is not None:
+            self._file_handle.flush()
+            self._file_handle.close()
+            self._file_handle = None
+
+        log.info(
+            f"Stopped .bz saving. Files={self._total_files_created}, packets={self._packets_written}, "
+            f"bytes={self.total_bytes_all_files}, dropped={self._dropped_blocks}, "
+            f"raw_max_queue={self._max_queue_size_seen}/{self.buffer_size}, "
+            f"compressed_queue={self._compressed_queue.qsize()}/{self.compressed_queue_size}, "
+            f"compression_not_realtime={self._compression_not_realtime_count}, "
+            f"max_compress_ms={self._max_compress_ms:.1f}"
+        )
+
+    def _compression_loop(self):
+        while True:
+            try:
+                item = self._data_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            except Exception as exc:
+                log.error(f"BZ compression queue error: {exc}")
+                continue
+
+            try:
+                if item is None:
+                    break
+                frames = self._coerce_block_to_frame_matrix(item)
+                if frames.size:
+                    self._append_frames_and_emit_packets(frames)
+            except Exception as exc:
+                self._dropped_blocks += 1
+                self._compression_not_realtime_count += 1
+                log.exception(f"BZ compression failed; dropping block: {exc}")
+            finally:
+                try:
+                    self._data_queue.task_done()
+                except ValueError:
+                    pass
+
+        try:
+            self._flush_tail_packet()
+        finally:
+            self._enqueue_writer_sentinel()
+
+    def _writer_loop(self):
+        while True:
+            try:
+                packet = self._compressed_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            except Exception as exc:
+                log.error(f"BZ writer queue error: {exc}")
+                continue
+
+            try:
+                if packet is None:
+                    break
+                self._write_compressed_packet(packet)
+            except Exception as exc:
+                self._dropped_blocks += 1
+                log.exception(f"BZ writer failed; packet lost: {exc}")
+            finally:
+                try:
+                    self._compressed_queue.task_done()
+                except ValueError:
+                    pass
+
+    def _coerce_block_to_frame_matrix(self, data: np.ndarray) -> np.ndarray:
+        arr = np.asarray(data, dtype=np.int32)
+        if self._channel_num <= 1:
+            flat = arr.reshape(-1)
+            frame_count = flat.size // self._points_per_frame
+            valid_items = frame_count * self._points_per_frame
+            if valid_items < flat.size:
+                dropped = flat.size - valid_items
+                self._dropped_samples += dropped
+                log.warning(f"BZ packetizer dropped {dropped} trailing samples that do not fill a frame")
+            if frame_count <= 0:
+                return np.empty((0, self._packet_points_per_frame), dtype=np.int32)
+            return np.ascontiguousarray(flat[:valid_items].reshape(frame_count, self._points_per_frame))
+
+        matrix = arr.reshape(-1, self._channel_num)
+        frame_count = matrix.shape[0] // self._points_per_frame
+        valid_rows = frame_count * self._points_per_frame
+        if valid_rows < matrix.shape[0]:
+            dropped = (matrix.shape[0] - valid_rows) * self._channel_num
+            self._dropped_samples += dropped
+            log.warning(f"BZ packetizer dropped {dropped} trailing channel samples that do not fill a frame")
+        if frame_count <= 0:
+            return np.empty((0, self._packet_points_per_frame), dtype=np.int32)
+        framed = matrix[:valid_rows, :].reshape(frame_count, self._points_per_frame, self._channel_num)
+        return np.ascontiguousarray(framed.reshape(frame_count, self._packet_points_per_frame))
+
+    def _append_frames_and_emit_packets(self, frames: np.ndarray):
+        self._pending_chunks.append(frames)
+        self._pending_frames += int(frames.shape[0])
+        while self._pending_frames >= self._resolved_packet_frames:
+            packet_samples = self._take_pending_frames(self._resolved_packet_frames)
+            self._compress_and_enqueue_packet(packet_samples)
+
+    def _take_pending_frames(self, frame_count: int) -> np.ndarray:
+        remaining = int(frame_count)
+        parts: List[np.ndarray] = []
+        while remaining > 0 and self._pending_chunks:
+            chunk = self._pending_chunks[0]
+            take = min(remaining, int(chunk.shape[0]))
+            parts.append(chunk[:take])
+            if take == chunk.shape[0]:
+                self._pending_chunks.pop(0)
+            else:
+                self._pending_chunks[0] = chunk[take:]
+            self._pending_frames -= take
+            remaining -= take
+
+        if not parts:
+            return np.empty((0, self._packet_points_per_frame), dtype=np.int32)
+        if len(parts) == 1:
+            return np.ascontiguousarray(parts[0])
+        return np.ascontiguousarray(np.concatenate(parts, axis=0))
+
+    def _flush_tail_packet(self):
+        if self._pending_frames <= 0:
+            return
+        packet_samples = self._take_pending_frames(self._pending_frames)
+        log.info(f"Flushing final .bz tail packet with {packet_samples.shape[0]} frames")
+        self._compress_and_enqueue_packet(packet_samples)
+
+    def _compress_and_enqueue_packet(self, samples: np.ndarray):
+        if self._compressor is None or samples.size == 0:
+            return
+        packet = RawPacket(
+            packet_index=self._packet_index,
+            timestamp_ns=time.time_ns(),
+            scan_rate_hz=self._scan_rate,
+            points_per_frame=self._packet_points_per_frame,
+            frames=int(samples.shape[0]),
+            samples=samples,
+        )
+        self._packet_index += 1
+        compressed = self._compressor.compress_packet(packet)
+        metrics = compressed.metrics
+        compress_ms = float(metrics.get("compress_ms", 0.0))
+        packet_duration_ms = packet.frames / max(1, self._scan_rate) * 1000.0
+        self._packets_compressed += 1
+        self._last_compress_ms = compress_ms
+        self._max_compress_ms = max(self._max_compress_ms, compress_ms)
+        self._last_compression_ratio = float(metrics.get("compression_ratio", 0.0))
+
+        if compress_ms > packet_duration_ms:
+            self._compression_not_realtime_count += 1
+            log.warning(
+                f"BZ compression not realtime: packet={packet.packet_index}, "
+                f"compress_ms={compress_ms:.1f}, packet_duration_ms={packet_duration_ms:.1f}, "
+                f"raw_queue={self._data_queue.qsize()}/{self.buffer_size}, "
+                f"compressed_queue={self._compressed_queue.qsize()}/{self.compressed_queue_size}"
+            )
+
+        try:
+            self._compressed_queue.put_nowait(compressed)
+        except queue.Full:
+            self._dropped_blocks += 1
+            self._compression_not_realtime_count += 1
+            log.warning(
+                f"BZ compressed queue full; writer is not realtime, dropping packet={packet.packet_index}, "
+                f"dropped={self._dropped_blocks}, compressed_queue={self._compressed_queue.qsize()}/{self.compressed_queue_size}"
+            )
+
+    def _enqueue_writer_sentinel(self):
+        while True:
+            try:
+                self._compressed_queue.put(None, timeout=1.0)
+                return
+            except queue.Full:
+                log.warning("BZ compressed queue full while stopping; waiting to enqueue writer sentinel")
+
+    def _write_compressed_packet(self, packet: CompressedPacket):
+        if self._file_handle is None:
+            self._open_new_file()
+        if self._file_frames_written >= self._file_frames_per_file:
+            self._rotate_file()
+
+        start = time.perf_counter()
+        self._file_handle.write(packet.header)
+        self._file_handle.write(packet.payload)
+        write_bytes = len(packet.header) + len(packet.payload)
+        self._last_write_ms = (time.perf_counter() - start) * 1000.0
+        self._last_write_bytes = write_bytes
+        self._bytes_written += write_bytes
+        self._blocks_written += 1
+        self._packets_written += 1
+        self._file_frames_written += int(packet.metrics.get("frames", 0.0))
+
+        if self._last_write_ms > 50:
+            log.warning(
+                f"Slow .bz disk write: {self._last_write_ms:.1f}ms, bytes={write_bytes}, "
+                f"compressed_queue={self._compressed_queue.qsize()}/{self.compressed_queue_size}"
+            )
+        if self._packets_written <= 3 or self._packets_written % 20 == 0:
+            log.info(
+                f"Wrote .bz packet #{self._packets_written}: ratio={self._last_compression_ratio:.2f}, "
+                f"compress_ms={self._last_compress_ms:.1f}, write_ms={self._last_write_ms:.1f}, "
+                f"raw_queue={self._data_queue.qsize()}/{self.buffer_size}, "
+                f"compressed_queue={self._compressed_queue.qsize()}/{self.compressed_queue_size}, "
+                f"pending_frames={self._pending_frames}, cache={self._has_cache()}, "
+                f"not_realtime={self._compression_not_realtime_count}, dropped={self._dropped_blocks}"
+            )
+
+    def _has_cache(self) -> bool:
+        return (
+            self._data_queue.qsize() > 0
+            or self._compressed_queue.qsize() > 0
+            or self._pending_frames > 0
+        )
+
+    def get_diagnostics_snapshot(self) -> dict:
+        snapshot = super().get_diagnostics_snapshot()
+        snapshot.update({
+            "format": "bz",
+            "queue_size": self.queue_size,
+            "raw_queue_size": self._data_queue.qsize(),
+            "compressed_queue_size": self._compressed_queue.qsize(),
+            "compressed_queue_size_max": self.compressed_queue_size,
+            "pending_frames": self._pending_frames,
+            "packet_frames": self._resolved_packet_frames,
+            "file_duration_s": self.file_duration_s,
+            "packets_compressed": self._packets_compressed,
+            "packets_written": self._packets_written,
+            "compression_not_realtime_count": self._compression_not_realtime_count,
+            "last_compress_ms": self._last_compress_ms,
+            "max_compress_ms": self._max_compress_ms,
+            "last_compression_ratio": self._last_compression_ratio,
+            "dropped_samples": self._dropped_samples,
+            "has_cache": self._has_cache(),
+            "bytes_written": self.total_bytes_all_files,
+        })
+        return snapshot
+
+    @property
+    def queue_size(self) -> int:
+        return self._data_queue.qsize()
+
+    @property
+    def total_bytes_all_files(self) -> int:
+        return self._total_bytes_all_files + self._bytes_written
+
+    @property
+    def total_files_created(self) -> int:
+        return self._total_files_created
+
+    @property
+    def block_count(self) -> int:
+        return self._packets_written
+
+    @property
+    def blocks_per_file(self) -> int:
+        return self._file_frames_per_file
 
 FrameBasedFileSaver = BlockBasedFileSaver
 

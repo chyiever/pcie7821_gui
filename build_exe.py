@@ -168,6 +168,7 @@ def build_hidden_imports() -> List[str]:
         "pcie7821_api",
         "acquisition_thread",
         "data_saver",
+        "bz_format",
         "spectrum_analyzer",
         "time_space_plot",
         "realtime_filter",
@@ -182,6 +183,7 @@ def build_hidden_imports() -> List[str]:
         "psutil",
         "scipy",
         "scipy.signal",
+        "zstandard",
     ]
 
 

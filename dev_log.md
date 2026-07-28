@@ -673,3 +673,36 @@ python build_exe.py --name eDAS20260720-173900 --skip-clean
 ```
 
 输出文件为 `dist/eDAS20260720-173900.exe`，大小 `81,018,519` 字节，修改时间为 `2026/7/20 17:43:08`。打包后确认旧版本 `eDAS26.6.14.exe`、`eDAS26.6.18.exe`、`eDAS26.7.9.exe`、`eDAS26.7.17.exe` 仍保留在 `dist/` 目录中。本次 PyInstaller 规格文件 `eDAS20260720-173900.spec` 按历史版本规格文件惯例保留在源码仓库。
+
+## 2026-07-28 Tab4 setting 与 Bitshuffle+Zstd .bz 实时压缩存储
+
+### 背景
+
+本次根据现场需求新增第二种保存格式：原 `.bin` 裸二进制格式必须保持不变，同时增加可选 `.bz` 实时压缩格式。`.bz` 要求采用 `Bitshuffle + Zstd(level=3, block=65536)` 默认参数，参数可在 GUI 中调整，并且必须按包实时保存，不能等整段采集结束后再统一压缩。
+
+### 修改内容
+
+- `src/config.py` 新增保存格式常量和 `SaveParams` 压缩字段：`storage_format`、`bz_zstd_level`、`bz_bitshuffle_block_values`、`bz_packet_frames`、`bz_file_duration_s`。
+- `src/bz_format.py` 新增 `.bz` 文件头、`BZS1` packet header、NumPy 可逆 bitshuffle 后端、Zstd 压缩/解压和 packet 迭代读取函数。
+- `src/data_saver.py` 新增 `BitshuffleZstdFileSaver`，采用 raw queue、压缩线程和写盘线程。采集侧仍然非阻塞入队；每攒够一个 packet 帧数就立即压缩写盘；停止保存时写入不足一个 packet 的尾包。
+- `src/main_window.py` 新增第 4 个 tab，tab 名为 `setting`。Tab4 通过下拉框选择 `BIN (.bin)` 或 `Bitshuffle+Zstd (.bz)`，并提供 Zstd level、Bitshuffle block、BZ packet frames、BZ file seconds 参数。
+- `.bin` 保存路径保持原 `BlockBasedFileSaver` 行为不变；`.bz` 保存路径按 `BZ File(s)` 近似按秒分文件，默认 60 秒，每包默认约 1 秒。
+- 保存日志新增 `.bz` raw queue、compressed queue、pending frames、`cache`、`dropped`、`not_realtime`、压缩耗时和写盘耗时字段，用于判断是否有缓存、是否因为压缩/写盘无法实时而丢数据。
+- `other_files/read/read_bz_notebook.ipynb` 新增离线读取 notebook，可读取指定 `.bz` 文件，打印数据量，绘制指定位置点的时域波形，并绘制 time-space 图。
+- `requirements.txt` 新增 `zstandard>=0.22.0`，`build_exe.py` 同步加入 `bz_format` 和 `zstandard` hidden import。
+- `docs/README-2026-03-20-eDAS数据存储技术说明.md` 补充 `.bz` 格式、Tab4 参数和实时诊断说明。
+
+### 验证结果
+
+- `python -m py_compile src\main_window.py src\data_saver.py src\bz_format.py src\config.py build_exe.py` 通过。
+- 当前环境为 Python 3.9.19，已将新增 `src/bz_format.py` 调整为 Python 3.9 兼容写法，并通过 `import bz_format`、`import data_saver` 实际导入检查。
+- 已安装并验证新增运行依赖 `zstandard 0.25.0`；`requirements.txt` 中记录最低版本 `zstandard>=0.22.0`。
+- `.bz` round-trip 自检通过：写入 10 帧、5 点、2 通道测试数据，`packet_frames=4`，`file_duration_s=2`，生成 2 个 `.bz` 文件、3 个 packet，读回 packet frame 分布为 `[4, 4, 2]`，50 行双通道数据逐值一致，`dropped=0`、`dropped_samples=0`、`not_rt=0`。
+- `.bin` 回归自检通过：写入 50 个 `int32` 值，输出文件 200 字节，读回逐值一致。
+- `other_files/read/read_bz_notebook.ipynb` 通过 JSON 格式检查。
+- UTF-8 中文自检未发现典型 mojibake 或 replacement character 编码破坏标记。
+- `git diff --check` 通过，仅提示 Git 会按配置将部分 LF 文件在工作区转换为 CRLF。
+
+### Git
+
+本次修改完成自检后同步到 GitHub `dev` 分支。提交号以最终推送结果为准。

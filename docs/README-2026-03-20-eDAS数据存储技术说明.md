@@ -32,7 +32,7 @@ flowchart LR
 
 ## 4. 保存前的数据是否会被二次处理
 
-当前版本对保存前数据的处理相当克制，这是一种有意为之的设计。保存链路不会做文本化、不会做压缩、不会做 GUI `rad` 弧度转换、不会做额外滤波、不会做 PSD 计算，也不会为了显示方便而重排成特殊可视化结构。除 2026-07-20 新增的可选 `Save DS` 抽点外，它做的事情主要有三类：必要时统一 `dtype`，把 NumPy 数组序列化为连续字节流，以及按配置控制分文件边界。
+当前版本对保存前数据的处理相当克制，这是一种有意为之的设计。在默认 `BIN (.bin)` 模式下，保存链路不会做文本化、不会做压缩、不会做 GUI `rad` 弧度转换、不会做额外滤波、不会做 PSD 计算，也不会为了显示方便而重排成特殊可视化结构。除 2026-07-20 新增的可选 `Save DS` 抽点外，`.bin` 模式主要做三类事情：必要时统一 `dtype`，把 NumPy 数组序列化为连续字节流，以及按配置控制分文件边界。当 Tab4 `setting` 选择 `Bitshuffle+Zstd (.bz)` 时，保存器只在后台对已经形成的 `int32` packet 执行 Bitshuffle+Zstd 压缩，采集侧数据语义、显示链路和 `.bin` 保存行为不改变。
 
 PHASE 数据在到达保存器之前，已经可能经历过底层相位链路处理，例如 `rate2phase`、`space_avg_order`、`merge_point_num`、`diff_order`、`detrend_bw` 和 `polarization_diversity` 等。这些处理发生在 FPGA 或 DLL 所代表的底层链路中，不是保存器附加做的。因此，保存器保存的是“当前上传链路输出的原始块”，而不是最初 ADC 的绝对原始值。
 
@@ -46,6 +46,15 @@ PHASE 数据在到达保存器之前，已经可能经历过底层相位链路�
 
 这套设计对吞吐很友好，因为写盘路径极短，几乎没有额外序列化负担；但它也意味着数据交换性较弱。未来若要把文件直接交给其他团队或长期归档，建议增加 sidecar 元数据，例如同名 `.json` 文件，记录 `scan_rate`、`point_num_per_scan`、`channel_num`、`data_source`、`merge_point_num`、裁剪范围、文件起止时间、保存器版本号等信息。这样可以在不破坏现有 `.bin` 写入性能的前提下，提高数据可移植性。
 
+### 5.1 可选 `.bz` 实时压缩格式
+
+从 2026-07-28 起，Tab4 `setting` 提供保存格式下拉框。`BIN (.bin)` 保持原裸二进制保存行为不变；`Bitshuffle+Zstd (.bz)` 启用新的按包实时压缩保存链路。
+
+`.bz` 文件由一个 `BZF1` 文件头和多个独立 packet 组成。每个 packet 使用 `BZS1` header，payload 为 `int32` 数据先执行 Bitshuffle，再用 Zstd 压缩。默认参数为 `Zstd level=3`、`Bitshuffle block=65536` 个 `int32` 值，二者均可在 Tab4 调整。文件头记录 `scan_rate_hz`、`points_per_frame`、`channel_num`、`data_source`、`storage_downsample_factor`、`packet_frames`、`file_duration_s`、压缩级别和 block 参数；packet header 记录 `packet_index`、`timestamp_ns`、`frames`、原始字节数、shuffle 后字节数、压缩后字节数以及 raw/payload CRC32。
+
+`.bz` 保存不是等完整文件时长的数据攒齐后再压缩。默认 `BZ Packet Frames=0` 表示自动使用 `scan_rate` 帧，约等于 1 秒一个 packet；GUI 也可指定任意正整数帧数。后台保存器每攒够一个 packet 的帧数就立即压缩并交给写盘线程，停止保存时会把不足一个 packet 的尾包写入文件。`BZ File(s)` 默认 60 秒，用于决定 `.bz` 文件轮转边界。
+
+日志会输出 `.bz` raw queue、compressed queue、pending frames、`cache`、`dropped`、`not_realtime`、压缩耗时和写盘耗时。`cache=True` 表示保存链路当前存在 raw queue、compressed queue 或未满 packet 的 pending frames；`dropped` 或 `not_realtime` 增长表示压缩/写盘未能跟上实时采集，或队列已满导致数据被丢弃，需要降低采集速率、增加 `Save DS`、调大 packet、降低压缩压力或改用 `.bin`。
 ## 6. 分文件策略
 
 当前主保存器是 `BlockBasedFileSaver`。它的设计思路是按“收到多少个完整采集块”来决定何时切换到下一个文件，而不是按固定时长、固定字节数或 GUI 刷新次数切换。这样设计的直接好处是，文件边界与采集块边界一致，不容易在切换文件时把同一块数据一分为二，也更容易基于 `FrameLoad` 和 `blocks_per_file` 估算单文件大小与持续时间。

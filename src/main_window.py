@@ -32,11 +32,12 @@ from config import (
     CHANNEL_NUM_OPTIONS, DATA_SOURCE_OPTIONS, DATA_RATE_OPTIONS, RATE2PHASE_OPTIONS,
     validate_point_num, calculate_fiber_length, calculate_data_rate_mbps,
     calculate_phase_point_num, calculate_cropped_point_count,
-    OPTIMIZED_BUFFER_SIZES, MONITOR_UPDATE_INTERVALS
+    OPTIMIZED_BUFFER_SIZES, MONITOR_UPDATE_INTERVALS,
+    STORAGE_FORMAT_BIN, STORAGE_FORMAT_BITSHUFFLE_ZSTD, STORAGE_FORMAT_OPTIONS
 )
 from pcie7821_api import PCIe7821API, PCIe7821Error
 from acquisition_thread import AcquisitionThread, SimulatedAcquisitionThread
-from data_saver import BlockBasedFileSaver
+from data_saver import BitshuffleZstdFileSaver, BlockBasedFileSaver
 from spectrum_analyzer import RealTimeSpectrumAnalyzer
 from realtime_filter import FilterSpecError, RealtimeTimeAxisFilter, parse_filter_spec
 from time_space_plot import create_time_space_widget
@@ -96,7 +97,7 @@ class MainWindow(QMainWindow):
         # Initialize components
         self.api: Optional[PCIe7821API] = None
         self.acq_thread: Optional[AcquisitionThread] = None
-        self.data_saver: Optional[BlockBasedFileSaver] = None
+        self.data_saver: Optional[Any] = None
         self.spectrum_analyzer = RealTimeSpectrumAnalyzer()
         self._tab1_phase_filter = RealtimeTimeAxisFilter(order=2)
         self._tab1_phase_filter_signature = None
@@ -801,6 +802,9 @@ class MainWindow(QMainWindow):
         # Tab 3: TCP communication
         self._create_tcp_comm_tab()
 
+        # Tab 4: storage and compression settings
+        self._create_settings_tab()
+
         layout.addWidget(self.plot_tabs)
 
         # System Monitoring Panel - Single row layout
@@ -1132,6 +1136,69 @@ class MainWindow(QMainWindow):
 
         self.plot_tabs.addTab(tab3_widget, "TCP Comm")
 
+
+    def _create_settings_tab(self):
+        """Create Tab4 with storage format and compression settings."""
+        tab4_widget = QWidget()
+        tab4_layout = QVBoxLayout(tab4_widget)
+        tab4_layout.setSpacing(10)
+        tab4_layout.setContentsMargins(10, 10, 10, 10)
+
+        storage_group = QGroupBox("Storage Setting")
+        storage_layout = QGridLayout(storage_group)
+        storage_layout.setContentsMargins(10, 12, 10, 10)
+        storage_layout.setHorizontalSpacing(10)
+        storage_layout.setVerticalSpacing(6)
+
+        storage_layout.addWidget(QLabel("Format:"), 0, 0)
+        self.storage_format_combo = QComboBox()
+        for label, value in STORAGE_FORMAT_OPTIONS:
+            self.storage_format_combo.addItem(label, value)
+        self.storage_format_combo.setToolTip("Select raw .bin storage or packetized Bitshuffle+Zstd .bz storage")
+        storage_layout.addWidget(self.storage_format_combo, 0, 1)
+
+        storage_layout.addWidget(QLabel("Zstd Level:"), 1, 0)
+        self.bz_zstd_level_spin = QSpinBox()
+        self.bz_zstd_level_spin.setRange(1, 22)
+        self.bz_zstd_level_spin.setValue(self.params.save.bz_zstd_level)
+        storage_layout.addWidget(self.bz_zstd_level_spin, 1, 1)
+
+        storage_layout.addWidget(QLabel("Bitshuffle Block:"), 2, 0)
+        self.bz_bitshuffle_block_spin = QSpinBox()
+        self.bz_bitshuffle_block_spin.setRange(1, 16777216)
+        self.bz_bitshuffle_block_spin.setSingleStep(1024)
+        self.bz_bitshuffle_block_spin.setValue(self.params.save.bz_bitshuffle_block_values)
+        storage_layout.addWidget(self.bz_bitshuffle_block_spin, 2, 1)
+
+        storage_layout.addWidget(QLabel("BZ Packet Frames:"), 3, 0)
+        self.bz_packet_frames_spin = QSpinBox()
+        self.bz_packet_frames_spin.setRange(0, 100000000)
+        self.bz_packet_frames_spin.setSpecialValueText("Auto 1s")
+        self.bz_packet_frames_spin.setValue(self.params.save.bz_packet_frames)
+        storage_layout.addWidget(self.bz_packet_frames_spin, 3, 1)
+
+        storage_layout.addWidget(QLabel("BZ File(s):"), 4, 0)
+        self.bz_file_duration_spin = QSpinBox()
+        self.bz_file_duration_spin.setRange(1, 86400)
+        self.bz_file_duration_spin.setValue(self.params.save.bz_file_duration_s)
+        storage_layout.addWidget(self.bz_file_duration_spin, 4, 1)
+
+        self.bz_packet_hint_label = QLabel("Packet: --")
+        self.bz_packet_hint_label.setStyleSheet("color: #666666;")
+        storage_layout.addWidget(self.bz_packet_hint_label, 5, 0, 1, 2)
+
+        self.bz_realtime_status_label = QLabel("BZ: idle")
+        self.bz_realtime_status_label.setStyleSheet("color: #666666;")
+        storage_layout.addWidget(self.bz_realtime_status_label, 6, 0, 1, 2)
+
+        tab4_layout.addWidget(storage_group)
+        tab4_layout.addStretch(1)
+
+        self._set_combo_to_data(self.storage_format_combo, self.params.save.storage_format)
+        self._update_storage_format_control_states()
+        self._update_bz_setting_hints()
+        self.plot_tabs.addTab(tab4_widget, "setting")
+
     def _create_interactive_plot_widget(self, plot_key: str) -> pg.PlotWidget:
         """Create a PlotWidget with unified rectangle zoom behavior."""
         view_box = ZoomablePlotViewBox()
@@ -1303,6 +1370,12 @@ class MainWindow(QMainWindow):
         self.save_downsample_spin.valueChanged.connect(self._on_storage_downsample_changed)
         self.save_enable_check.toggled.connect(self._on_save_enable_toggled)
         self.save_path_edit.editingFinished.connect(self._on_save_path_edited)
+        self.storage_format_combo.currentIndexChanged.connect(self._on_storage_settings_changed)
+        self.bz_zstd_level_spin.valueChanged.connect(self._on_storage_settings_changed)
+        self.bz_bitshuffle_block_spin.valueChanged.connect(self._on_storage_settings_changed)
+        self.bz_packet_frames_spin.valueChanged.connect(self._on_storage_settings_changed)
+        self.bz_file_duration_spin.valueChanged.connect(self._on_storage_settings_changed)
+        self.scan_rate_spin.valueChanged.connect(self._update_bz_setting_hints)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.data_source_combo.currentIndexChanged.connect(self._sync_tcp_tab3_availability)
         self.channel_combo.currentIndexChanged.connect(self._sync_tcp_tab3_availability)
@@ -1537,6 +1610,13 @@ class MainWindow(QMainWindow):
         self.save_path_edit.setText(params.save.path)
         self.blocks_per_file_spin.setValue(params.save.blocks_per_file)
         self.save_downsample_spin.setValue(max(1, int(getattr(params.save, "storage_downsample_factor", 1) or 1)))
+        self._set_combo_to_data(self.storage_format_combo, getattr(params.save, "storage_format", STORAGE_FORMAT_BIN))
+        self.bz_zstd_level_spin.setValue(max(1, int(getattr(params.save, "bz_zstd_level", 3) or 3)))
+        self.bz_bitshuffle_block_spin.setValue(max(1, int(getattr(params.save, "bz_bitshuffle_block_values", 65536) or 65536)))
+        self.bz_packet_frames_spin.setValue(max(0, int(getattr(params.save, "bz_packet_frames", 0) or 0)))
+        self.bz_file_duration_spin.setValue(max(1, int(getattr(params.save, "bz_file_duration_s", 60) or 60)))
+        self._update_storage_format_control_states()
+        self._update_bz_setting_hints()
         self._set_save_enable_checked(params.save.enable)
         self._sync_display_control_states()
         self._update_phase_crop_controls()
@@ -1649,6 +1729,11 @@ class MainWindow(QMainWindow):
         params.save.path = self.save_path_edit.text()
         params.save.blocks_per_file = self.blocks_per_file_spin.value()
         params.save.storage_downsample_factor = self.save_downsample_spin.value()
+        params.save.storage_format = self._get_selected_storage_format()
+        params.save.bz_zstd_level = self.bz_zstd_level_spin.value()
+        params.save.bz_bitshuffle_block_values = self.bz_bitshuffle_block_spin.value()
+        params.save.bz_packet_frames = self.bz_packet_frames_spin.value()
+        params.save.bz_file_duration_s = self.bz_file_duration_spin.value()
 
         return params
 
@@ -1691,6 +1776,17 @@ class MainWindow(QMainWindow):
 
         if params.save.storage_downsample_factor <= 0:
             return False, "Save DS must be greater than 0."
+
+        if params.save.storage_format not in {STORAGE_FORMAT_BIN, STORAGE_FORMAT_BITSHUFFLE_ZSTD}:
+            return False, "Storage format must be BIN or Bitshuffle+Zstd."
+        if params.save.bz_zstd_level < 1 or params.save.bz_zstd_level > 22:
+            return False, "Zstd Level must be between 1 and 22."
+        if params.save.bz_bitshuffle_block_values <= 0:
+            return False, "Bitshuffle Block must be greater than 0."
+        if params.save.bz_packet_frames < 0:
+            return False, "BZ Packet Frames must be >= 0."
+        if params.save.bz_file_duration_s <= 0:
+            return False, "BZ File(s) must be greater than 0."
 
         return True, ""
 
@@ -1900,6 +1996,59 @@ class MainWindow(QMainWindow):
             self._get_storage_downsample_factor(params),
         )
 
+
+    def _get_selected_storage_format(self) -> str:
+        """Return the storage format selected on Tab4."""
+        if hasattr(self, "storage_format_combo"):
+            value = self.storage_format_combo.currentData()
+            if value:
+                return str(value)
+        return str(getattr(self.params.save, "storage_format", STORAGE_FORMAT_BIN) or STORAGE_FORMAT_BIN)
+
+    def _update_storage_format_control_states(self):
+        """Enable .bz controls only when .bz storage is selected and storage is idle."""
+        if not hasattr(self, "storage_format_combo"):
+            return
+        active = self.data_saver is not None and self.data_saver.is_running
+        editable = not active
+        storage_format = self._get_selected_storage_format()
+        bz_selected = storage_format == STORAGE_FORMAT_BITSHUFFLE_ZSTD
+        self.storage_format_combo.setEnabled(editable)
+        for widget in [
+            self.bz_zstd_level_spin,
+            self.bz_bitshuffle_block_spin,
+            self.bz_packet_frames_spin,
+            self.bz_file_duration_spin,
+        ]:
+            widget.setEnabled(editable and bz_selected)
+
+    def _update_bz_setting_hints(self):
+        """Refresh the resolved .bz packet duration hint."""
+        if not hasattr(self, "bz_packet_hint_label"):
+            return
+        scan_rate = max(1, int(self.scan_rate_spin.value() if hasattr(self, "scan_rate_spin") else self.params.basic.scan_rate))
+        packet_setting = int(self.bz_packet_frames_spin.value() if hasattr(self, "bz_packet_frames_spin") else 0)
+        packet_frames = packet_setting if packet_setting > 0 else scan_rate
+        packet_s = packet_frames / float(scan_rate)
+        file_duration_s = int(self.bz_file_duration_spin.value() if hasattr(self, "bz_file_duration_spin") else 60)
+        file_frames = max(1, file_duration_s * scan_rate)
+        packet_count = max(1, (file_frames + packet_frames - 1) // packet_frames)
+        self.bz_packet_hint_label.setText(
+            f"Packet: {packet_frames} frames ({packet_s:.3f}s), File: ~{packet_count} packets"
+        )
+
+    def _on_storage_settings_changed(self, *_args):
+        """Keep pending save settings synchronized with Tab4."""
+        if hasattr(self, "storage_format_combo"):
+            self.params.save.storage_format = self._get_selected_storage_format()
+            self.params.save.bz_zstd_level = self.bz_zstd_level_spin.value()
+            self.params.save.bz_bitshuffle_block_values = self.bz_bitshuffle_block_spin.value()
+            self.params.save.bz_packet_frames = self.bz_packet_frames_spin.value()
+            self.params.save.bz_file_duration_s = self.bz_file_duration_spin.value()
+        self._update_storage_format_control_states()
+        self._update_bz_setting_hints()
+        self._update_file_estimates()
+
     def _set_save_enable_checked(self, checked: bool):
         """Update the save toggle button without recursively starting/stopping storage."""
         previous = self.save_enable_check.blockSignals(True)
@@ -1908,11 +2057,12 @@ class MainWindow(QMainWindow):
         self._update_save_button_style()
 
     def _set_storage_downsample_enabled(self, enabled: bool):
-        """Keep storage downsampling fixed while a save file is open."""
+        """Keep storage format and downsampling fixed while a save file is open."""
         if hasattr(self, "save_downsample_spin"):
             self.save_downsample_spin.setEnabled(enabled)
         if hasattr(self, "save_downsample_label"):
             self.save_downsample_label.setEnabled(enabled)
+        self._update_storage_format_control_states()
 
     def _update_save_button_style(self):
         """Style the save toggle like the other small action buttons."""
@@ -1993,6 +2143,24 @@ class MainWindow(QMainWindow):
             else:
                 self.save_status_label.setText("Save: Off")
 
+        if hasattr(self, "bz_realtime_status_label"):
+            if active and saver is not None and hasattr(saver, "get_diagnostics_snapshot"):
+                snapshot = saver.get_diagnostics_snapshot()
+                if snapshot.get("format") == "bz":
+                    self.bz_realtime_status_label.setText(
+                        f"BZ: cache={snapshot['has_cache']} drop={snapshot['dropped_blocks']} "
+                        f"notRT={snapshot['compression_not_realtime_count']} "
+                        f"ratio={snapshot['last_compression_ratio']:.2f}"
+                    )
+                    color = "#b00020" if snapshot["dropped_blocks"] or snapshot["compression_not_realtime_count"] else "green"
+                    self.bz_realtime_status_label.setStyleSheet(f"color: {color};")
+                else:
+                    self.bz_realtime_status_label.setText("BZ: inactive")
+                    self.bz_realtime_status_label.setStyleSheet("color: #666666;")
+            else:
+                self.bz_realtime_status_label.setText("BZ: idle")
+                self.bz_realtime_status_label.setStyleSheet("color: #666666;")
+
         self._update_save_button_style()
 
     def _start_data_saver(self, params: Optional[AllParams] = None) -> bool:
@@ -2004,27 +2172,63 @@ class MainWindow(QMainWindow):
         save_path = self.save_path_edit.text().strip() or params.save.path
         blocks_per_file = self.blocks_per_file_spin.value()
         storage_downsample_factor = self.save_downsample_spin.value()
+        storage_format = self._get_selected_storage_format()
+        bz_zstd_level = self.bz_zstd_level_spin.value()
+        bz_bitshuffle_block_values = self.bz_bitshuffle_block_spin.value()
+        bz_packet_frames = self.bz_packet_frames_spin.value()
+        bz_file_duration_s = self.bz_file_duration_spin.value()
+
         params.save.enable = True
         params.save.path = save_path
         params.save.blocks_per_file = blocks_per_file
         params.save.storage_downsample_factor = storage_downsample_factor
+        params.save.storage_format = storage_format
+        params.save.bz_zstd_level = bz_zstd_level
+        params.save.bz_bitshuffle_block_values = bz_bitshuffle_block_values
+        params.save.bz_packet_frames = bz_packet_frames
+        params.save.bz_file_duration_s = bz_file_duration_s
         self._save_file_count_this_run = 0
 
-        log.info(
-            f"Starting block-based data saver to {save_path}, "
-            f"blocks_per_file={blocks_per_file}, save_ds={storage_downsample_factor}"
-        )
-        saver = BlockBasedFileSaver(
-            save_path,
-            blocks_per_file=blocks_per_file,
-            buffer_size=OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
-        )
+        if storage_format == STORAGE_FORMAT_BITSHUFFLE_ZSTD:
+            resolved_packet_frames = bz_packet_frames if bz_packet_frames > 0 else max(1, int(params.basic.scan_rate))
+            log.info(
+                f"Starting Bitshuffle+Zstd data saver to {save_path}, file_duration_s={bz_file_duration_s}, "
+                f"packet_frames={resolved_packet_frames}, zstd_level={bz_zstd_level}, "
+                f"bitshuffle_block={bz_bitshuffle_block_values}, save_ds={storage_downsample_factor}"
+            )
+            saver = BitshuffleZstdFileSaver(
+                save_path,
+                file_duration_s=bz_file_duration_s,
+                packet_frames=bz_packet_frames,
+                zstd_level=bz_zstd_level,
+                bitshuffle_block_values=bz_bitshuffle_block_values,
+                buffer_size=OPTIMIZED_BUFFER_SIZES['storage_queue_frames'],
+            )
+        else:
+            log.info(
+                f"Starting block-based data saver to {save_path}, "
+                f"blocks_per_file={blocks_per_file}, save_ds={storage_downsample_factor}"
+            )
+            saver = BlockBasedFileSaver(
+                save_path,
+                blocks_per_file=blocks_per_file,
+                buffer_size=OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
+            )
 
         try:
-            filename = saver.start(
-                scan_rate=params.basic.scan_rate,
-                points_per_frame=self._get_save_points_per_frame(params)
-            )
+            if storage_format == STORAGE_FORMAT_BITSHUFFLE_ZSTD:
+                filename = saver.start(
+                    scan_rate=params.basic.scan_rate,
+                    points_per_frame=self._get_save_points_per_frame(params),
+                    channel_num=params.upload.channel_num,
+                    data_source=params.upload.data_source,
+                    storage_downsample_factor=storage_downsample_factor,
+                )
+            else:
+                filename = saver.start(
+                    scan_rate=params.basic.scan_rate,
+                    points_per_frame=self._get_save_points_per_frame(params)
+                )
         except Exception as exc:
             log.exception(f"Failed to start data saver: {exc}")
             try:
@@ -2044,6 +2248,12 @@ class MainWindow(QMainWindow):
         self.params.save.path = save_path
         self.params.save.blocks_per_file = blocks_per_file
         self.params.save.storage_downsample_factor = storage_downsample_factor
+        self.params.save.storage_format = storage_format
+        self.params.save.bz_zstd_level = bz_zstd_level
+        self.params.save.bz_bitshuffle_block_values = bz_bitshuffle_block_values
+        self.params.save.bz_packet_frames = bz_packet_frames
+        self.params.save.bz_file_duration_s = bz_file_duration_s
+        log.info(f"Data saver active: format={storage_format}, file={filename}")
         self._set_storage_downsample_enabled(False)
         self._refresh_save_status_display()
         return True
@@ -2075,6 +2285,11 @@ class MainWindow(QMainWindow):
         self.params.save.path = self.save_path_edit.text().strip()
         self.params.save.blocks_per_file = self.blocks_per_file_spin.value()
         self.params.save.storage_downsample_factor = self.save_downsample_spin.value()
+        self.params.save.storage_format = self._get_selected_storage_format()
+        self.params.save.bz_zstd_level = self.bz_zstd_level_spin.value()
+        self.params.save.bz_bitshuffle_block_values = self.bz_bitshuffle_block_spin.value()
+        self.params.save.bz_packet_frames = self.bz_packet_frames_spin.value()
+        self.params.save.bz_file_duration_s = self.bz_file_duration_spin.value()
 
         if enabled:
             if not self._is_acquisition_running():
@@ -2097,6 +2312,7 @@ class MainWindow(QMainWindow):
     def _on_storage_downsample_changed(self, value: int):
         """Keep the pending storage-only downsample factor synchronized with the UI."""
         self.params.save.storage_downsample_factor = max(1, int(value))
+        self._update_bz_setting_hints()
         self._update_file_estimates()
 
     @pyqtSlot()
@@ -3125,10 +3341,27 @@ class MainWindow(QMainWindow):
         if now - self._last_storage_queue_log_time < 5.0:
             return
 
-        queue_size = self.data_saver.queue_size
-        queue_max = getattr(self.data_saver, 'buffer_size', OPTIMIZED_BUFFER_SIZES['storage_queue_frames'])
-        dropped = self.data_saver.dropped_blocks
-        log.info(f"Storage queue: {queue_size}/{queue_max}, dropped={dropped}")
+        if hasattr(self.data_saver, "get_diagnostics_snapshot"):
+            snapshot = self.data_saver.get_diagnostics_snapshot()
+        else:
+            snapshot = {}
+
+        if snapshot.get("format") == "bz":
+            log.info(
+                "Storage queue: format=bz, "
+                f"raw={snapshot['raw_queue_size']}/{snapshot['buffer_size']}, "
+                f"compressed={snapshot['compressed_queue_size']}/{snapshot['compressed_queue_size_max']}, "
+                f"pending_frames={snapshot['pending_frames']}/{snapshot['packet_frames']}, "
+                f"cache={snapshot['has_cache']}, dropped={snapshot['dropped_blocks']}, "
+                f"not_realtime={snapshot['compression_not_realtime_count']}, "
+                f"last_compress_ms={snapshot['last_compress_ms']:.1f}, "
+                f"last_write_ms={snapshot['last_write_ms']:.1f}"
+            )
+        else:
+            queue_size = self.data_saver.queue_size
+            queue_max = getattr(self.data_saver, 'buffer_size', OPTIMIZED_BUFFER_SIZES['storage_queue_frames'])
+            dropped = self.data_saver.dropped_blocks
+            log.info(f"Storage queue: {queue_size}/{queue_max}, dropped={dropped}")
         self._last_storage_queue_log_time = now
 
     def _log_acquisition_diagnostics(self, reason: str, force: bool = False):
@@ -3174,6 +3407,16 @@ class MainWindow(QMainWindow):
                 f"save_written={saver['blocks_written']}",
                 f"save_last_write_ms={saver['last_write_ms']:.1f}",
             ])
+            if saver.get("format") == "bz":
+                parts.extend([
+                    f"save_format=bz",
+                    f"save_raw_queue={saver['raw_queue_size']}/{saver['buffer_size']}",
+                    f"save_compressed_queue={saver['compressed_queue_size']}/{saver['compressed_queue_size_max']}",
+                    f"save_pending_frames={saver['pending_frames']}/{saver['packet_frames']}",
+                    f"save_cache={saver['has_cache']}",
+                    f"save_not_realtime={saver['compression_not_realtime_count']}",
+                    f"save_last_compress_ms={saver['last_compress_ms']:.1f}",
+                ])
 
         log.info("Acq snapshot: " + ", ".join(parts))
         self._last_acq_snapshot_log_time = now
@@ -3354,6 +3597,7 @@ class MainWindow(QMainWindow):
             channel_num = self.channel_combo.currentData() or 1
             data_source = self.data_source_combo.currentData() or DataSource.PHASE
             storage_downsample_factor = self.save_downsample_spin.value()
+            storage_format = self._get_selected_storage_format()
 
             if data_source == DataSource.PHASE and channel_num == 1:
                 total_points = calculate_phase_point_num(point_num, merge_points)
@@ -3372,11 +3616,16 @@ class MainWindow(QMainWindow):
                 storage_downsample_factor,
             )
 
-            # One saved block corresponds to one acquisition callback.
-            block_size_mb = points_per_frame * max(1, frame_load_num) * channel_num * 4 / (1024 * 1024)
-            file_size_mb = block_size_mb * blocks_per_file
+            if storage_format == STORAGE_FORMAT_BITSHUFFLE_ZSTD:
+                file_duration_s = self.bz_file_duration_spin.value() if hasattr(self, "bz_file_duration_spin") else 60
+                raw_file_size_mb = points_per_frame * max(1, channel_num) * max(1, self.scan_rate_spin.value()) * file_duration_s * 4 / (1024 * 1024)
+                self.file_size_label.setText(f"~{raw_file_size_mb:.1f}MB raw/file")
+            else:
+                block_size_mb = points_per_frame * max(1, frame_load_num) * channel_num * 4 / (1024 * 1024)
+                file_size_mb = block_size_mb * blocks_per_file
+                self.file_size_label.setText(f"~{file_size_mb:.1f}MB/file")
 
-            self.file_size_label.setText(f"~{file_size_mb:.1f}MB/file")
+            self._update_bz_setting_hints()
 
         except Exception as e:
             log.warning(f"Error updating file estimates: {e}")
