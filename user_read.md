@@ -1,10 +1,10 @@
-# PCIe-7821 eDAS 上位机用户说明
+﻿# PCIe-7821 eDAS 上位机用户说明
 
 ## 1. 软件用途
 
-本软件用于控制 PCIe-7821 采集卡完成 eDAS 数据采集、实时显示、频谱分析、Time-Space 显示、数据保存以及可选的 TCP 数据转发。对于现场用户而言，最重要的不是记住所有内部实现，而是理解几个关键参数对运行状态的影响，尤其是 `FrameLoad`、`FramePlot`、保存开关、Time-Space 距离范围以及 Tab3 通信设置。
+本软件用于控制 PCIe-7821 采集卡完成 eDAS 数据采集、实时显示、频谱分析、Time-Space 显示、数据保存以及可选的 TCP 数据转发。当前版本把“采集读取、显示窗口、保存包、文件时长、通信包”统一改成以秒为单位配置，用户主要需要理解 `Length/Load`、`Length/Plot`、`Length/Save`、`Length/File` 和 `Length/Comm` 之间的关系。
 
-当前版本已经针对大数据量场景做过多轮优化，但它仍然是一套实时采集软件，而不是离线播放器。实际运行时必须根据采样速率、点数、通道数和数据源合理配置参数，否则底层 DLL 读取、磁盘写入或网络发送中的任意一环都可能成为瓶颈。
+这几个参数不会改变板卡每秒产生的数据总量；它们改变的是软件每次读取、显示、保存、分文件和发送网络包的时间粒度。若粒度设置过大，单次 DLL 读调用、压缩任务、写盘任务或 TCP 发送包都会变大，现场更容易出现停止响应慢、缓冲区积压或下游处理延迟。
 
 ## 2. 启动方式与运行模式
 
@@ -22,92 +22,172 @@ python run.py --simulate
 
 仿真模式下软件仍会完整创建主窗口、参数面板、波形图、频谱图和 Time-Space 图，并走大部分显示链路，但不会访问真实硬件。这种模式适合新用户熟悉界面，也适合先确认本机 Python、PyQt5 和 pyqtgraph 环境是否齐全。
 
-## 3. 主界面基本分区
+## 3. 主界面分区
 
-主界面左侧是参数和控制区，右侧是图形和状态显示区。左侧从上到下大致可分为基础采集参数、上传与相位解调参数、显示参数、保存参数和 Tab3 通信参数。右侧包含波形图、频谱图、Monitor 图以及独立的 Time-Space 视图。底部状态栏会显示设备连接状态、数据速率、光纤长度、点数等信息。
+Tab1 左侧现在只保留高频使用的采集、上传、相位处理、显示开关和保存启停控件，减少现场采集时的参数干扰。低频硬件配置、采集长度、保存长度和 BZ 压缩细节集中放在 Tab4。Tab3 只负责通信参数、连接状态和发送统计。
 
-在现场使用时，建议先完成左侧参数设置，再开始采集；不要在尚未理解参数语义时频繁同时修改多项高负载参数。尤其是在高扫描率、大点数或 Raw 数据模式下，一组看似普通的参数组合也可能带来很高的数据吞吐压力。
+Tab1 参数区主要包含：
 
-## 4. 采集相关参数的含义
+- 基础采集：`Scan(Hz)`、`Pulse(ns)`、`Points`。
+- 上传设置：`Channels`、`Source`。
+- 相位处理：`SpaceAvg`、`Merge`、`DiffOrder`、`Detrend`、`CropStart`、`CropEnd`。
+- 显示设置：`Mode`、`Region`、`Waveform`、`PSD`、`Monitor`、`rad`、Filter 参数。
+- 保存操作：`SAVE`、`Path`、`Est. Size`、`Files`。
 
-`ScanRate` 是扫描频率，决定每秒采集多少帧；`Point Num` 是每帧点数；`Channel Num` 是上传通道数；`Data Source` 决定上传的是 Raw、I/Q、Arc 还是 PHASE 数据；`MergePointNum`、`rate2phase`、`diff_order`、`detrend_bw` 等参数用于相位链路配置。对于普通用户，如果没有明确的算法需求，PHASE 模式通常更适合观察 DAS 结果，而 Raw 模式更容易把系统推到高带宽压力下。
+Tab4 参数区主要包含：
 
-当你修改这些参数时，不仅图上看到的形状会变化，底层单次读取的数据块大小、保存文件大小和通信载荷大小也会变化。因此，参数调整不应只看“图像是否正常”，还要结合状态栏和日志看系统是否持续稳定。
+- 采集长度：`Length/Load`、`Length/Plot`。
+- 硬件细节：`Clock`、`Trig`、`Bypass`、`CenterFreq`、`DataRate`、`Rate2Phase`、`PolarDiv`。
+- 存储设置：`Format`、`Length/Save`、`Length/File`、`Save DS`、`Zstd Level`、`Bitshuffle Block`。
 
-## 5. `FrameLoad` 与 `FramePlot` 如何理解
+Tab3 通信区包含服务器 IP、端口、通道范围、时间/空间降采样、`Length/Comm`、连接状态和发送统计。
 
-这是用户最需要真正理解的一组参数。`FrameLoad` 决定软件每次从 DLL 缓冲区取走多少帧完整数据，它直接影响单次读取块的大小和时长；`FramePlot` 决定每次显示最多使用多少帧，只影响实时显示负担，不影响底层持续采集速率。
+## 4. Length 参数的统一规则
 
-一个读取块覆盖的时间为：
+运行时软件会根据扫描率把秒数换算成帧数：
 
-$$
-T_{\mathrm{block}} = \frac{\mathrm{FrameLoad}}{\mathrm{ScanRate}}
-$$
+```text
+load_frames = Length/Load * ScanRate
+plot_frames = Length/Plot * ScanRate
+save_frames = Length/Save * ScanRate
+file_frames = Length/File * ScanRate
+comm_frames = Length/Comm * ScanRate
+```
 
-如果是 Raw 单通道数据，单次读取块字节数可近似理解为：
+这些换算结果必须是整数帧。当前默认值如下：
 
-$$
-B_{\mathrm{raw}} = \mathrm{Points} \times \mathrm{FrameLoad} \times 2
-$$
+| 参数 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `Length/Load` | `0.2 s` | 采集线程每次从 DLL 缓冲区读取的数据时长。 |
+| `Length/Plot` | `1 s` | GUI 波形、PSD、Time-Space 可使用的最新显示窗口时长。 |
+| `Length/Save` | `1 s` | `.bin` 和 `.bz` 共用的保存包时长。 |
+| `Length/File` | `10 s` | `.bin` 和 `.bz` 共用的单文件数据时长。 |
+| `Length/Comm` | `1 s` | Tab3 每个 TCP 通信包对应的采集时长。 |
 
-如果是单通道 PHASE 数据，合并后每帧点数为
+约束关系如下：
 
-$$
-\mathrm{PhasePoints} = \frac{\mathrm{Points}}{\mathrm{MergePointNum}}
-$$
+```text
+Length/Plot 必须是 Length/Load 的整数倍
+Length/Save 必须是 Length/Load 的整数倍
+Length/Comm 必须是 Length/Load 的整数倍
+Length/File 必须是 Length/Save 的整数倍
+```
 
-则读取块字节数约为：
+例如 `Scan(Hz)=2000` 时，默认配置会得到：
 
-$$
-B_{\mathrm{phase}} = \mathrm{PhasePoints} \times \mathrm{FrameLoad} \times 4
-$$
+```text
+Length/Load = 0.2 s -> 400 frames
+Length/Plot = 1.0 s -> 2000 frames = 5 个采集块
+Length/Save = 1.0 s -> 2000 frames = 5 个采集块
+Length/File = 10.0 s -> 20000 frames = 10 个保存包
+Length/Comm = 1.0 s -> 2000 frames = 5 个采集块
+```
 
-这意味着 `FrameLoad` 增大后，软件每次要处理的块会更大，STOP 响应也更容易被拖慢；但 `FrameLoad` 太小又会增加 DLL 调用次数。`FramePlot` 则更像显示侧窗口大小。较小的 `FramePlot` 会让波形和 Time-Space 更容易刷新，但保存链路依然能拿到完整采集块。
+如果输入的秒数不能换算成整数帧，或者不满足上面的倍数关系，软件会拒绝开始采集或拒绝应用参数。
 
-## 6. 实际调参建议
+## 5. `Length/Load` 与 `Length/Plot`
 
-如果你主要目的是先让程序稳定运行，不建议一开始就把 `FrameLoad` 和 `FramePlot` 都设很大。对于高带宽场景，优先从较小的 `FrameLoad` 开始，例如 `128` 或 `256`，先确认程序可以稳定采集、停止和保存，然后再逐步增大。若发现图像卡顿但保存和采集仍正常，优先减小 `FramePlot`；若发现驱动缓冲区持续增长、STOP 响应很慢或日志中 `read_ms` 很大，则更应优先减小 `FrameLoad`。
+`Length/Load` 是上位机每次从 DLL 缓冲区取走完整数据的时长，它决定单次 DLL 读调用的数据块大小和阻塞窗口。它越大，单次读出的数组越大、一次 DLL 调用不返回时造成的停顿越明显；它越小，单次读块更轻，但 DLL 调用频率会增加。
 
-现场调参时要避免一种常见误区：把 GUI 画面变流畅误认为“系统已经稳定”。显示只是系统的一部分。如果读取链路跟不上，驱动缓冲区仍可能在后台持续积压。因此，当你完成一组参数调整后，至少应观察一段时间，确认采集不中断、STOP 正常响应、保存文件持续增长且状态栏没有异常跳变。
+`Length/Plot` 只决定显示侧窗口大小。当前版本支持 `Length/Plot` 大于 `Length/Load`：采集线程会在内部维护最新显示历史，把多个采集块拼成显示窗口，再只把最新快照交给 GUI。保存链路和通信链路仍接收完整采集数据，不依赖 GUI 是否来得及绘图。
 
-## 7. 波形、频谱和 Time-Space 的区别
+Raw 数据单次读取块大小约为：
 
-波形图主要用于观察当前块中的时域或空间域信号。若显示模式为 `TIME`，程序会叠加展示多帧曲线；若显示模式为 `SPACE`，程序会抽取一个空间位置，展示它在多帧中的时间变化。频谱图用于观察当前显示窗口中的频域成分。对于 PHASE 数据，软件会自动按更适合相位数据的 PSD 逻辑处理；对于 Raw 数据，则更接近普通功率谱显示。
+```text
+raw_load_bytes = Points * load_frames * Channels * 2
+```
 
-Time-Space 图适合观察空间-时间二维结构，例如扰动沿光纤传播的连续轨迹、局部区域的稳定性或一段距离范围内的时变分布。它不是保存数据本身的原样平铺，而是经过距离范围裁剪、时间/空间降采样和滚动显示缓冲后的实时可视化结果。因此，Time-Space 图非常适合监视趋势，但不能替代完整原始数据归档。
+PHASE 数据单次读取块大小约为：
 
-## 8. `rad`、裁剪与显示开关
+```text
+phase_points = Points / Merge
+phase_load_bytes = phase_points * load_frames * Channels * 4
+```
 
-PHASE 模式下，勾选 `rad` 后，界面上显示的相位值会按
+若启用 PHASE 裁剪，后续显示、保存和通信使用裁剪后的空间点数；底层 DLL 原始读取压力仍首先由采集点数、合并参数、通道数和 `Length/Load` 决定。
 
-$$
-\phi_{\mathrm{rad}} = \frac{\phi_{\mathrm{int32}}}{32767} \pi
-$$
+## 6. 保存参数
 
-转换为弧度显示。这个开关只影响显示，不影响保存到磁盘的数据值。也就是说，文件里保存的仍是原始 `int32`，而不是弧度浮点数。
+点击 `SAVE` 并设置好保存路径后，采集开始时程序会创建后台保存器；采集中也可以用该按钮启停保存。当前 `.bin` 和 `.bz` 使用同一组长度参数：
 
-如果使用了单通道 PHASE 裁剪参数，采集线程会在进入显示和后续处理之前先按起止距离做软件裁剪。这样可以减少后续绘图、通信和部分处理负担。裁剪范围设置得过大或错误时，可能导致可显示点数减少、Time-Space 范围超出实际数据或通信载荷不符合预期，因此修改后应立刻检查状态栏中的点数和图像是否仍符合预期。
+- `Length/Save`：每个保存包包含多少秒数据，默认 `1 s`。
+- `Length/File`：每个文件包含多少秒数据，默认 `10 s`。
+- `Save DS`：落盘前的空间抽点倍率，只影响保存，不影响实时显示、Filter 或 TCP 通信。
+- `Format`：选择 `.bin` 或 `.bz`。
 
-`Waveform`、`Monitor` 等显示开关可以在不影响采集本身的情况下减少 GUI 绘图负担。若现场机器显卡较弱或屏幕刷新压力较大，可以考虑关闭不必要的绘图项。
+`.bin` 文件仍是裸二进制连续数据流，不写额外 packet header。软件会先把多个 `Length/Load` 采集块聚合成一个 `Length/Save` 保存包，再写入当前文件；达到 `Length/File` 后切换文件。
 
-## 9. 数据保存的使用方法与注意事项
+`.bz` 文件会按 `Length/Save` 生成压缩 packet，并按 `Length/File` 分文件。旧版本中的 `BZPacketFrames`、`BZfiles(s)` 和 `Blocks/File` 已不再作为用户参数出现；对应语义分别由 `Length/Save` 和 `Length/File` 统一替代。
 
-点击 `SAVE` 按钮并设置好保存路径后，采集开始时程序会创建二进制文件并在后台持续写入；采集过程中也可以用该按钮启停保存。当前版本的主保存格式是 `.bin`，保存线程会按设定的 `Blocks/File` 自动分文件。这里的 `Block` 是一次 `FrameLoad` 读取形成的完整采集块，不是单帧；一个块包含 `FrameLoad` 帧。保存路径旁的 `Save DS` 只影响落盘数据，`1` 表示不降采样，`10` 表示每帧每 10 个点保留 1 个点；该抽点不经过滤波，也不影响实时波形、PSD、Tab1/Tab2 FILTER 或 TCP 通信。界面中的 `Files` 会显示本轮已经创建的保存文件数量。保存链路与显示链路分离，因此即使显示帧被覆盖，保存仍可能保持完整；但如果磁盘速度明显不足或空间耗尽，保存队列也会出现丢块或错误。
+估算保存文件大小时，可以先算每秒数据量，再乘以 `Length/File`。Raw 单通道未降采样时：
 
-因此，正式采集前应先确认目标磁盘路径存在、可写且空间充足。长时间实验时尤其要注意剩余空间，因为当前程序更强调采集链路不断流，而不是在磁盘出错时强制停止整个程序。实验完成后，应结合文件大小、文件数量和采集时长，确认保存结果是否与预期相符。
+```text
+raw_bytes_per_second = Points * ScanRate * 2
+raw_file_bytes = raw_bytes_per_second * Length/File / SaveDS
+```
 
-## 10. Tab3 TCP 通信的使用条件
+PHASE 单通道时：
 
-Tab3 通信当前只支持 `单通道 + PHASE` 模式。若你切换到 Raw、多通道或其他不满足条件的模式，界面会显示通信不可用。这个限制是程序设计要求，不是简单的 UI 限制，因为后台协议构建默认假定当前输入是一块单通道 PHASE 数据，并会基于这一假设重新组织矩阵、裁剪通道范围并执行时间/空间降采样。
+```text
+phase_bytes_per_second = phase_points_after_crop * ScanRate * 4
+phase_file_bytes = phase_bytes_per_second * Length/File / SaveDS
+```
 
-如果需要启用通信，应在开始采集前确认服务器 IP、端口、通道起止范围、时间降采样和空间降采样都已设置正确。连接失败时，后台线程会自动重连，但这不意味着下游一定拿到了每一包数据；如果网络条件较差，后台队列可能会丢旧包以保证程序实时性。
+`.bz` 的实际文件大小还取决于数据可压缩性、Zstd 压缩等级和 bitshuffle block 设置，不能只按原始字节数精确预测。
 
-## 11. 停止采集与异常处理
+## 7. Tab3 TCP 通信
 
-点击 STOP 后，程序会先请求采集线程停止，再停止硬件、关闭保存会话和 TCP 会话，并清理未显示的快照。当前版本已经针对“GUI 历史大数组积压导致 STOP 延迟”的问题做过优化，因此在合理参数下，停止响应应明显好于早期版本。
+Tab3 通信当前只支持 `单通道 + PHASE` 模式。若切换到 Raw、多通道或其他不满足条件的模式，界面会显示通信不可用。这不是简单 UI 限制，而是因为后台协议默认输入为单通道 PHASE 时间-空间矩阵。
 
-如果你发现 STOP 后界面很久才恢复、驱动缓冲区持续增长、图像长时间不更新或日志中持续出现读数超时，应优先从降低 `FrameLoad`、减小点数、减小通道数、切换到 PHASE 或关闭额外显示项开始排查。若机器无硬件但需要确认 UI 行为，优先使用仿真模式验证是否是设备链路带来的问题。
+通信发送流程如下：
 
-## 12. 一套稳妥的使用顺序
+1. 采集线程每次读出一个 `Length/Load` 完整块。
+2. Tab3 管理器把多个完整块聚合到 `Length/Comm`。
+3. 发送前按用户设置裁剪空间通道范围。
+4. 再执行空间降采样和时间降采样。
+5. 转为 `rad` 单位、大端 `float64`，按通道优先顺序发送。
 
-对新用户而言，最稳妥的使用顺序是：先用仿真模式确认界面和参数恢复正常，再连接硬件；接着从较保守的 `ScanRate`、`Point Num`、`FrameLoad`、`FramePlot` 开始测试；确认开始、停止、保存和图像都稳定后，再逐步提高负载；如果需要 TCP 通信，最后再开启 Tab3 并检查连接状态和包计数。按照这个顺序操作，可以把“界面问题”“硬件问题”“吞吐问题”和“网络问题”分层排开，避免同时触发多个变量导致难以定位。
+TCP 包头固定为 `>IIIId`，长度为 `24` 字节。包体大小由以下因素决定：
+
+```text
+samples_per_channel = comm_frames / TimeDownsample
+channel_count = selected_space_points_after_SpaceDownsample
+payload_bytes = channel_count * samples_per_channel * 8
+tcp_packet_bytes = 24 + payload_bytes
+```
+
+因此，`Length/Comm` 决定每包时间窗口；`TimeDownsample` 决定每个通道保留多少时间样本；通道起止范围和 `SpaceDownsample` 决定发送多少空间通道。`Length/Plot`、`Length/Save`、`Length/File` 不参与 TCP 包大小。
+
+为了和接收端恢复矩阵一致，`TimeDownsample` 需要整除 `Scan(Hz)`；`Length/Comm` 需要是 `Length/Load` 的整数倍。
+
+## 8. 波形、频谱和 Time-Space
+
+波形图主要用于观察当前显示窗口中的时域或空间域信号。显示模式为 `TIME` 时，程序展示时间帧上的空间曲线；显示模式为 `SPACE` 时，程序抽取空间位置，展示它随时间变化的曲线。频谱图用于观察当前显示窗口中的频域成分。对于 PHASE 数据，软件会按相位数据路径计算 PSD；对于 Raw 数据，则更接近普通功率谱显示。
+
+Time-Space 图适合观察空间-时间二维结构，例如扰动沿光纤传播的连续轨迹、局部区域稳定性或某段距离范围内的时变分布。它处理的是显示快照，不是保存文件本身的原样平铺，因此适合实时监视趋势，但不能替代完整数据归档。
+
+## 9. `rad`、裁剪与显示开关
+
+PHASE 模式下，勾选 `rad` 后，界面上显示的相位值会按下面公式转为弧度：
+
+```text
+phase_rad = phase_int32 / 32767 * pi
+```
+
+这个开关只影响显示，不改变保存到磁盘的原始 `int32` 值。Tab3 通信发送的数据固定使用 `rad` 单位，不依赖 Tab1 的显示开关状态。
+
+PHASE 裁剪参数会减少进入后续显示、保存和通信链路的空间点范围。裁剪范围设置过大或错误时，可能导致可显示点数减少、Time-Space 范围超出实际数据或通信载荷不符合预期，因此修改后应检查状态栏中的点数和图像是否仍符合预期。
+
+`Waveform`、`PSD`、`Monitor` 等显示开关可以在不影响采集本身的情况下减少 GUI 绘图负担。现场机器显示压力较大时，可以先关闭不必要的显示项，再观察采集、保存和通信是否稳定。
+
+## 10. 停止采集与异常处理
+
+点击 STOP 后，程序会请求采集线程停止，再停止硬件、关闭保存会话和 TCP 会话，并清理未显示的快照。当前版本已经针对“GUI 历史大数组积压导致 STOP 延迟”的问题做过优化，合理参数下停止响应应明显好于早期版本。
+
+如果 STOP 后界面很久才恢复、驱动缓冲区持续增长、图像长时间不更新，或日志中出现读取停滞，应优先检查 `Length/Load` 是否过大，再检查点数、通道数、数据源、保存格式、磁盘速度和 TCP 下游速度。若日志中出现 `buffer=4294967295` 或类似无效缓冲区值，应优先按设备/驱动异常处理，单纯重启上层软件未必能恢复。
+
+## 11. 一套稳妥的使用顺序
+
+建议先用仿真模式确认界面和参数恢复正常，再连接硬件；接着从较保守的 `Scan(Hz)`、`Points`、`Length/Load`、`Length/Plot` 开始测试；确认开始、停止、保存和图像都稳定后，再逐步提高负载；如果需要 TCP 通信，最后开启 Tab3 并检查连接状态、发送包计数和下游接收状态。
+
+高带宽现场测试时，不要只看 GUI 是否流畅。至少同时观察日志中的读取耗时、缓冲区点数、保存队列、压缩耗时、TCP 队列和 STOP 响应时间。这样才能区分瓶颈是在 GUI、DLL/驱动、磁盘还是网络。

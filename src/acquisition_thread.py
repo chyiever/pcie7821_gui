@@ -27,6 +27,12 @@ log = get_logger("acq_thread")
 # Minimum interval between GUI updates (ms)
 MIN_GUI_UPDATE_INTERVAL_MS = 50  # 20 FPS max to prevent Qt signal queue backup
 
+# Buffer query failures from the DLL are hardware-boundary faults. Retrying a
+# small number of generic exceptions is acceptable, but explicit PCIe API
+# errors should stop the acquisition loop before log spam hides the root cause.
+BUFFER_QUERY_FAILURE_LIMIT = 5
+BUFFER_QUERY_FAILURE_LOG_INTERVAL_S = 1.0
+
 
 # ----- HARDWARE ACQUISITION THREAD -----
 # Polls DMA buffer, reads data, emits Qt signals to GUI thread
@@ -87,11 +93,19 @@ class AcquisitionThread(QThread):
         self._last_wait_iterations = 0
         self._last_query_ms = 0.0
         self._last_read_ms = 0.0
+        self._last_api_read_ms = 0.0
+        self._last_crop_ms = 0.0
+        self._last_dispatch_ms = 0.0
+        self._last_display_publish_ms = 0.0
         self._last_monitor_read_ms = 0.0
         self._last_block_bytes = 0
         self._current_stage = "idle"
         self._current_stage_detail = ""
         self._current_stage_started_at = time.perf_counter()
+        self._buffer_query_error_count = 0
+        self._consecutive_buffer_query_errors = 0
+        self._last_buffer_query_error_message = ""
+        self._last_buffer_query_error_log_time = 0.0
 
         # Display handoff uses one overwriteable slot instead of queued large-array signals.
         self._last_gui_update_time = 0
@@ -100,6 +114,12 @@ class AcquisitionThread(QThread):
         self._pending_monitor_data = None
         self._latest_display_data = None
         self._latest_display_lock = threading.Lock()
+        self._display_history_chunks = []
+        self._display_history_frames = 0
+        self._display_history_signature = None
+        self._display_publish_interval_s = 1.0
+        self._last_display_publish_at = 0.0
+        self._monitor_read_enabled = False
         self._full_data_handler: Optional[Callable[[np.ndarray, int, int], None]] = None
         self._last_successful_read_time = 0.0
         self._expected_block_duration_ms = 0.0
@@ -139,6 +159,18 @@ class AcquisitionThread(QThread):
         block_bytes_total = block_points_total * bytes_per_point
         block_duration_ms = self._frame_num / max(params.basic.scan_rate, 1) * 1000.0
         self._expected_block_duration_ms = block_duration_ms
+        self._display_history_chunks = []
+        self._display_history_frames = 0
+        self._display_history_signature = None
+        self._display_publish_interval_s = max(
+            MIN_GUI_UPDATE_INTERVAL_MS / 1000.0,
+            int(params.display.frame_plot_num) / max(1, int(params.basic.scan_rate)),
+        )
+        self._last_display_publish_at = 0.0
+        self._monitor_read_enabled = bool(
+            self._data_source == DataSource.PHASE
+            and getattr(params.display, "monitor_plot_enabled", False)
+        )
 
         log.info(f"Configured: total_points={self._total_point_num}, "
                  f"points_after_merge={self._point_num_after_merge}, "
@@ -172,8 +204,16 @@ class AcquisitionThread(QThread):
             "last_wait_iterations": self._last_wait_iterations,
             "last_query_ms": self._last_query_ms,
             "last_read_ms": self._last_read_ms,
+            "last_api_read_ms": self._last_api_read_ms,
+            "last_crop_ms": self._last_crop_ms,
+            "last_dispatch_ms": self._last_dispatch_ms,
+            "last_display_publish_ms": self._last_display_publish_ms,
             "last_monitor_read_ms": self._last_monitor_read_ms,
             "last_block_bytes": self._last_block_bytes,
+            "monitor_read_enabled": self._monitor_read_enabled,
+            "buffer_query_error_count": self._buffer_query_error_count,
+            "consecutive_buffer_query_errors": self._consecutive_buffer_query_errors,
+            "last_buffer_query_error": self._last_buffer_query_error_message,
             "last_successful_read_age_s": (
                 time.perf_counter() - self._last_successful_read_time
                 if self._last_successful_read_time > 0
@@ -201,7 +241,20 @@ class AcquisitionThread(QThread):
         if start == 0 and end == self._point_num_after_merge:
             return phase_data
 
-        frame_matrix = phase_data.reshape(self._frame_num, self._point_num_after_merge)
+        flat = np.asarray(phase_data).reshape(-1)
+        frame_count = flat.size // self._point_num_after_merge
+        valid_points = frame_count * self._point_num_after_merge
+        if frame_count <= 0:
+            return np.ascontiguousarray(flat[:0])
+        if valid_points != flat.size:
+            log.warning(
+                "Discarding incomplete PHASE crop tail: valid_points=%d, actual=%d, points_per_frame=%d",
+                valid_points,
+                flat.size,
+                self._point_num_after_merge,
+            )
+
+        frame_matrix = flat[:valid_points].reshape(frame_count, self._point_num_after_merge)
         cropped = np.ascontiguousarray(frame_matrix[:, start:end])
         return cropped.reshape(-1)
 
@@ -224,6 +277,88 @@ class AcquisitionThread(QThread):
 
         return np.ascontiguousarray(monitor_data[start:end])
 
+    def _get_display_points_per_frame(self, data_source: int, channel_num: int) -> int:
+        """Return the frame width of data after acquisition-side display shaping."""
+        if data_source != DataSource.PHASE:
+            return max(0, int(self._total_point_num))
+
+        if self._params is None or max(1, int(channel_num or 1)) != 1:
+            return max(0, int(self._point_num_after_merge))
+
+        start, end = resolve_phase_crop_bounds(
+            self._point_num_after_merge,
+            self._params.phase_demod.crop_distance_start,
+            self._params.phase_demod.crop_distance_end,
+        )
+        return max(0, int(end - start))
+
+    def _reset_buffer_query_error_state(self):
+        """Reset consecutive query-error state after a successful buffer query."""
+        self._consecutive_buffer_query_errors = 0
+        self._last_buffer_query_error_message = ""
+
+    def _is_fatal_buffer_query_error(self, exc: Exception) -> bool:
+        """Return True for query errors that indicate a stale device/driver state."""
+        if isinstance(exc, PCIe7821Error):
+            return True
+        return "0xFFFFFFFF" in str(exc)
+
+    def _handle_buffer_query_error(
+        self,
+        exc: Exception,
+        wait_count: int,
+        expected_points: int,
+        query_time_ms: float,
+    ) -> bool:
+        """
+        Update query-error counters and decide whether the acquisition must stop.
+
+        Returns True when the caller should break the wait loop immediately.
+        """
+        self._buffer_query_error_count += 1
+        self._consecutive_buffer_query_errors += 1
+        self._last_buffer_query_error_message = str(exc)
+        self._last_wait_iterations = wait_count
+        self._last_query_ms = query_time_ms
+
+        fatal = self._is_fatal_buffer_query_error(exc)
+        should_stop = fatal or self._consecutive_buffer_query_errors >= BUFFER_QUERY_FAILURE_LIMIT
+
+        if should_stop:
+            if fatal:
+                message = (
+                    "Fatal buffer query error; stopping acquisition. "
+                    f"error={exc}"
+                )
+            else:
+                message = (
+                    f"Buffer query failed {self._consecutive_buffer_query_errors} consecutive times; "
+                    f"stopping acquisition. last_error={exc}"
+                )
+            self._set_stage(
+                "buffer_query_error",
+                (
+                    f"errors={self._consecutive_buffer_query_errors}, "
+                    f"expected_points={expected_points}, query_ms={query_time_ms:.1f}"
+                )
+            )
+            log.error(message)
+            self._running = False
+            self.error_occurred.emit(message)
+            return True
+
+        now = time.perf_counter()
+        if now - self._last_buffer_query_error_log_time >= BUFFER_QUERY_FAILURE_LOG_INTERVAL_S:
+            log.warning(
+                "Error querying buffer (%d/%d): %s",
+                self._consecutive_buffer_query_errors,
+                BUFFER_QUERY_FAILURE_LIMIT,
+                exc,
+            )
+            self._last_buffer_query_error_log_time = now
+
+        return False
+
     def run(self):
         """Thread main loop"""
         log.info("=== Acquisition thread started ===")
@@ -241,8 +376,17 @@ class AcquisitionThread(QThread):
         self._last_wait_iterations = 0
         self._last_query_ms = 0.0
         self._last_read_ms = 0.0
+        self._last_api_read_ms = 0.0
+        self._last_crop_ms = 0.0
+        self._last_dispatch_ms = 0.0
+        self._last_display_publish_ms = 0.0
         self._last_monitor_read_ms = 0.0
         self._last_block_bytes = 0
+        self._last_display_publish_at = 0.0
+        self._buffer_query_error_count = 0
+        self._consecutive_buffer_query_errors = 0
+        self._last_buffer_query_error_message = ""
+        self._last_buffer_query_error_log_time = 0.0
         self._last_successful_read_time = time.perf_counter()
         self.clear_latest_display_data()
         self._set_stage("started")
@@ -266,6 +410,9 @@ class AcquisitionThread(QThread):
                         f"stage={snapshot['current_stage']}, stage_ms={snapshot['stage_elapsed_ms']:.1f}, "
                         f"buffer={snapshot['last_buffer_points']}/{snapshot['last_expected_points']}, "
                         f"query_ms={snapshot['last_query_ms']:.1f}, read_ms={snapshot['last_read_ms']:.1f}, "
+                        f"api_read_ms={snapshot['last_api_read_ms']:.1f}, "
+                        f"dispatch_ms={snapshot['last_dispatch_ms']:.1f}, "
+                        f"display_pub_ms={snapshot['last_display_publish_ms']:.1f}, "
                         f"emit_phase={snapshot['phase_emit_count']}, emit_raw={snapshot['raw_emit_count']}, "
                         f"gui_skips={snapshot['gui_skip_count']}"
                     )
@@ -307,6 +454,7 @@ class AcquisitionThread(QThread):
                         self._last_buffer_points = points_in_buffer
                         self._last_query_ms = query_time
                         self._last_wait_iterations = wait_count
+                        self._reset_buffer_query_error_state()
 
                         if query_time > 50:
                             log.warning(f"Slow query_buffer_points: {query_time:.1f}ms")
@@ -339,7 +487,9 @@ class AcquisitionThread(QThread):
                             self.error_occurred.emit("Timeout waiting for data")
                             break
                     except Exception as e:
-                        log.warning(f"Error querying buffer: {e}")
+                        query_time = (time.perf_counter() - query_start) * 1000
+                        if self._handle_buffer_query_error(e, wait_count, expected_points, query_time):
+                            break
                         # Check if we should stop
                         if not self._running:
                             log.info("Thread stopping due to stop request during buffer query")
@@ -402,16 +552,20 @@ class AcquisitionThread(QThread):
             self.acquisition_stopped.emit()
 
     def _read_raw_data(self):
-        """Read raw IQ data"""
+        """Read raw IQ data."""
         points_per_ch = self._total_point_num * self._frame_num
         log.debug(f"Reading raw data: {points_per_ch} points/ch, {self._channel_num} channels")
+        self._last_monitor_read_ms = 0.0
+        self._last_crop_ms = 0.0
 
         try:
             log.debug(
                 f"Calling api.read_data: points_per_ch={points_per_ch}, channels={self._channel_num}, "
                 f"estimated_block={points_per_ch * self._channel_num * 2 / 1024 / 1024:.2f}MB"
             )
+            api_start = time.perf_counter()
             data, points_returned = self.api.read_data(points_per_ch, self._channel_num)
+            self._last_api_read_ms = (time.perf_counter() - api_start) * 1000.0
         except Exception as e:
             log.error(f"Failed to read raw data: {e}")
             raise
@@ -423,16 +577,19 @@ class AcquisitionThread(QThread):
         self._last_block_bytes = int(np.asarray(data).nbytes)
         self._last_successful_read_time = time.perf_counter()
 
-        # Reshape data by channels
         if self._channel_num > 1:
-            # Data is interleaved: ch0[0], ch1[0], ch0[1], ch1[1], ...
             data = data.reshape(-1, self._channel_num)
 
+        dispatch_start = time.perf_counter()
         self._dispatch_full_data(data, self._data_source, self._channel_num)
+        self._last_dispatch_ms = (time.perf_counter() - dispatch_start) * 1000.0
+
+        publish_start = time.perf_counter()
         self._publish_latest_display_data(data, self._data_source, self._channel_num)
+        self._last_display_publish_ms = (time.perf_counter() - publish_start) * 1000.0
 
     def _read_phase_data(self):
-        """Read phase demodulated data"""
+        """Read phase demodulated data."""
         points_per_ch = self._point_num_after_merge * self._frame_num
         log.debug(f"Reading phase data: {points_per_ch} points/ch, {self._channel_num} channels")
 
@@ -441,7 +598,9 @@ class AcquisitionThread(QThread):
                 f"Calling api.read_phase_data: points_per_ch={points_per_ch}, channels={self._channel_num}, "
                 f"estimated_block={points_per_ch * self._channel_num * 4 / 1024 / 1024:.2f}MB"
             )
+            api_start = time.perf_counter()
             phase_data, points_returned = self.api.read_phase_data(points_per_ch, self._channel_num)
+            self._last_api_read_ms = (time.perf_counter() - api_start) * 1000.0
         except Exception as e:
             log.error(f"Failed to read phase data: {e}")
             raise
@@ -451,37 +610,56 @@ class AcquisitionThread(QThread):
 
         self._bytes_acquired += len(phase_data) * 4  # int = 4 bytes
 
+        crop_start = time.perf_counter()
         phase_data = self._apply_phase_spatial_crop(phase_data)
+        self._last_crop_ms = (time.perf_counter() - crop_start) * 1000.0
         self._last_block_bytes = int(np.asarray(phase_data).nbytes)
         self._last_successful_read_time = time.perf_counter()
 
-        # Reshape data by channels
         if self._channel_num > 1:
             phase_data = phase_data.reshape(-1, self._channel_num)
 
+        dispatch_start = time.perf_counter()
         self._dispatch_full_data(phase_data, DataSource.PHASE, self._channel_num)
-        self._publish_latest_display_data(phase_data, DataSource.PHASE, self._channel_num)
+        self._last_dispatch_ms = (time.perf_counter() - dispatch_start) * 1000.0
 
-        # Also read monitor data when in phase mode
+        publish_start = time.perf_counter()
+        self._publish_latest_display_data(phase_data, DataSource.PHASE, self._channel_num)
+        self._last_display_publish_ms = (time.perf_counter() - publish_start) * 1000.0
+
+        self._read_monitor_data_if_enabled()
+
+    def _read_monitor_data_if_enabled(self):
+        """Read monitor data only when the user has enabled the monitor plot."""
+        self._last_monitor_read_ms = 0.0
+        if not self._monitor_read_enabled:
+            self._pending_monitor_data = None
+            return
+
         try:
             monitor_start = time.perf_counter()
             monitor_data = self.api.read_monitor_data(
                 self._point_num_after_merge, self._channel_num
             )
-            self._last_monitor_read_ms = (time.perf_counter() - monitor_start) * 1000
+            self._last_monitor_read_ms = (time.perf_counter() - monitor_start) * 1000.0
             monitor_data = self._apply_monitor_spatial_crop(monitor_data)
             self._pending_monitor_data = (monitor_data, self._channel_num)
+            self._emit_if_ready()
         except PCIe7821Error as e:
             log.warning(f"Monitor data read failed (non-critical): {e}")
         except Exception as e:
             log.warning(f"Monitor data read failed (non-critical): {e}")
 
-        # Emit all pending data if enough time has passed
-        self._emit_if_ready()
-
     def set_full_data_handler(self, handler: Optional[Callable[[np.ndarray, int, int], None]]):
         """Set a non-GUI handler for saving and communication queue handoff."""
         self._full_data_handler = handler
+
+    def set_monitor_read_enabled(self, enabled: bool):
+        """Enable monitor DLL reads only while the monitor plot is visible."""
+        self._monitor_read_enabled = bool(enabled and self._data_source == DataSource.PHASE)
+        if not self._monitor_read_enabled:
+            self._pending_monitor_data = None
+            self._last_monitor_read_ms = 0.0
 
     def _dispatch_full_data(self, data: np.ndarray, data_source: int, channel_num: int):
         """Dispatch one complete acquisition block without entering the GUI event queue."""
@@ -492,23 +670,95 @@ class AcquisitionThread(QThread):
         except Exception as e:
             log.exception(f"Full data handler failed: {e}")
 
-    def _publish_latest_display_data(self, data: np.ndarray, data_source: int, channel_num: int):
-        """Replace the latest display snapshot; unconsumed older snapshots are discarded."""
-        points_per_frame = (
-            self._point_num_after_merge
-            if data_source == DataSource.PHASE
-            else self._total_point_num
+    def _append_display_history(self, frame_matrix: np.ndarray, target_frames: int, signature) -> None:
+        """Append one read block to the retained display history."""
+        if self._display_history_signature != signature:
+            self._display_history_chunks = []
+            self._display_history_frames = 0
+            self._display_history_signature = signature
+            self._last_display_publish_at = 0.0
+
+        frame_matrix = np.array(frame_matrix, copy=True, order="C")
+        if frame_matrix.size:
+            self._display_history_chunks.append(frame_matrix)
+            self._display_history_frames += int(frame_matrix.shape[0])
+
+        while self._display_history_frames > target_frames and self._display_history_chunks:
+            overflow = self._display_history_frames - target_frames
+            first = self._display_history_chunks[0]
+            if overflow >= first.shape[0]:
+                self._display_history_chunks.pop(0)
+                self._display_history_frames -= int(first.shape[0])
+            else:
+                self._display_history_chunks[0] = first[overflow:]
+                self._display_history_frames -= int(overflow)
+                break
+
+    def _should_publish_display_snapshot(self) -> bool:
+        now = time.perf_counter()
+        return (
+            self._last_display_publish_at <= 0.0
+            or now - self._last_display_publish_at >= self._display_publish_interval_s
         )
-        target_frames = max(1, min(self._params.display.frame_plot_num, self._frame_num))
+
+    def _current_display_history(self) -> np.ndarray:
+        if not self._display_history_chunks:
+            return np.empty((0, 0), dtype=np.int32)
+        if len(self._display_history_chunks) == 1:
+            return np.ascontiguousarray(self._display_history_chunks[0])
+        return np.ascontiguousarray(np.concatenate(self._display_history_chunks, axis=0))
+
+    def _publish_latest_display_data(self, data: np.ndarray, data_source: int, channel_num: int):
+        """Refresh the overwriteable GUI snapshot at the GUI display cadence."""
+        start = time.perf_counter()
+        channel_num = max(1, int(channel_num or 1))
+        points_per_frame = self._get_display_points_per_frame(data_source, channel_num)
+        if points_per_frame <= 0:
+            self._last_display_publish_ms = (time.perf_counter() - start) * 1000.0
+            return
+        target_frames = max(1, int(self._params.display.frame_plot_num))
+        arr = np.asarray(data)
+
         if channel_num == 1:
-            keep_points = min(data.size, points_per_frame * target_frames)
-            display_data = data.reshape(-1)[-keep_points:]
+            flat = arr.reshape(-1)
+            frame_count = flat.size // points_per_frame
+            valid_points = frame_count * points_per_frame
+            if frame_count <= 0:
+                self._last_display_publish_ms = (time.perf_counter() - start) * 1000.0
+                return
+            frame_matrix = flat[:valid_points].reshape(frame_count, points_per_frame)
+            self._append_display_history(
+                frame_matrix,
+                target_frames,
+                (int(data_source), channel_num, points_per_frame),
+            )
         else:
-            matrix = data.reshape(-1, channel_num)
-            keep_rows = min(matrix.shape[0], points_per_frame * target_frames)
-            display_data = matrix[-keep_rows:, :]
-        # The display snapshot must not keep the complete acquisition block alive via a view.
-        display_data = np.array(display_data, copy=True, order="C")
+            matrix = arr.reshape(-1, channel_num)
+            frame_count = matrix.shape[0] // points_per_frame
+            valid_rows = frame_count * points_per_frame
+            if frame_count <= 0:
+                self._last_display_publish_ms = (time.perf_counter() - start) * 1000.0
+                return
+            frame_matrix = matrix[:valid_rows, :].reshape(frame_count, points_per_frame * channel_num)
+            self._append_display_history(
+                frame_matrix,
+                target_frames,
+                (int(data_source), channel_num, points_per_frame),
+            )
+
+        if not self._should_publish_display_snapshot():
+            self._last_display_publish_ms = (time.perf_counter() - start) * 1000.0
+            return
+
+        history = self._current_display_history()
+        if history.size == 0:
+            self._last_display_publish_ms = (time.perf_counter() - start) * 1000.0
+            return
+
+        if channel_num == 1:
+            display_data = np.ascontiguousarray(history.reshape(-1))
+        else:
+            display_data = np.ascontiguousarray(history.reshape(-1, channel_num))
 
         with self._latest_display_lock:
             if self._latest_display_data is not None:
@@ -519,6 +769,8 @@ class AcquisitionThread(QThread):
             self._phase_emit_count += 1
         else:
             self._raw_emit_count += 1
+        self._last_display_publish_at = time.perf_counter()
+        self._last_display_publish_ms = (self._last_display_publish_at - start) * 1000.0
 
     def take_latest_display_data(self):
         """Atomically take the newest display snapshot for GUI-timer consumption."""
@@ -531,6 +783,10 @@ class AcquisitionThread(QThread):
         """Release any display snapshot that has not yet been consumed."""
         with self._latest_display_lock:
             self._latest_display_data = None
+        self._display_history_chunks = []
+        self._display_history_frames = 0
+        self._display_history_signature = None
+        self._last_display_publish_at = 0.0
 
     def _emit_if_ready(self):
         """Emit pending data signals if enough time has passed since last update"""
@@ -769,9 +1025,11 @@ class SimulatedAcquisitionThread(AcquisitionThread):
                     self._bytes_acquired += len(phase_data.flatten()) * 4
 
                     # Simulated monitor data
-                    monitor_data = np.random.randint(0, 65535, self._point_num_after_merge * self._channel_num, dtype=np.uint32)
-                    monitor_data = self._apply_monitor_spatial_crop(monitor_data)
-                    self._pending_monitor_data = (monitor_data, self._channel_num)
+                    if self._monitor_read_enabled:
+                        monitor_data = np.random.randint(0, 65535, self._point_num_after_merge * self._channel_num, dtype=np.uint32)
+                        monitor_data = self._apply_monitor_spatial_crop(monitor_data)
+                        self._pending_monitor_data = (monitor_data, self._channel_num)
+                        self._emit_if_ready()
                 else:
                     points = self._total_point_num * self._frame_num
                     data = np.random.randint(-32768, 32767, points * self._channel_num, dtype=np.int16)

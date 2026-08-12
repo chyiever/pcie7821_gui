@@ -21,6 +21,7 @@ class CommSettings:
     channel_end: int
     time_downsample: int
     space_downsample: int
+    comm_frames: int = 0
     reconnect_interval_s: float = 1.0
     queue_max_packets: int = 8
 

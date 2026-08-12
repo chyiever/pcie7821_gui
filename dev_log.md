@@ -706,3 +706,80 @@ python build_exe.py --name eDAS20260720-173900 --skip-clean
 ### Git
 
 本次修改完成自检后同步到 GitHub `dev` 分支。提交号以最终推送结果为准。
+
+## 2026-07-29 Length 参数模型、保存/通信包长统一与挂死分析整理
+
+本次更新把用户界面的帧数/块数参数统一调整为以秒为单位的 Length 参数模型。`FrameLoad` 改为 Tab4 的 `Length/Load`，默认 `0.2 s`；`FramePlot` 改为 Tab4 的 `Length/Plot`，默认 `1 s`，并要求它是 `Length/Load` 的整数倍。运行时仍会根据 `Scan(Hz)` 派生 `frame_load_num` 和 `frame_plot_num`，但这些字段只作为内部帧数使用，不再作为用户直接填写的界面参数。
+
+保存链路同步完成统一。`.bin` 与 `.bz` 现在共用 `Length/Save` 和 `Length/File`：前者默认 `1 s`，表示每个保存包或压缩 packet 的数据时长；后者默认 `10 s`，表示每个输出文件的数据时长。旧界面中的 `BZPacketFrames`、`BZfiles(s)` 和 `Blocks/File` 已从用户参数中移除。`.bin` 保存器保留裸二进制连续流格式，但内部会把多个 `Length/Load` 采集块聚合成 `Length/Save` 保存包后写盘，并按 `Length/File` 分文件；`.bz` 保存器按同样的保存包和文件时长压缩分包。
+
+通信链路新增 Tab3 的 `Length/Comm`，默认 `1 s`，并要求它是 `Length/Load` 的整数倍。Tab3 管理器不再把每个采集回调直接当成一个 TCP 包，而是先聚合完整 `Length/Load` 块到 `Length/Comm`，再按通道范围、空间降采样和时间降采样构造协议包。TCP 包体大小由 `Length/Comm`、`Scan(Hz)`、`TimeDownsample`、空间通道范围和 `SpaceDownsample` 决定；`Length/Plot`、`Length/Save`、`Length/File` 和 BZ 压缩参数不参与 TCP 包大小。
+
+界面布局也同步调整。Tab1 参数区只保留现场高频操作项，包括基础采集、上传、相位处理、显示开关和保存启停；`Bypass`、`Rate2Phase`、`DataRate`、`PolarDiv`、`Clock`、`Trig`、`CenterFreq` 移到 Tab4，默认值保持不变。Tab4 现在集中承载采集长度、硬件细节和存储设置，降低 Tab1 现场操作时的参数密度。
+
+为支持 `Length/Plot > Length/Load`，采集线程增加显示历史缓存，显示链路可以跨多个采集块拼出最新显示窗口；GUI 仍只消费最新快照，避免历史大数组进入 Qt 事件队列。为支持 `Length/Comm > Length/Load`，Tab3 管理器增加通信帧缓存，只在累计到完整通信包时入发送队列。
+
+本次继续保留并完善 2026-07-29 采集卡挂死分析：14:02 的直接卡点在 DLL `read_phase_data()` 长时间不返回，BZ 队列没有堆积证据；自动恢复在 GUI 主线程同步等待同一把 API 锁，导致界面也卡死；15:15 和 15:22 两次重启仍出现 `buffer=4294967295/6820000`，说明设备或驱动状态没有被上层软件重启复位。本次已在 `query_buffer_points()` 中检查 DLL 返回码和 `0xFFFFFFFF` 无效缓冲区值，避免把底层错误状态误判成真实缓冲区点数。
+
+同步更新了根 `README.md`、`user_read.md`、`docs/README-2026-03-20-eDAS数据存储技术说明.md`、`docs/2026-03-14-Tab3-DAS数据通信功能开发方案.md` 和 `docs/2026-7-29采集卡挂死原因分析与各个环节单包数据长度梳理.md`。其中 7-29 文档补充了改造前后参数对照表，并按 DLL 读取、GUI 显示、`.bin` 保存、`.bz` 保存和 Tab3 TCP 通信分别说明单包/单块长度由哪些参数决定。
+
+验证项包括 Python 语法编译检查、`.bin` Length/Save 聚合与 Length/File 分文件自测、Tab3 Length/Comm 聚合自测，以及配置默认值和旧保存参数残留检查。现场硬件仍需复测 DLL 读停滞后的 watchdog 行为、`0xFFFFFFFF` 缓冲区异常提示、BZ 实时压缩统计和 TCP 下游接收矩阵维度。
+
+## 2026-07-30 PHASE 单通道裁剪显示帧宽与 Length/Plot 刷新修复
+
+### 背景
+
+根据 `logs/20260730_211841.log`，本次现场参数为 `scan_rate=10000`、`length_load_s=0.200`、`length_plot_s=1.000`、`load_frames=2000`、`plot_frames=10000`，单通道 PHASE 裁剪范围为 `[100, 800)`。日志中 `_on_phase_data` 约按采集块节奏持续触发，结束统计为 `Total data callbacks: 188, GUI updates: 188`，与期望的 1 s 显示刷新不一致；开启 TimeSpace 后 `_on_phase_data` 耗时明显上升，且波形/TimeSpace 图形表现出帧拼接错位特征。
+
+### 根因
+
+单通道 PHASE 数据在采集线程中已经按裁剪范围 `[100, 800)` 从 `points_after_merge=1024` 裁到实际 `700` 点/帧，但显示历史缓存仍按 `1024` 点/帧重组扁平数组，导致 0.2 s 采集块在拼成 1 s 显示窗口时跨帧错位。GUI 侧最新快照消费定时器同时固定为 `100 ms`，没有跟随 `Length/Plot` 派生出的 `frame_plot_num / scan_rate`，因此实际显示刷新快于界面设置。
+
+### 修改
+
+- `src/acquisition_thread.py` 修正单通道 PHASE 裁剪逻辑，按实际完整帧数裁剪，遇到不完整尾部时丢弃并记录 warning，避免把残缺数据继续送入显示矩阵。
+- `src/acquisition_thread.py` 新增显示侧帧宽计算，PHASE 单通道使用裁剪后的 `end - start`，多通道 PHASE 仍使用 `points_after_merge`，Raw/IQ 等数据使用 `point_num_per_scan`。
+- `src/acquisition_thread.py` 的显示历史缓存现在使用裁剪后的实际帧宽重组窗口，避免 700 点/帧被误按 1024 点/帧拼接，波形和 TimeSpace 共用同一修正后的显示快照。
+- `src/main_window.py` 将最新显示快照消费定时器改为由 `Length/Plot` 派生：`frame_plot_num / scan_rate * 1000 ms`，本次日志参数下为 `1000 ms`。修改 Length 参数或启动采集时都会重新应用该间隔。
+- `src/config.py` 同步更新 `Length/Plot`/`frame_plot_num` 注释，明确它既是显示窗口长度，也是 GUI 显示刷新周期。
+
+### 验证
+
+- 已执行 `python -m py_compile src\acquisition_thread.py src\main_window.py src\time_space_plot.py`，语法检查通过。
+- 已执行数组自检：模拟日志中的 `points=3072`、`merge=3`、裁剪 `[100,800)`、`load_frames=2000`、`plot_frames=10000`，确认单块裁剪为 `2000*700`，两块历史缓存连续拼接为 `4000*700`，首尾帧裁剪范围与原始矩阵一致。
+- 已执行显示间隔自检：`scan_rate=10000` 且 `frame_plot_num=10000` 时返回 `1000 ms`，`frame_plot_num=2000` 时返回 `200 ms`，极小窗口按下限钳制到 `50 ms`。
+
+## 2026-08-12 `0xFFFFFFFF` 缓冲区查询异常熔断与现场复位说明
+
+### 背景
+
+根据最新日志 `logs/20260812_091940.log`，程序启动和设备打开正常，用户在约 `8.410 s` 点击 START 后，设备配置、缓冲区分配和 `pcie7821_start()` 均成功返回。但采集线程第一次进入 `query_buffer_points()` 时，DLL 立即持续返回 `0xFFFFFFFF` 无效缓冲区点数。该日志中同类 API 错误文本出现 `6898` 次，采集线程的 `Error querying buffer` 出现 `3449` 次，且多个 stop/start 自动恢复轮次后仍复现。
+
+用户随后反馈：重启电脑和采集卡后恢复正常。这个现场结果确认该问题不是 Length 参数、保存链路、TCP 通信或 GUI 绘图造成，而是采集卡/驱动/DMA 状态残留导致的硬件边界异常。
+
+### 修改
+
+- `src/acquisition_thread.py` 新增缓冲区查询错误计数和熔断逻辑。`PCIe7821Error` 或包含 `0xFFFFFFFF` 的查询异常被视为致命缓冲区查询错误，采集线程立即停止，不再继续高频轮询刷日志。
+- 对非致命的普通查询异常保留有限重试，连续失败达到 `BUFFER_QUERY_FAILURE_LIMIT = 5` 后同样停止采集，避免 DLL 查询路径异常时线程无限空转。
+- 采集诊断快照新增 `buffer_query_error_count`、`consecutive_buffer_query_errors` 和 `last_buffer_query_error`，主窗口周期性 `Acq snapshot` 日志同步输出查询错误计数和最后一次错误。
+- `src/main_window.py` 在收到致命采集错误后调度现有 STOP 清理流程，停止采集线程、硬件、保存器和 TCP 会话，并在状态栏提示需要复位 PCIe 设备/驱动后再重启采集。
+- 致命错误路径不触发自动 stop/start 恢复，因为本次日志和现场反馈已经证明单纯软件重启无法清理 `0xFFFFFFFF` 状态，反复恢复只会扩大日志噪声。
+
+### 文档
+
+新增问题解决文档 `docs/2026-08-12-buffer-query-0xFFFFFFFF-fault-handling.md`，记录本次日志证据、根因判断、现场处置步骤和代码防护边界。文档明确建议：出现该错误后先停止采集，关闭程序，断电/重启采集卡或重启主机，确认设备重新枚举后再启动程序。
+
+### 验证
+
+已执行 `python -m py_compile src\acquisition_thread.py src\main_window.py src\pcie7821_api.py`，语法检查通过。现场硬件复测仍需在真实设备上确认：再次遇到 `0xFFFFFFFF` 时，日志应只输出一次致命查询错误和 STOP 清理信息，而不是持续刷屏或自动反复重启。
+
+
+## 2026-08-12 长时间日志分析与实时链路优化
+
+- 分析 `logs/20260812_103513.log`（约 7.01 小时、92,447 行），确认本次长时间 `.bz` 保存 `dropped=0`、队列未满、最终帧率约 9,999.06 Hz；未发现本地实时存储丢数据。
+- 识别主要风险为采集/驱动缓冲阶段性积压：长时间保存段缓冲积压 p95 约 2.49 s，峰值约 32.65 s；`gui_skips` 属于 GUI 快照覆盖，不等同于采集或存储数据丢失。
+- 优化 Phase 显示发布策略：采集线程保留显示历史但按显示窗口周期限流发布 GUI 快照，减少每 200 ms 重复拼接和主线程覆盖压力。
+- 优化监测波形读取：采集线程根据 UI 勾选状态决定是否读取 monitor 数据，未显示时跳过不必要的 PCIe/API 调用。
+- 增加采集诊断字段：`api_read_ms`、`crop_ms`、`dispatch_ms`、`display_pub_ms`、`monitor_read_enabled`，便于后续复测直接定位瓶颈。
+- 调整 `.bz` 存储实时性指标：将单包慢压缩拆为 `slow_compression_packet_count`，`compression_not_realtime_count` 只保留明确队列满/失败等实时链路风险事件，避免误判本地存储失败。
+- 新增分析报告：`docs/2026-08-12日志分析与软件优化.md`，并同步更新 `.bz` 数据存储技术说明。

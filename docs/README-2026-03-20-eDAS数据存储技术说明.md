@@ -1,161 +1,184 @@
-# eDAS 数据存储技术说明（基于当前版本代码）
+﻿# eDAS 数据存储技术说明（Length 参数模型）
 
-## 1. 文档目的
+本文面向开发和现场联调，说明当前 `pcie7821_gui` 的保存链路。自 2026-07-29 起，界面存储参数统一改为以秒为单位的 Length 模型：
 
-本文档面向开发者，说明当前 PCIe-7821 eDAS 上位机中“完整采集块如何进入磁盘文件”的真实实现方式。它不以早期设计稿为准，而是以当前 `src/data_saver.py`、`src/main_window.py`、`src/acquisition_thread.py` 和 `src/config.py` 中的实际代码为准，重点回答以下问题：当前保存链路保存的到底是什么数据，数据在进入磁盘前经历了哪些处理，显示侧弧度换算为什么不影响磁盘数据，分文件是如何实现的，队列满时系统如何取舍，以及后续如果要演进成更强可靠性的文件格式，应从哪里动手。
+- `Length/Load`：一次 DLL 读取的数据时长，位于 Tab4，默认 `0.2 s`。
+- `Length/Save`：一次保存包的数据时长，位于 Tab4，默认 `1 s`。
+- `Length/File`：一个输出文件的数据时长，位于 Tab4，默认 `10 s`。
+- `Save DS`：保存侧点抽样因子，只影响落盘，不影响显示、滤波或 TCP 通信。
+- `Format`：`BIN (.bin)` 或 `Bitshuffle+Zstd (.bz)`。
 
-对类似项目来说，保存链路设计常常决定了程序在高负载下的真实可用性。只要写盘策略选错，GUI 再漂亮、采集线程再复杂，也会在持续数据吞吐面前失去稳定性。因此，这份文档不仅说明当前实现，也顺带总结一些后续开发应保留的工程原则。
+旧界面中的 `Blocks/File`、`BZ Packet Frames`、`BZ File(s)` 已从用户参数中移除。`.bin` 和 `.bz` 现在使用同一组 `Length/Save` 与 `Length/File` 参数。保存器内部仍会把秒数换算成帧数和 packet 数，但这些是派生运行值，不再要求用户直接填写。
 
-## 2. 保存链路的整体结构
+## 1. 数据流结构
 
-当前版本已经把完整数据处理和显示处理显式分离。采集线程从 DLL 缓冲区读取到完整数据块后，会通过主窗口设置的完整数据处理器进入保存链路；GUI 显示只消费截断后的最新显示快照。也就是说，保存拿到的是完整采集块，而不是当前屏幕上已经裁剪、限帧或缩放后的显示数据。
+采集线程从 DLL 缓冲区读取完整 `Length/Load` 数据块后，完整块直接进入后台消费者，GUI 只消费最新显示快照。保存链路不依赖 GUI 绘图回调。
 
 ```mermaid
 flowchart LR
-    A[DLL 缓冲区] --> B[AcquisitionThread 读取完整块]
-    B --> C[MainWindow 完整块处理器]
-    C --> D[BlockBasedFileSaver.save_block]
-    D --> E[queue.Queue 非阻塞入队]
-    E --> F[后台保存线程]
-    F --> G[当前 bin 文件]
+    A[DLL buffer] --> B[AcquisitionThread Length/Load block]
+    B --> C[Full data handler]
+    C --> D[Storage downsample Save DS]
+    D --> E[Length/Save packetizer]
+    E --> F{Format}
+    F --> G[.bin writer]
+    F --> H[Bitshuffle+Zstd .bz compressor/writer]
 ```
 
-这一路径体现了当前版本的一个核心策略：保存链路必须尽量独立于 GUI。早期如果让大数组先进入 Qt 事件队列，再由 GUI 回调触发写盘，历史显示事件一旦积压，保存触发时机也会一起延迟。现在这部分已经被拆开，完整块可直接进入后台保存队列，明显降低了 GUI 负担对保存链路的干扰。
+这条链路的核心原则是：保存拿完整采集数据，显示只拿最新快照。`rad`、PSD、Tab1/Tab2 FILTER、Time-Space 视图裁剪都不会改变保存数据值。
 
-## 3. 当前保存的数据类型与物理语义
+## 2. Length 参数到帧数的换算
 
-当前代码中的保存器 `DataSaver`/`BlockBasedFileSaver` 最终都会把输入数据写成二进制字节流。若传入的是 NumPy 数组，则 `_write_data()` 会在写入前判断数据类型；当 `dtype` 不是 `int32` 时，会先执行 `astype(np.int32)`，随后调用 `tobytes()` 写文件。这意味着当前主保存格式的逻辑基线是“按 `int32` 保存”。
+所有 Length 参数在界面中以秒显示，运行前按 `Scan(Hz)` 换算为整数帧数：
 
-这里需要分清三个层面的数据语义。第一，硬件原始 ADC 或 IQ 数据在底层可能是 `int16`；第二，PHASE 数据在 DLL 与采集线程侧已经是 `int32`；第三，GUI 勾选 `rad` 后显示的弧度值只是显示态，不是保存态。因此，磁盘文件中的主保存值不是“屏幕上看到的最终物理单位”，而是“保存器接收到的原始整型块，必要时统一扩成 `int32` 后的二进制表示”。
+```text
+load_frames = round(Length/Load * ScanRate)
+plot_frames = round(Length/Plot * ScanRate)
+save_frames = round(Length/Save * ScanRate)
+file_frames = round(Length/File * ScanRate)
+```
 
-对于 PHASE 模式，这种设计相对自然，因为原始块本来就是 `int32`。对于 Raw 模式，则要特别注意：当前保存器并不是把 `int16` 原样打包保存，而是可能扩成 `int32` 后落盘。因此离线解析 Raw 文件时，不能想当然按 `int16` 读取，而应结合采集模式和实际保存器逻辑判断。若未来要做严格的 Raw 原样归档，应在保存器中增加显式的模式分支，而不是依赖当前统一转 `int32` 的实现。
+校验规则：
 
-## 4. 保存前的数据是否会被二次处理
+```text
+Length/Plot 必须是 Length/Load 的整数倍
+Length/Save 必须是 Length/Load 的整数倍
+Length/File 必须是 Length/Save 的整数倍
+```
 
-当前版本对保存前数据的处理相当克制，这是一种有意为之的设计。在默认 `BIN (.bin)` 模式下，保存链路不会做文本化、不会做压缩、不会做 GUI `rad` 弧度转换、不会做额外滤波、不会做 PSD 计算，也不会为了显示方便而重排成特殊可视化结构。除 2026-07-20 新增的可选 `Save DS` 抽点外，`.bin` 模式主要做三类事情：必要时统一 `dtype`，把 NumPy 数组序列化为连续字节流，以及按配置控制分文件边界。当 Tab4 `setting` 选择 `Bitshuffle+Zstd (.bz)` 时，保存器只在后台对已经形成的 `int32` packet 执行 Bitshuffle+Zstd 压缩，采集侧数据语义、显示链路和 `.bin` 保存行为不改变。
+例如默认 `ScanRate=2000 Hz` 时：
 
-PHASE 数据在到达保存器之前，已经可能经历过底层相位链路处理，例如 `rate2phase`、`space_avg_order`、`merge_point_num`、`diff_order`、`detrend_bw` 和 `polarization_diversity` 等。这些处理发生在 FPGA 或 DLL 所代表的底层链路中，不是保存器附加做的。因此，保存器保存的是“当前上传链路输出的原始块”，而不是最初 ADC 的绝对原始值。
+```text
+Length/Load = 0.2 s -> 400 frames
+Length/Save = 1.0 s -> 2000 frames = 5 个 load block
+Length/File = 10.0 s -> 20000 frames = 10 个 save packet
+```
 
-单通道 PHASE 空间裁剪是另一个必须说明的点。当前代码会在采集线程中根据 `crop_distance_start` 和 `crop_distance_end` 对单通道 PHASE 数据做软件裁剪，然后再进入后续显示、保存和通信链路。也就是说，若用户启用了裁剪，保存到磁盘的数据块本身已经是裁剪后的点数，而不是完整未裁剪的点数。后续离线解析文件时，必须把这一事实纳入数据形状恢复逻辑。
+## 3. .bin 保存行为
 
-此外，`Save DS` 是保存侧专用的抽点因子，默认 `1` 表示不降采样；设置为 `N` 时，程序在完整块进入 `BlockBasedFileSaver.save_block()` 之前，对每帧点位执行 `0, N, 2N, ...` 的简单抽取。这个过程不调用滤波器，不改变 Tab1 波形、PSD、Tab1/Tab2 FILTER 显示结果，也不改变 Tab3 TCP 发送数据。多通道数据按帧内行抽取并保留完整通道列，避免破坏通道交错关系。
+`.bin` 文件仍是裸二进制连续数据流，不额外写 packet header。变化在于写入节奏：旧版本按每个 `FrameLoad` 采集块直接写入，并按 `Blocks/File` 分文件；当前版本会先把多个 `Length/Load` 采集块聚合到 `Length/Save`，再写入当前 `.bin` 文件。
 
-## 5. 文件格式、字节序与元数据问题
+当前 `.bin` 保存行为：
 
-当前生成的文件是裸二进制 `.bin` 文件，没有头部、没有文件内元数据区、没有魔数、没有校验和，也没有显式记录大小端。由于写入时直接使用 NumPy 的 `tobytes()`，在当前 Windows/x86 环境中可以按小端 `int32` 理解，但文件本身并不自描述这一点。因此，只依赖单个 `.bin` 文件无法完全恢复采集语境，离线工具必须结合文件名、日志和当时的运行参数。
+```text
+1 个采集块 = Length/Load 对应的帧数
+1 个保存包 = Length/Save 对应的帧数
+1 个文件 = Length/File 对应的帧数
+```
 
-这套设计对吞吐很友好，因为写盘路径极短，几乎没有额外序列化负担；但它也意味着数据交换性较弱。未来若要把文件直接交给其他团队或长期归档，建议增加 sidecar 元数据，例如同名 `.json` 文件，记录 `scan_rate`、`point_num_per_scan`、`channel_num`、`data_source`、`merge_point_num`、裁剪范围、文件起止时间、保存器版本号等信息。这样可以在不破坏现有 `.bin` 写入性能的前提下，提高数据可移植性。
+如果默认 `Length/Load=0.2 s`、`Length/Save=1 s`、`Length/File=10 s`，则后台保存器每 5 个采集块写一次保存包，每 10 个保存包切换到下一个文件。
 
-### 5.1 可选 `.bz` 实时压缩格式
+`.bin` 文件内容仍按 `int32` 连续写入。Raw 数据如果以非 `int32` 进入保存器，保存器会转换为 `int32` 后落盘。PHASE 数据本身通常已经是 `int32`。离线解析 `.bin` 时必须结合日志或同名运行参数确认：
 
-从 2026-07-28 起，Tab4 `setting` 提供保存格式下拉框。`BIN (.bin)` 保持原裸二进制保存行为不变；`Bitshuffle+Zstd (.bz)` 启用新的按包实时压缩保存链路。
+- `ScanRate`
+- `Length/Save`
+- `Length/File`
+- 数据源 Raw/PHASE
+- 通道数
+- 每帧有效点数
+- 是否使用单通道 PHASE crop
+- `Save DS`
 
-`.bz` 文件由一个 `BZF1` 文件头和多个独立 packet 组成。每个 packet 使用 `BZS1` header，payload 为 `int32` 数据先执行 Bitshuffle，再用 Zstd 压缩。默认参数为 `Zstd level=3`、`Bitshuffle block=65536` 个 `int32` 值，二者均可在 Tab4 调整。文件头记录 `scan_rate_hz`、`points_per_frame`、`channel_num`、`data_source`、`storage_downsample_factor`、`packet_frames`、`file_duration_s`、压缩级别和 block 参数；packet header 记录 `packet_index`、`timestamp_ns`、`frames`、原始字节数、shuffle 后字节数、压缩后字节数以及 raw/payload CRC32。
+## 4. .bz 保存行为
 
-`.bz` 保存不是等完整文件时长的数据攒齐后再压缩。默认 `BZ Packet Frames=0` 表示自动使用 `scan_rate` 帧，约等于 1 秒一个 packet；GUI 也可指定任意正整数帧数。后台保存器每攒够一个 packet 的帧数就立即压缩并交给写盘线程，停止保存时会把不足一个 packet 的尾包写入文件。`BZ File(s)` 默认 60 秒，用于决定 `.bz` 文件轮转边界。
+`.bz` 仍是自描述的 Bitshuffle+Zstd packet 文件格式。当前 UI 不再暴露 `BZ Packet Frames` 和 `BZ File(s)`，而是用统一的：
 
-日志会输出 `.bz` raw queue、compressed queue、pending frames、`cache`、`dropped`、`not_realtime`、压缩耗时和写盘耗时。`cache=True` 表示保存链路当前存在 raw queue、compressed queue 或未满 packet 的 pending frames；`dropped` 或 `not_realtime` 增长表示压缩/写盘未能跟上实时采集，或队列已满导致数据被丢弃，需要降低采集速率、增加 `Save DS`、调大 packet、降低压缩压力或改用 `.bin`。
-## 6. 分文件策略
+```text
+packet_frames = Length/Save * ScanRate
+file_frames = Length/File * ScanRate
+```
 
-当前主保存器是 `BlockBasedFileSaver`。它的设计思路是按“收到多少个完整采集块”来决定何时切换到下一个文件，而不是按固定时长、固定字节数或 GUI 刷新次数切换。这样设计的直接好处是，文件边界与采集块边界一致，不容易在切换文件时把同一块数据一分为二，也更容易基于 `FrameLoad` 和 `blocks_per_file` 估算单文件大小与持续时间。
+`.bz` 文件由 `BZF1` 文件头和多个 `BZS1` packet 组成。每个 packet 先做 bitshuffle，再用 zstd 压缩。Tab4 仍保留两个压缩相关参数：
 
-界面上的保存切分参数已经命名为 `Blocks/File`。这里的 `Block` 指一次 `FrameLoad` 读取形成的完整采集块，关系是：
+- `Zstd Level`：默认 `3`。
+- `Bitshuffle Block`：默认 `65536` 个 int32 值。
 
-$$
-1\ \mathrm{Block} = \mathrm{FrameLoad}\ \mathrm{frames}
-$$
+`.bz` 和 `.bin` 的保存节奏现在一致：默认每 1 秒形成一个保存包，每 10 秒切一个文件。区别只是 `.bin` 写连续 int32 字节流，`.bz` 写带 packet header 的压缩包。
 
-因此 `Blocks/File` 不是“每个文件多少单帧”，而是“每个文件保存多少个完整采集块”。例如 `ScanRate=1000 Hz`、`FrameLoad=1000` 时，一个完整块覆盖
+## 5. Save DS
 
-$$
-T_{\mathrm{block}} = \frac{1000}{1000}=1\ \mathrm{s}
-$$
+`Save DS` 是保存侧专用点抽样因子，默认 `1` 表示不抽样。设置为 `N` 时，每帧按点位保留：
 
-若此时 `Blocks/File=10`，程序会约每秒把一个完整块追加写入当前 `.bin`，写满 10 个块后切到下一个文件。换句话说，写入节奏约为 1 秒一次，分文件节奏约为 10 秒一次；它不是攒够 10 秒后才一次性写盘。
+```text
+0, N, 2N, 3N, ...
+```
 
-如果把每个完整采集块的元素数记为 $N_{\mathrm{block}}$，单点字节数记为 $S_{\mathrm{point}}$，则一个块的字节数是
+它只影响落盘数据，不影响：
 
-$$
-B_{\mathrm{block}} = N_{\mathrm{block}} \times S_{\mathrm{point}}
-$$
+- Tab1 波形显示
+- PSD
+- Tab1/Tab2 FILTER
+- Time-Space 显示
+- Tab3 TCP 通信
 
-若每个文件保存 `blocks_per_file` 个完整块，则单文件理论大小约为
+多通道数据会按每帧点位抽样并保留完整通道列，避免通道错位。
 
-$$
-B_{\mathrm{file}} = \mathrm{blocks\_per\_file} \times B_{\mathrm{block}}
-$$
+## 6. 文件大小估算
 
-单个 `.bin` 文件达到 200 MB 通常不是导致界面卡顿的直接原因，因为当前保存链路不会攒够 200 MB 后一次性写入，而是每个完整块到达后由后台保存线程持续追加写当前文件。`Blocks/File` 设大只会降低切文件频率、增大单文件体积；真正需要关注的是持续写入速率、保存队列是否堆积，以及分文件或停止保存时 `flush/close` 是否明显耗时。一般来说，本机 SSD 上 100 MB 到 300 MB 的单文件大小比较合理；超过 1 GB 虽然也可能工作，但离线拷贝、解析和异常恢复都会更麻烦，不建议作为默认值。
+保存平均吞吐主要由每帧有效点数、`Save DS`、`ScanRate`、通道数和单点字节数决定：
 
+```text
+saved_points_per_frame = ceil(source_points_per_frame / SaveDS)
+bytes_per_second = saved_points_per_frame * ScanRate * ChannelNum * bytes_per_point
+file_bytes = bytes_per_second * Length/File
+```
 
-### 6.1 Runtime Save Enable and Missing Directory Creation
+当前保存器保守按 `int32` 估算：
 
-As of the 2026-07-17 fix, enabling storage while acquisition is already running is an active operation, not only a pending UI setting. `save_enable_check.toggled` is connected to `_on_save_enable_toggled()`. When the active acquisition thread is running, that handler calls `_start_data_saver(self.params)`, using the current `Path` and `Blocks/File` values from the main window.
+```text
+bytes_per_point = 4
+```
 
-The actual directory creation remains inside `BlockBasedFileSaver.start()`. Before opening the `.bin` file, it calls `self.save_path.mkdir(parents=True, exist_ok=True)`, so a missing target folder, including nested folders, is created automatically. Starting acquisition with `Enable` already checked and enabling storage during an active run now share the same `_start_data_saver()` path, which keeps directory creation, filename setup, status updates, and error handling consistent.
+`Length/Load` 不改变每秒总数据量，只改变 DLL 单次读取大小和读取频率。`Length/Save` 不改变每秒总数据量，只改变后台写盘/压缩包粒度。`Length/File` 决定单文件目标时长和单文件大小。
 
-Only full data blocks received after the saver has successfully started are queued to disk. Earlier blocks are not replayed. If runtime storage startup fails, the UI rolls `Save` back to `Off`, clears the `Enable` checkbox, and shows a storage error dialog. If storage startup fails during the acquisition start sequence, the code attempts to stop device acquisition before returning. Stopping acquisition closes the active saver but preserves the `Enable` configuration for the next run; unchecking `Enable` during a run stops the saver and disables storage configuration.
+## 7. 队列和实时性判断
 
-This runtime-enable change does not route saved data through the GUI display path. Saved data still comes from the complete acquisition block path and is not affected by GUI `rad`, Tab1/Tab2 display FILTER, or PSD processing. The optional `Save DS` point-picking step is the only storage-side reduction and it is applied immediately before enqueueing data to the saver.
+保存器前端仍使用非阻塞队列。采集侧入队失败时会丢弃当前待保存块或 packet，并记录 `dropped_blocks`。这条策略优先保护采集线程和 GUI 不被磁盘反压拖死。
 
-## 7. 队列、背压与丢块策略
+现场判断保存链路是否健康，应重点看日志中的：
 
-保存器前端使用 `queue.Queue(maxsize=buffer_size)`，采集侧或主窗口侧调用 `save_block()` 时最终使用 `put_nowait()` 非阻塞入队。如果队列已满，当前块会被直接丢弃，并增加 `dropped_blocks` 计数，同时输出告警日志。这个策略意味着：在保存链路无法跟上持续采集速率时，程序不会因为等待磁盘而阻塞前台线程，而是宁可丢失部分待保存块。
+- `queue_size` / `raw_queue_size`
+- `.bz` 的 `compressed_queue_size`
+- `pending_frames / packet_frames`
+- `dropped_blocks`
+- `.bz` 的 `compression_not_realtime_count`
+- `last_write_ms`
+- `.bz` 的 `last_compress_ms`
 
-这种取舍在工程上是合理的，因为在当前架构里，保存线程的阻塞不能反向拖死 GUI 或采集线程。但它也带来一个很现实的结论：只要磁盘吞吐、文件系统抖动或目标路径问题让后台写盘明显落后，保存结果就不再天然等于“完整采集历史”。因此，正式实验前应先用目标参数组合做持续写盘测试，而不是默认保存一定可靠。
+如果队列持续上升、`dropped_blocks` 增加，或者 `.bz` 的 `compression_not_realtime_count` 增加，说明保存链路跟不上实时采集。此时应降低采集负载、增大 `Save DS`、降低压缩等级、缩小 `Length/Save` 或改用 `.bin` 验证磁盘吞吐。
 
-平均每秒保存量主要由每帧有效点数、`Save DS` 后的保留点数、`ScanRate`、通道数和保存字节数决定，而不是由 `FrameLoad` 或 `Blocks/File` 决定。若保存降采样因子为 $d_{save}$，估算公式为：
+## 8. 新旧参数对照
 
-$$
-R_{\mathrm{save}} =
-\left\lceil \frac{\mathrm{points\_per\_frame}}{d_{save}} \right\rceil \times
-\mathrm{ScanRate} \times
-\mathrm{ChannelNum} \times
-S_{\mathrm{point}}
-$$
+| 旧参数 | 新参数 | 说明 |
+|---|---|---|
+| `FrameLoad` | `Length/Load` | 从“帧数”改为“秒”，运行时换算成一次 DLL 读取帧数。 |
+| `FramePlot` | `Length/Plot` | 从“帧数”改为“秒”，可以大于 `Length/Load`，显示链路会跨多个采集块保留最新窗口。 |
+| `Blocks/File` | `Length/File` | 不再按采集块个数分文件，改为按文件目标时长分文件。 |
+| `BZ Packet Frames` | `Length/Save` | `.bin` 和 `.bz` 统一使用保存包时长。 |
+| `BZ File(s)` | `Length/File` | `.bin` 和 `.bz` 统一使用文件时长。 |
 
-当前保存器会把非 `int32` 的 NumPy 数组转成 `int32` 后落盘，因此保守估算时可先取 $S_{\mathrm{point}}=4$ 字节。`FrameLoad` 改变的是单块大小和单块周期：
+## 9. 离线解析建议
 
-$$
-T_{\mathrm{block}} = \frac{\mathrm{FrameLoad}}{\mathrm{ScanRate}}
-$$
+`.bin` 文件本身仍不自描述，离线解析前至少要确认：数据源、通道数、保存点数、`Length/Save`、`Length/File`、`Save DS`、PHASE merge/crop 参数和采集开始时间。
 
-如果 `last_write_ms` 长期明显小于 `T_{\mathrm{block}}`，并且保存队列接近 0、`dropped_blocks=0`，说明保存链路健康。反之，如果 `last_write_ms` 经常接近或超过单块周期，`Storage queue` 持续上涨，或者 `dropped_blocks` 增加，就说明保存链路已经跟不上持续采集速率。
+PHASE 单通道 `.bin` 常见恢复方式：
 
-工程建议是：长期正式保存尽量控制在 30 到 80 MB/s；本机 SSD 上 50 到 150 MB/s 通常需要结合日志确认；超过 150 MB/s 不应默认可靠，必须做持续测试；机械硬盘、移动硬盘、U 盘或网络盘建议更保守，优先控制在 30 到 60 MB/s。现场判断时不要只看磁盘标称速度，因为程序还包含 DLL 读取、NumPy 数组传递、可能的 `int32` 转换、后台队列和 GUI 线程等额外开销。
+```text
+matrix = int32_file.reshape(total_frames, effective_points_per_frame_after_SaveDS)
+```
 
-从后续演进角度看，如果要提升可靠性，可以从三条线入手。第一，增加更明确的保存状态提示，例如连续告警、红色状态栏或自动停止策略。第二，引入可选的阻塞/非阻塞模式，允许不同场景在实时性和完整性之间做选择。第三，在后台保存器中增加更明确的错误恢复协议，而不仅仅是持续记录异常。
+如果需要恢复为弧度显示值：
 
-## 8. 磁盘异常行为
+```text
+phase_rad = phase_int32 / 32767 * pi
+```
 
-当前版本的保存线程在遇到写盘异常时，会记录错误日志，但不会因此自动退出整个程序。历史上这个项目曾尝试过“磁盘写满后自动恢复”的状态机，但该方案后续已回退，不再是当前主线行为。现在的行为更加保守：遇到异常就报错，线程继续尝试处理后续队列项，至于释放磁盘空间后是否能恢复连续写入，则取决于底层文件句柄和操作系统状态。
+`.bz` 文件头会记录更多元数据，但由于 `Length/File` 的运行边界实际以帧数控制，离线工具最好以 packet header 中的 `frames` 为准恢复总帧数，而不是只依赖文件名或目标时长。
 
-这意味着现场使用时不能把“程序还没崩”误认为“保存还在正常进行”。一旦日志中出现持续的写盘错误，就应立即检查目标盘剩余空间、目录可写性和保存状态统计，而不是继续长时间采集后再追溯数据缺失原因。
+## 7. 近期更新（2026-08-12）
 
-## 9. 显示链路与保存链路为什么要分离
-
-当前版本之所以明显强调“完整块进入保存，显示只拿最新快照”，根本原因在于 GUI 不适合承载大数组历史队列。早期如果每个 `FrameLoad` 对应的大数组都作为 Qt 信号参数排队进入主线程，主线程即使最终只画很少几条曲线，也要先处理这些历史回调，STOP 信号和界面状态变化就会一起滞后。现在通过完整块直达保存器、显示只取最新快照，保存链路与 GUI 刷新脱钩，显著降低了 GUI 积压对保存行为的干扰。
-
-对于类似项目而言，这是非常值得复用的经验：只要一个操作的目标是“归档完整数据”，它就不应该依赖 GUI 回调的及时执行；只要一个操作的目标是“让用户看到当前最新状态”，它就不应该背着一长串历史数组排队执行。把这两类需求混成同一条数据通道，迟早会在高吞吐场景下暴露问题。
-
-## 10. 离线解析建议
-
-由于当前文件格式不自描述，离线解析前至少要确认以下条件：数据源是 Raw 还是 PHASE，保存时是否启用了单通道 PHASE 裁剪，`FrameLoad` 与每块实际点数是多少，通道数是多少，`Blocks/File` 设置是多少，以及当前文件是一块一写还是多块拼接。若是 PHASE 单通道文件，常见恢复方式是先按 `int32` 读入一维数组，再根据
-
-$$
-\mathrm{points\_per\_block} = \mathrm{frame\_load} \times \mathrm{effective\_points\_per\_frame}
-$$
-
-恢复成二维矩阵，其中 `effective_points_per_frame` 需要结合 `merge_point_num`、裁剪范围和 `Save DS` 后的保留点数计算。如果要还原到 GUI 中看到的弧度，可再按
-
-$$
-\phi_{\mathrm{rad}} = \frac{\phi_{\mathrm{int32}}}{32767} \pi
-$$
-
-转换。
-
-在编写离线脚本时，不建议把所有推断逻辑写死在一个函数里。更稳妥的做法是把读取参数、裁剪参数和显示转换规则显式作为输入，这样文件一旦来自不同批次实验或不同版本程序，也更容易排查差异。
-
-## 11. 对后续类似项目的建议
-
-如果要在这个项目基础上继续发展存储系统，建议先明确目标到底是“联调可用”还是“归档可靠”。当前版本更偏前者，因此保存链路追求简单、低阻塞和易定位。若目标转向长期归档，可优先增加 sidecar 元数据、文件头版本号和更明确的错误状态，而不是一开始就大改线程模型。反过来，如果目标仍是高速联调，则应继续保持当前这种轻量写盘路径，并把更多精力投入到日志、状态提示和离线校验工具上。
+- Tab 3 `.bz` 存储线程保留队列水位和丢弃统计：`raw_queue_size/max`、`packet_queue_size/max`、`compressed_queue_size/max`、`dropped_count`、`packet_queue_full_count`、`compressed_queue_full_count`。
+- `.bz` 压缩实时性指标已拆分：`slow_compression_packet_count` 表示单包压缩耗时超过对应采集时长；`compression_not_realtime_count` 仅表示队列满、打包/压缩失败等明确实时链路风险。
+- Tab 3 存储状态栏现在显示 `.bz dropped / queue / max / slow / notRT / full`，区分“压缩慢但队列健康”和“实时存储链路异常”。
+- `.bz` 停止日志会输出最终队列峰值、丢弃数、慢压缩包数、队列满次数、worker 数和最大压缩耗时，便于从测试日志直接判断是否存在实时存储丢数据。
+- 采集线程周期日志新增 `api_read_ms`、`dispatch_ms`、`display_pub_ms`、`save_slow_compress` 等字段，用于关联采集缓冲积压、GUI 显示压力和本地保存状态。

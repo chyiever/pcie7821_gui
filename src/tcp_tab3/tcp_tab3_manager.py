@@ -7,7 +7,9 @@
 """
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, List
+
+import numpy as np
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
@@ -31,6 +33,9 @@ class TCPTab3Manager(QObject):
         self._enabled = True
         self._session_ready = False
         self._availability_reason = "Waiting for acquisition parameters."
+        self._pending_comm_chunks: List[np.ndarray] = []
+        self._pending_comm_frames = 0
+        self._pending_comm_signature = None
 
     def shutdown(self) -> None:
         """Release the background worker."""
@@ -57,6 +62,12 @@ class TCPTab3Manager(QObject):
         elif params.phase_demod.merge_point_num <= 0:
             allowed = False
             reason = "Invalid merge setting."
+        else:
+            load_frames = max(1, int(getattr(params.display, "frame_load_num", 1)))
+            comm_frames = max(1, int(getattr(params.comm, "comm_frame_num", load_frames)))
+            if comm_frames % load_frames != 0:
+                allowed = False
+                reason = "Length/Comm must be an integer multiple of Length/Load."
 
         if not self._enabled:
             allowed = False
@@ -91,6 +102,7 @@ class TCPTab3Manager(QObject):
             )
             return False
 
+        self._reset_pending_comm_frames()
         self._worker.start_session()
         self._session_ready = True
         return True
@@ -98,13 +110,19 @@ class TCPTab3Manager(QObject):
     def stop_session(self) -> None:
         """Stop the current communication session."""
         self._session_ready = False
+        self._reset_pending_comm_frames()
         self._worker.stop_session()
 
     def enqueue_phase_data(self, phase_data, params: AllParams, settings_dict: Dict[str, object]) -> None:
-        """Queue one raw phase block for background transmission."""
+        """Queue phase data after aggregating Length/Load blocks into Length/Comm packets."""
         if not self._session_ready:
             return
 
+        load_frame_num = max(1, int(params.display.frame_load_num))
+        comm_frames = max(
+            1,
+            int(settings_dict.get("comm_frames", getattr(params.comm, "comm_frame_num", load_frame_num))),
+        )
         settings = CommSettings(
             enabled=bool(settings_dict.get("enabled", True)),
             server_ip=str(settings_dict.get("server_ip", "169.255.1.2")),
@@ -113,26 +131,107 @@ class TCPTab3Manager(QObject):
             channel_end=int(settings_dict.get("channel_end", 100)),
             time_downsample=int(settings_dict.get("time_downsample", 1)),
             space_downsample=int(settings_dict.get("space_downsample", 1)),
+            comm_frames=comm_frames,
             reconnect_interval_s=float(settings_dict.get("reconnect_interval_s", 1.0)),
             queue_max_packets=int(settings_dict.get("queue_max_packets", 8)),
         )
         if not settings.enabled:
             return
+        if comm_frames % load_frame_num != 0:
+            self._emit_error("Length/Comm must be an integer multiple of Length/Load.")
+            return
 
-        context = AcquisitionContext(
-            scan_rate_hz=int(params.basic.scan_rate),
-            frame_num=int(params.display.frame_load_num),
-            point_num_after_merge=calculate_cropped_point_count(
-                calculate_phase_point_num(
-                    params.basic.point_num_per_scan,
-                    params.phase_demod.merge_point_num,
-                ),
-                params.phase_demod.crop_distance_start,
-                params.phase_demod.crop_distance_end,
+        point_num_after_merge = calculate_cropped_point_count(
+            calculate_phase_point_num(
+                params.basic.point_num_per_scan,
+                params.phase_demod.merge_point_num,
             ),
+            params.phase_demod.crop_distance_start,
+            params.phase_demod.crop_distance_end,
         )
-        item = PhaseQueueItem(phase_data=phase_data, settings=settings, context=context)
-        self._worker.enqueue(item)
+        try:
+            matrix = self._coerce_phase_block_to_matrix(
+                phase_data,
+                load_frame_num,
+                point_num_after_merge,
+            )
+        except ValueError as exc:
+            self._emit_error(str(exc))
+            return
+
+        self._append_comm_frames(
+            matrix,
+            settings,
+            scan_rate_hz=int(params.basic.scan_rate),
+            point_num_after_merge=point_num_after_merge,
+        )
+
+
+    def _reset_pending_comm_frames(self) -> None:
+        self._pending_comm_chunks = []
+        self._pending_comm_frames = 0
+        self._pending_comm_signature = None
+
+    def _coerce_phase_block_to_matrix(self, phase_data, frame_num: int, point_num_after_merge: int) -> np.ndarray:
+        flat = np.asarray(phase_data)
+        if flat.ndim > 1:
+            flat = flat.reshape(-1)
+        expected = int(frame_num) * int(point_num_after_merge)
+        if flat.size != expected:
+            raise ValueError(f"Unexpected phase block size for TCP: expected={expected}, actual={flat.size}.")
+        return np.ascontiguousarray(flat.reshape(int(frame_num), int(point_num_after_merge)))
+
+    def _append_comm_frames(
+        self,
+        frame_matrix: np.ndarray,
+        settings: CommSettings,
+        *,
+        scan_rate_hz: int,
+        point_num_after_merge: int,
+    ) -> None:
+        signature = (int(scan_rate_hz), int(point_num_after_merge), int(settings.comm_frames))
+        if self._pending_comm_signature != signature:
+            self._reset_pending_comm_frames()
+            self._pending_comm_signature = signature
+
+        self._pending_comm_chunks.append(np.ascontiguousarray(frame_matrix))
+        self._pending_comm_frames += int(frame_matrix.shape[0])
+        while self._pending_comm_frames >= settings.comm_frames:
+            packet_matrix = self._take_pending_comm_frames(settings.comm_frames)
+            context = AcquisitionContext(
+                scan_rate_hz=int(scan_rate_hz),
+                frame_num=int(packet_matrix.shape[0]),
+                point_num_after_merge=int(point_num_after_merge),
+            )
+            item = PhaseQueueItem(
+                phase_data=np.ascontiguousarray(packet_matrix.reshape(-1)),
+                settings=settings,
+                context=context,
+            )
+            self._worker.enqueue(item)
+
+    def _take_pending_comm_frames(self, frame_count: int) -> np.ndarray:
+        remaining = int(frame_count)
+        parts: List[np.ndarray] = []
+        while remaining > 0 and self._pending_comm_chunks:
+            chunk = self._pending_comm_chunks[0]
+            take = min(remaining, int(chunk.shape[0]))
+            parts.append(chunk[:take])
+            if take == chunk.shape[0]:
+                self._pending_comm_chunks.pop(0)
+            else:
+                self._pending_comm_chunks[0] = chunk[take:]
+            self._pending_comm_frames -= take
+            remaining -= take
+
+        if not parts:
+            width = 0
+            if self._pending_comm_signature is not None:
+                width = int(self._pending_comm_signature[1])
+            return np.empty((0, width), dtype=np.int32)
+        if len(parts) == 1:
+            return np.ascontiguousarray(parts[0])
+        return np.ascontiguousarray(np.concatenate(parts, axis=0))
 
     def _emit_status(self, payload: dict) -> None:
         self.status_changed.emit(payload)

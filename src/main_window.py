@@ -132,6 +132,7 @@ class MainWindow(QMainWindow):
         self._last_acq_snapshot_log_time = 0.0
         self._recovery_in_progress = False
         self._last_recovery_time = 0.0
+        self._fatal_acq_error_stop_pending = False
         self._full_data_count = 0
         self._save_file_count_this_run = 0
         self._tcp_settings_snapshot: Dict[str, Any] = {}
@@ -162,10 +163,11 @@ class MainWindow(QMainWindow):
         self._status_timer.timeout.connect(self._update_status)
         self._status_timer.start(MONITOR_UPDATE_INTERVALS['buffer_status_ms'])
 
-        # Consume only the newest display snapshot; acquisition never queues large arrays to Qt.
+        # Consume only the newest display snapshot. The interval follows Length/Plot.
         self._display_timer = QTimer(self)
         self._display_timer.timeout.connect(self._drain_latest_display_data)
-        self._display_timer.start(100)
+        self._display_timer_interval_ms = 0
+        self._configure_display_timer(self.params)
 
         # System monitoring timer (slower update)
         self._system_timer = QTimer(self)
@@ -322,92 +324,45 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        # Basic Parameters Group - Two columns layout
+        # Basic Parameters Group - keep high-frequency field controls on Tab1.
         basic_group = QGroupBox("Basic Parameters")
         basic_layout = QGridLayout(basic_group)
         basic_layout.setSpacing(4)
         basic_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Row 0: Clock Source (spans 2 cols) | Trigger Dir (spans 2 cols)
-        basic_layout.addWidget(QLabel("Clock:"), 0, 0)
-        self.clk_internal_radio = QRadioButton("Int")
-        self.clk_external_radio = QRadioButton("Ext")
-        self.clk_internal_radio.setChecked(True)
-        clk_group = QButtonGroup(self)
-        clk_group.addButton(self.clk_internal_radio, 0)
-        clk_group.addButton(self.clk_external_radio, 1)
-        clk_layout = QHBoxLayout()
-        clk_layout.setSpacing(2)
-        clk_layout.addWidget(self.clk_internal_radio)
-        clk_layout.addWidget(self.clk_external_radio)
-        basic_layout.addLayout(clk_layout, 0, 1)
-
-        basic_layout.addWidget(QLabel("Trig:"), 0, 2)
-        self.trig_in_radio = QRadioButton("In")
-        self.trig_out_radio = QRadioButton("Out")
-        self.trig_out_radio.setChecked(True)
-        trig_group = QButtonGroup(self)
-        trig_group.addButton(self.trig_in_radio, 0)
-        trig_group.addButton(self.trig_out_radio, 1)
-        trig_layout = QHBoxLayout()
-        trig_layout.setSpacing(2)
-        trig_layout.addWidget(self.trig_in_radio)
-        trig_layout.addWidget(self.trig_out_radio)
-        basic_layout.addLayout(trig_layout, 0, 3)
-
-        # Row 1: Scan Rate | Pulse Width
-        basic_layout.addWidget(QLabel("Scan(Hz):"), 1, 0)
+        basic_layout.addWidget(QLabel("Scan(Hz):"), 0, 0)
         self.scan_rate_spin = QSpinBox()
         self.scan_rate_spin.setRange(1, 1000000)
         self.scan_rate_spin.setValue(2000)
         self.scan_rate_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.scan_rate_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        basic_layout.addWidget(self.scan_rate_spin, 1, 1)
+        basic_layout.addWidget(self.scan_rate_spin, 0, 1)
 
-        basic_layout.addWidget(QLabel("Pulse(ns):"), 1, 2)
+        basic_layout.addWidget(QLabel("Pulse(ns):"), 0, 2)
         self.pulse_width_spin = QSpinBox()
         self.pulse_width_spin.setRange(10, 1000000)
         self.pulse_width_spin.setValue(100)
         self.pulse_width_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.pulse_width_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        basic_layout.addWidget(self.pulse_width_spin, 1, 3)
+        basic_layout.addWidget(self.pulse_width_spin, 0, 3)
 
-        # Row 2: Points/Scan | Bypass
-        basic_layout.addWidget(QLabel("Points:"), 2, 0)
+        basic_layout.addWidget(QLabel("Points:"), 1, 0)
         self.point_num_spin = QSpinBox()
         self.point_num_spin.setRange(512, 10000000)
         self.point_num_spin.setValue(20480)
         self.point_num_spin.setSingleStep(512)
         self.point_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.point_num_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        basic_layout.addWidget(self.point_num_spin, 2, 1)
-
-        basic_layout.addWidget(QLabel("Bypass:"), 2, 2)
-        self.bypass_spin = QSpinBox()
-        self.bypass_spin.setRange(0, 10000000)
-        self.bypass_spin.setValue(60)
-        self.bypass_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.bypass_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        basic_layout.addWidget(self.bypass_spin, 2, 3)
-
-        # Row 3: Center Freq (spans full width for clarity)
-        basic_layout.addWidget(QLabel("CenterFreq(MHz):"), 3, 0, 1, 2)
-        self.center_freq_spin = QSpinBox()
-        self.center_freq_spin.setRange(1, 100000)
-        self.center_freq_spin.setValue(200)
-        self.center_freq_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.center_freq_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        basic_layout.addWidget(self.center_freq_spin, 3, 2, 1, 2)
+        basic_layout.addWidget(self.point_num_spin, 1, 1)
 
         layout.addWidget(basic_group)
 
-        # Upload Parameters Group - Two columns layout
+        # Upload Parameters Group - primary data stream selection.
         upload_group = QGroupBox("Upload Parameters")
         upload_layout = QGridLayout(upload_group)
         upload_layout.setSpacing(4)
         upload_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Row 0: Channels | Data Source
         upload_layout.addWidget(QLabel("Channels:"), 0, 0)
         self.channel_combo = QComboBox()
         for label, value in CHANNEL_NUM_OPTIONS:
@@ -423,101 +378,76 @@ class MainWindow(QMainWindow):
         self.data_source_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
         upload_layout.addWidget(self.data_source_combo, 0, 3)
 
-        # Row 1: Data Rate
-        upload_layout.addWidget(QLabel("DataRate:"), 1, 0)
-        self.data_rate_combo = QComboBox()
-        for label, value in DATA_RATE_OPTIONS:
-            self.data_rate_combo.addItem(label, value)
-        self.data_rate_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
-        upload_layout.addWidget(self.data_rate_combo, 1, 1)
-
         layout.addWidget(upload_group)
 
-        # Phase Demodulation Parameters Group - Two columns layout
+        # Phase Demodulation Parameters Group - algorithm parameters used frequently in the field.
         phase_group = QGroupBox("Phase Demod Parameters")
         phase_layout = QGridLayout(phase_group)
         phase_layout.setSpacing(4)
         phase_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Row 0: Rate2Phase | Space Avg
-        phase_layout.addWidget(QLabel("Rate2Phase:"), 0, 0)
-        self.rate2phase_combo = QComboBox()
-        for label, value in RATE2PHASE_OPTIONS:
-            self.rate2phase_combo.addItem(label, value)
-        self.rate2phase_combo.setCurrentIndex(0)  # Default 250M (index 0)
-        self.rate2phase_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
-        phase_layout.addWidget(self.rate2phase_combo, 0, 1)
-
-        phase_layout.addWidget(QLabel("SpaceAvg:"), 0, 2)
+        phase_layout.addWidget(QLabel("SpaceAvg:"), 0, 0)
         self.space_avg_spin = QSpinBox()
         self.space_avg_spin.setRange(1, 64)
         self.space_avg_spin.setValue(25)
         self.space_avg_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.space_avg_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        phase_layout.addWidget(self.space_avg_spin, 0, 3)
+        phase_layout.addWidget(self.space_avg_spin, 0, 1)
 
-        # Row 1: Merge Points | Diff Order
-        phase_layout.addWidget(QLabel("Merge:"), 1, 0)
+        phase_layout.addWidget(QLabel("Merge:"), 0, 2)
         self.merge_points_spin = QSpinBox()
         self.merge_points_spin.setRange(1, 64)
         self.merge_points_spin.setValue(25)
         self.merge_points_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.merge_points_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        phase_layout.addWidget(self.merge_points_spin, 1, 1)
+        phase_layout.addWidget(self.merge_points_spin, 0, 3)
 
-        phase_layout.addWidget(QLabel("DiffOrder:"), 1, 2)
+        phase_layout.addWidget(QLabel("DiffOrder:"), 1, 0)
         self.diff_order_spin = QSpinBox()
         self.diff_order_spin.setRange(0, 4)
         self.diff_order_spin.setValue(1)
         self.diff_order_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.diff_order_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        phase_layout.addWidget(self.diff_order_spin, 1, 3)
+        phase_layout.addWidget(self.diff_order_spin, 1, 1)
 
-        # Row 2: Detrend BW | Polarization
-        phase_layout.addWidget(QLabel("Detrend(Hz):"), 2, 0)
+        phase_layout.addWidget(QLabel("Detrend(Hz):"), 1, 2)
         self.detrend_bw_spin = QDoubleSpinBox()
         self.detrend_bw_spin.setRange(0.0, 1000000.0)
-        self.detrend_bw_spin.setValue(10.0)  # 默认值为 10 Hz
+        self.detrend_bw_spin.setValue(10.0)
         self.detrend_bw_spin.setSingleStep(0.1)
         self.detrend_bw_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.detrend_bw_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        phase_layout.addWidget(self.detrend_bw_spin, 2, 1)
+        phase_layout.addWidget(self.detrend_bw_spin, 1, 3)
 
-        self.polar_div_check = QCheckBox("PolarDiv")
-        self.polar_div_check.setChecked(True)  # 默认启用偏振分集
-        phase_layout.addWidget(self.polar_div_check, 2, 2, 1, 2)
-
-        phase_layout.addWidget(QLabel("CropStart:"), 3, 0)
+        phase_layout.addWidget(QLabel("CropStart:"), 2, 0)
         self.crop_distance_start_spin = QSpinBox()
         self.crop_distance_start_spin.setRange(0, 10000000)
         self.crop_distance_start_spin.setValue(0)
         self.crop_distance_start_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.crop_distance_start_spin.setMaximumWidth(INPUT_MAX_WIDTH)
         self.crop_distance_start_spin.setToolTip("Single-channel PHASE only. 0 with CropEnd=0 keeps the full range.")
-        phase_layout.addWidget(self.crop_distance_start_spin, 3, 1)
+        phase_layout.addWidget(self.crop_distance_start_spin, 2, 1)
 
-        phase_layout.addWidget(QLabel("CropEnd:"), 3, 2)
+        phase_layout.addWidget(QLabel("CropEnd:"), 2, 2)
         self.crop_distance_end_spin = QSpinBox()
         self.crop_distance_end_spin.setRange(0, 10000000)
         self.crop_distance_end_spin.setValue(0)
         self.crop_distance_end_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.crop_distance_end_spin.setMaximumWidth(INPUT_MAX_WIDTH)
         self.crop_distance_end_spin.setToolTip("Single-channel PHASE only. End is exclusive; values above total points are clamped.")
-        phase_layout.addWidget(self.crop_distance_end_spin, 3, 3)
+        phase_layout.addWidget(self.crop_distance_end_spin, 2, 3)
 
         layout.addWidget(phase_group)
 
-        # Display Control Group - Two columns layout
+        # Display Control Group - display-only switches and view selection.
         display_group = QGroupBox("Display Control")
         display_layout = QGridLayout(display_group)
         display_layout.setSpacing(4)
         display_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Row 0: Mode | Region Index
         display_layout.addWidget(QLabel("Mode:"), 0, 0)
         self.mode_time_radio = QRadioButton("Time")
         self.mode_space_radio = QRadioButton("Space")
-        # Time-space moved to Tab2; Tab1 keeps Time and Space modes.
         self.mode_time_radio.setChecked(True)
         mode_group = QButtonGroup(self)
         mode_group.addButton(self.mode_time_radio, 0)
@@ -533,27 +463,9 @@ class MainWindow(QMainWindow):
         self.region_index_spin.setRange(0, 10000000)
         self.region_index_spin.setValue(0)
         self.region_index_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.region_index_spin.setMaximumWidth(60)  # 缩小 Region 输入框宽度
+        self.region_index_spin.setMaximumWidth(60)
         display_layout.addWidget(self.region_index_spin, 0, 3)
 
-        # Row 1: FrameLoad | FramePlot
-        display_layout.addWidget(QLabel("FrameLoad:"), 1, 0)
-        self.frame_load_num_spin = QSpinBox()
-        self.frame_load_num_spin.setRange(0, 1000000)
-        self.frame_load_num_spin.setValue(1024)
-        self.frame_load_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.frame_load_num_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        display_layout.addWidget(self.frame_load_num_spin, 1, 1)
-
-        display_layout.addWidget(QLabel("FramePlot:"), 1, 2)
-        self.frame_plot_num_spin = QSpinBox()
-        self.frame_plot_num_spin.setRange(0, 1000000)
-        self.frame_plot_num_spin.setValue(1024)
-        self.frame_plot_num_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.frame_plot_num_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        display_layout.addWidget(self.frame_plot_num_spin, 1, 3)
-
-        # Row 2: waveform / PSD / monitor / rad switches
         display_switch_layout = QHBoxLayout()
         display_switch_layout.setSpacing(24)
         display_switch_layout.setContentsMargins(0, 0, 0, 0)
@@ -575,16 +487,14 @@ class MainWindow(QMainWindow):
 
         self.rad_check = QCheckBox("rad")
         self.rad_check.setToolTip("Convert phase data to radians for display only: display = data / 32767 * pi\n(Storage always saves original int32 data)")
-        self.rad_check.setChecked(True)  # Default checked
+        self.rad_check.setChecked(True)
         display_switch_layout.addWidget(self.rad_check)
         display_switch_layout.addStretch(1)
-        display_layout.addLayout(display_switch_layout, 2, 0, 1, 4)
+        display_layout.addLayout(display_switch_layout, 1, 0, 1, 4)
 
-        # Kept for status/tooltips, no longer shown as a separate option label.
         self.analysis_type_label = QLabel("PSD")
         self.analysis_type_label.setVisible(False)
 
-        # Row 3: shared filter controls for Tab1 phase waveform and Tab2 Time-Space
         filter_layout = QHBoxLayout()
         filter_layout.setSpacing(8)
         filter_layout.setContentsMargins(0, 0, 0, 0)
@@ -609,30 +519,29 @@ class MainWindow(QMainWindow):
         self._update_shared_filter_button_style()
         filter_layout.addWidget(self.filter_btn)
         filter_layout.addStretch(1)
-        display_layout.addLayout(filter_layout, 3, 0, 1, 4)
+        display_layout.addLayout(filter_layout, 2, 0, 1, 4)
 
         layout.addWidget(display_group)
 
-        # Save Control Group
+        # Save Control Group - operational controls only. Storage parameters live on Tab4.
         save_group = QGroupBox("Data Save")
         save_layout = QGridLayout(save_group)
         save_layout.setSpacing(4)
         save_layout.setContentsMargins(8, 12, 8, 8)
 
-        # Row 0: save toggle button | Path | storage-only downsample
         self.save_enable_check = QPushButton("SAVE")
         self.save_enable_check.setCheckable(True)
         self.save_enable_check.setFont(QFont("Times New Roman", 8, QFont.Bold))
         self.save_enable_check.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.save_enable_check.setMaximumWidth(78)
-        self.save_enable_check.setToolTip("Toggle data storage. Save DS only affects files written to disk.")
+        self.save_enable_check.setToolTip("Toggle data storage. Storage packet and file lengths are configured on Tab4.")
         self._update_save_button_style()
         save_layout.addWidget(self.save_enable_check, 0, 0)
 
         save_layout.addWidget(QLabel("Path:"), 0, 1)
         path_layout = QHBoxLayout()
         path_layout.setSpacing(4)
-        self.save_path_edit = QLineEdit(self.params.save.path)  # Use default path from config
+        self.save_path_edit = QLineEdit(self.params.save.path)
         self.save_path_edit.setMinimumHeight(INPUT_MIN_HEIGHT)
         self.browse_btn = QPushButton("...")
         self.browse_btn.setMaximumWidth(25)
@@ -640,36 +549,16 @@ class MainWindow(QMainWindow):
         self.browse_btn.clicked.connect(self._browse_save_path)
         path_layout.addWidget(self.save_path_edit, 1)
         path_layout.addWidget(self.browse_btn)
-        self.save_downsample_label = QLabel("Save DS:")
-        self.save_downsample_label.setToolTip("Storage-only downsample factor: save every Nth point without filtering.")
-        path_layout.addWidget(self.save_downsample_label)
-        self.save_downsample_spin = QSpinBox()
-        self.save_downsample_spin.setRange(1, 100000)
-        self.save_downsample_spin.setValue(self.params.save.storage_downsample_factor)
-        self.save_downsample_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.save_downsample_spin.setMaximumWidth(72)
-        self.save_downsample_spin.setToolTip("Storage-only downsample factor. 10 means keep 1 point from every 10 points.")
-        path_layout.addWidget(self.save_downsample_spin)
         save_layout.addLayout(path_layout, 0, 2, 1, 3)
 
-        # Row 1: Blocks per File | File Size Estimate | Files in this run
-        save_layout.addWidget(QLabel("Blocks/File:"), 1, 0)
-        self.blocks_per_file_spin = QSpinBox()
-        self.blocks_per_file_spin.setRange(1, 100000)
-        self.blocks_per_file_spin.setValue(self.params.save.blocks_per_file)
-        self.blocks_per_file_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
-        self.blocks_per_file_spin.setMaximumWidth(INPUT_MAX_WIDTH)
-        self.blocks_per_file_spin.valueChanged.connect(self._update_file_estimates)
-        save_layout.addWidget(self.blocks_per_file_spin, 1, 1)
-
-        save_layout.addWidget(QLabel("Est. Size:"), 1, 2)
-        self.file_size_label = QLabel("~26MB/file")
+        save_layout.addWidget(QLabel("Est. Size:"), 1, 0)
+        self.file_size_label = QLabel("~-- MB/file")
         self.file_size_label.setStyleSheet("font-weight: normal; color: #666666;")
-        save_layout.addWidget(self.file_size_label, 1, 3)
+        save_layout.addWidget(self.file_size_label, 1, 1, 1, 2)
 
         self.saved_file_count_label = QLabel("Files: 0")
         self.saved_file_count_label.setStyleSheet("font-weight: normal; color: #666666;")
-        save_layout.addWidget(self.saved_file_count_label, 1, 4)
+        save_layout.addWidget(self.saved_file_count_label, 1, 3, 1, 2)
         layout.addWidget(save_group)
 
         # Control Buttons
@@ -1076,6 +965,18 @@ class MainWindow(QMainWindow):
         self.tab3_space_downsample_spin.setValue(1)
         settings_layout.addWidget(self.tab3_space_downsample_spin, 6, 1)
 
+        self.tab3_length_comm_label = QLabel("Length/Comm:")
+        self.tab3_length_comm_label.setToolTip("Seconds per outgoing TCP packet. Must be an integer multiple of Length/Load. Default 1 s.")
+        settings_layout.addWidget(self.tab3_length_comm_label, 7, 0)
+        self.tab3_length_comm_spin = QDoubleSpinBox()
+        self.tab3_length_comm_spin.setDecimals(3)
+        self.tab3_length_comm_spin.setRange(0.001, 86400.0)
+        self.tab3_length_comm_spin.setSingleStep(0.1)
+        self.tab3_length_comm_spin.setValue(1.0)
+        self.tab3_length_comm_spin.setSuffix(" s")
+        self.tab3_length_comm_spin.setToolTip(self.tab3_length_comm_label.toolTip())
+        settings_layout.addWidget(self.tab3_length_comm_spin, 7, 1)
+
         tab3_layout.addWidget(settings_group)
 
         status_group = QGroupBox("Communication Status")
@@ -1138,11 +1039,118 @@ class MainWindow(QMainWindow):
 
 
     def _create_settings_tab(self):
-        """Create Tab4 with storage format and compression settings."""
+        """Create Tab4 with timing, hardware detail, and storage settings."""
         tab4_widget = QWidget()
         tab4_layout = QVBoxLayout(tab4_widget)
         tab4_layout.setSpacing(10)
         tab4_layout.setContentsMargins(10, 10, 10, 10)
+
+        INPUT_MIN_HEIGHT = 22
+        INPUT_MAX_WIDTH = 90
+
+        def make_length_spin(value: float, *, step: float = 0.1, maximum: float = 86400.0) -> QDoubleSpinBox:
+            spin = QDoubleSpinBox()
+            spin.setDecimals(3)
+            spin.setRange(0.001, maximum)
+            spin.setSingleStep(step)
+            spin.setValue(float(value))
+            spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+            spin.setMaximumWidth(INPUT_MAX_WIDTH)
+            spin.setSuffix(" s")
+            return spin
+
+        timing_group = QGroupBox("Acquisition Length")
+        timing_layout = QGridLayout(timing_group)
+        timing_layout.setContentsMargins(10, 12, 10, 10)
+        timing_layout.setHorizontalSpacing(10)
+        timing_layout.setVerticalSpacing(6)
+
+        self.length_load_label = QLabel("Length/Load:")
+        self.length_load_label.setToolTip("Seconds per DLL read block. Converted to frames by Scan(Hz). Default 0.2 s.")
+        timing_layout.addWidget(self.length_load_label, 0, 0)
+        self.length_load_spin = make_length_spin(self.params.display.length_load_s, step=0.1)
+        self.length_load_spin.setToolTip(self.length_load_label.toolTip())
+        timing_layout.addWidget(self.length_load_spin, 0, 1)
+
+        self.length_plot_label = QLabel("Length/Plot:")
+        self.length_plot_label.setToolTip("Seconds per waveform/PSD display update and retained display window. Must be an integer multiple of Length/Load. Default 1 s.")
+        timing_layout.addWidget(self.length_plot_label, 0, 2)
+        self.length_plot_spin = make_length_spin(self.params.display.length_plot_s, step=0.1)
+        self.length_plot_spin.setToolTip(self.length_plot_label.toolTip())
+        timing_layout.addWidget(self.length_plot_spin, 0, 3)
+
+        self.length_load_hint_label = QLabel("Load: --")
+        self.length_load_hint_label.setStyleSheet("color: #666666;")
+        timing_layout.addWidget(self.length_load_hint_label, 1, 0, 1, 4)
+        tab4_layout.addWidget(timing_group)
+
+        hardware_group = QGroupBox("Hardware Detail")
+        hardware_layout = QGridLayout(hardware_group)
+        hardware_layout.setContentsMargins(10, 12, 10, 10)
+        hardware_layout.setHorizontalSpacing(10)
+        hardware_layout.setVerticalSpacing(6)
+
+        hardware_layout.addWidget(QLabel("Clock:"), 0, 0)
+        self.clk_internal_radio = QRadioButton("Int")
+        self.clk_external_radio = QRadioButton("Ext")
+        self.clk_internal_radio.setChecked(True)
+        clk_group = QButtonGroup(self)
+        clk_group.addButton(self.clk_internal_radio, 0)
+        clk_group.addButton(self.clk_external_radio, 1)
+        clk_layout = QHBoxLayout()
+        clk_layout.setSpacing(2)
+        clk_layout.addWidget(self.clk_internal_radio)
+        clk_layout.addWidget(self.clk_external_radio)
+        hardware_layout.addLayout(clk_layout, 0, 1)
+
+        hardware_layout.addWidget(QLabel("Trig:"), 0, 2)
+        self.trig_in_radio = QRadioButton("In")
+        self.trig_out_radio = QRadioButton("Out")
+        self.trig_out_radio.setChecked(True)
+        trig_group = QButtonGroup(self)
+        trig_group.addButton(self.trig_in_radio, 0)
+        trig_group.addButton(self.trig_out_radio, 1)
+        trig_layout = QHBoxLayout()
+        trig_layout.setSpacing(2)
+        trig_layout.addWidget(self.trig_in_radio)
+        trig_layout.addWidget(self.trig_out_radio)
+        hardware_layout.addLayout(trig_layout, 0, 3)
+
+        hardware_layout.addWidget(QLabel("Bypass:"), 1, 0)
+        self.bypass_spin = QSpinBox()
+        self.bypass_spin.setRange(0, 10000000)
+        self.bypass_spin.setValue(60)
+        self.bypass_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.bypass_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        hardware_layout.addWidget(self.bypass_spin, 1, 1)
+
+        hardware_layout.addWidget(QLabel("CenterFreq(MHz):"), 1, 2)
+        self.center_freq_spin = QSpinBox()
+        self.center_freq_spin.setRange(1, 100000)
+        self.center_freq_spin.setValue(200)
+        self.center_freq_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.center_freq_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        hardware_layout.addWidget(self.center_freq_spin, 1, 3)
+
+        hardware_layout.addWidget(QLabel("DataRate:"), 2, 0)
+        self.data_rate_combo = QComboBox()
+        for label, value in DATA_RATE_OPTIONS:
+            self.data_rate_combo.addItem(label, value)
+        self.data_rate_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
+        hardware_layout.addWidget(self.data_rate_combo, 2, 1)
+
+        hardware_layout.addWidget(QLabel("Rate2Phase:"), 2, 2)
+        self.rate2phase_combo = QComboBox()
+        for label, value in RATE2PHASE_OPTIONS:
+            self.rate2phase_combo.addItem(label, value)
+        self.rate2phase_combo.setCurrentIndex(0)
+        self.rate2phase_combo.setMinimumHeight(INPUT_MIN_HEIGHT)
+        hardware_layout.addWidget(self.rate2phase_combo, 2, 3)
+
+        self.polar_div_check = QCheckBox("PolarDiv")
+        self.polar_div_check.setChecked(True)
+        hardware_layout.addWidget(self.polar_div_check, 3, 0, 1, 2)
+        tab4_layout.addWidget(hardware_group)
 
         storage_group = QGroupBox("Storage Setting")
         storage_layout = QGridLayout(storage_group)
@@ -1157,39 +1165,68 @@ class MainWindow(QMainWindow):
         self.storage_format_combo.setToolTip("Select raw .bin storage or packetized Bitshuffle+Zstd .bz storage")
         storage_layout.addWidget(self.storage_format_combo, 0, 1)
 
-        storage_layout.addWidget(QLabel("Zstd Level:"), 1, 0)
+        self.length_save_label = QLabel("Length/Save:")
+        self.length_save_label.setToolTip("Seconds per stored packet/write unit for both .bin and .bz. Must be an integer multiple of Length/Load. Default 1 s.")
+        storage_layout.addWidget(self.length_save_label, 1, 0)
+        self.length_save_spin = make_length_spin(self.params.save.length_save_s, step=0.1)
+        self.length_save_spin.setToolTip(self.length_save_label.toolTip())
+        storage_layout.addWidget(self.length_save_spin, 1, 1)
+
+        self.length_file_label = QLabel("Length/File:")
+        self.length_file_label.setToolTip("Seconds of data per output file for both .bin and .bz. Must be an integer multiple of Length/Save. Default 10 s.")
+        storage_layout.addWidget(self.length_file_label, 1, 2)
+        self.length_file_spin = make_length_spin(self.params.save.length_file_s, step=1.0)
+        self.length_file_spin.setToolTip(self.length_file_label.toolTip())
+        storage_layout.addWidget(self.length_file_spin, 1, 3)
+
+        self.save_downsample_label = QLabel("Save DS:")
+        self.save_downsample_label.setToolTip("Storage-only downsample factor: save every Nth point without filtering.")
+        storage_layout.addWidget(self.save_downsample_label, 2, 0)
+        self.save_downsample_spin = QSpinBox()
+        self.save_downsample_spin.setRange(1, 100000)
+        self.save_downsample_spin.setValue(self.params.save.storage_downsample_factor)
+        self.save_downsample_spin.setMinimumHeight(INPUT_MIN_HEIGHT)
+        self.save_downsample_spin.setMaximumWidth(INPUT_MAX_WIDTH)
+        self.save_downsample_spin.setToolTip("Storage-only downsample factor. 10 means keep 1 point from every 10 points.")
+        storage_layout.addWidget(self.save_downsample_spin, 2, 1)
+
+        self.bz_zstd_level_label = QLabel("Zstd Level:")
+        self.bz_zstd_level_label.setToolTip("Zstd compression level for .bz packets. Higher values may compress smaller but cost more CPU.")
+        storage_layout.addWidget(self.bz_zstd_level_label, 3, 0)
         self.bz_zstd_level_spin = QSpinBox()
         self.bz_zstd_level_spin.setRange(1, 22)
         self.bz_zstd_level_spin.setValue(self.params.save.bz_zstd_level)
-        storage_layout.addWidget(self.bz_zstd_level_spin, 1, 1)
+        self.bz_zstd_level_spin.setToolTip(self.bz_zstd_level_label.toolTip())
+        storage_layout.addWidget(self.bz_zstd_level_spin, 3, 1)
 
-        storage_layout.addWidget(QLabel("Bitshuffle Block:"), 2, 0)
+        self.bz_bitshuffle_block_label = QLabel("Bitshuffle Block:")
+        self.bz_bitshuffle_block_label.setToolTip("Bitshuffle compression block size in int32 values, not acquisition frames.")
+        storage_layout.addWidget(self.bz_bitshuffle_block_label, 3, 2)
         self.bz_bitshuffle_block_spin = QSpinBox()
         self.bz_bitshuffle_block_spin.setRange(1, 16777216)
         self.bz_bitshuffle_block_spin.setSingleStep(1024)
         self.bz_bitshuffle_block_spin.setValue(self.params.save.bz_bitshuffle_block_values)
-        storage_layout.addWidget(self.bz_bitshuffle_block_spin, 2, 1)
+        self.bz_bitshuffle_block_spin.setToolTip(self.bz_bitshuffle_block_label.toolTip())
+        storage_layout.addWidget(self.bz_bitshuffle_block_spin, 3, 3)
 
-        storage_layout.addWidget(QLabel("BZ Packet Frames:"), 3, 0)
-        self.bz_packet_frames_spin = QSpinBox()
-        self.bz_packet_frames_spin.setRange(0, 100000000)
-        self.bz_packet_frames_spin.setSpecialValueText("Auto 1s")
-        self.bz_packet_frames_spin.setValue(self.params.save.bz_packet_frames)
-        storage_layout.addWidget(self.bz_packet_frames_spin, 3, 1)
+        self.bz_compression_workers_label = QLabel("BZ Workers:")
+        self.bz_compression_workers_label.setToolTip("Parallel compression worker count for .bz storage. Higher values improve throughput but use more CPU.")
+        storage_layout.addWidget(self.bz_compression_workers_label, 4, 0)
+        self.bz_compression_workers_spin = QSpinBox()
+        self.bz_compression_workers_spin.setRange(1, 16)
+        self.bz_compression_workers_spin.setValue(max(1, int(getattr(self.params.save, "bz_compression_workers", 4) or 4)))
+        self.bz_compression_workers_spin.setToolTip(self.bz_compression_workers_label.toolTip())
+        storage_layout.addWidget(self.bz_compression_workers_spin, 4, 1)
 
-        storage_layout.addWidget(QLabel("BZ File(s):"), 4, 0)
-        self.bz_file_duration_spin = QSpinBox()
-        self.bz_file_duration_spin.setRange(1, 86400)
-        self.bz_file_duration_spin.setValue(self.params.save.bz_file_duration_s)
-        storage_layout.addWidget(self.bz_file_duration_spin, 4, 1)
-
-        self.bz_packet_hint_label = QLabel("Packet: --")
+        self.bz_packet_hint_label = QLabel("Save: --")
+        self.bz_packet_hint_label.setWordWrap(True)
         self.bz_packet_hint_label.setStyleSheet("color: #666666;")
-        storage_layout.addWidget(self.bz_packet_hint_label, 5, 0, 1, 2)
+        storage_layout.addWidget(self.bz_packet_hint_label, 5, 0, 1, 4)
 
         self.bz_realtime_status_label = QLabel("BZ: idle")
+        self.bz_realtime_status_label.setWordWrap(True)
         self.bz_realtime_status_label.setStyleSheet("color: #666666;")
-        storage_layout.addWidget(self.bz_realtime_status_label, 6, 0, 1, 2)
+        storage_layout.addWidget(self.bz_realtime_status_label, 6, 0, 1, 4)
 
         tab4_layout.addWidget(storage_group)
         tab4_layout.addStretch(1)
@@ -1366,16 +1403,18 @@ class MainWindow(QMainWindow):
         self.crop_distance_start_spin.valueChanged.connect(self._update_calculated_values)
         self.crop_distance_end_spin.valueChanged.connect(self._update_calculated_values)
         self.rate2phase_combo.currentIndexChanged.connect(self._update_calculated_values)
-        self.blocks_per_file_spin.valueChanged.connect(self._update_file_estimates)
+        self.length_load_spin.valueChanged.connect(self._on_length_settings_changed)
+        self.length_plot_spin.valueChanged.connect(self._on_length_settings_changed)
+        self.length_save_spin.valueChanged.connect(self._on_storage_settings_changed)
+        self.length_file_spin.valueChanged.connect(self._on_storage_settings_changed)
         self.save_downsample_spin.valueChanged.connect(self._on_storage_downsample_changed)
         self.save_enable_check.toggled.connect(self._on_save_enable_toggled)
         self.save_path_edit.editingFinished.connect(self._on_save_path_edited)
         self.storage_format_combo.currentIndexChanged.connect(self._on_storage_settings_changed)
         self.bz_zstd_level_spin.valueChanged.connect(self._on_storage_settings_changed)
         self.bz_bitshuffle_block_spin.valueChanged.connect(self._on_storage_settings_changed)
-        self.bz_packet_frames_spin.valueChanged.connect(self._on_storage_settings_changed)
-        self.bz_file_duration_spin.valueChanged.connect(self._on_storage_settings_changed)
-        self.scan_rate_spin.valueChanged.connect(self._update_bz_setting_hints)
+        self.bz_compression_workers_spin.valueChanged.connect(self._on_storage_settings_changed)
+        self.scan_rate_spin.valueChanged.connect(self._on_length_settings_changed)
         self.data_rate_combo.currentIndexChanged.connect(self._update_calculated_values)
         self.data_source_combo.currentIndexChanged.connect(self._sync_tcp_tab3_availability)
         self.channel_combo.currentIndexChanged.connect(self._sync_tcp_tab3_availability)
@@ -1384,9 +1423,6 @@ class MainWindow(QMainWindow):
         self.merge_points_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
         self.crop_distance_start_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
         self.crop_distance_end_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
-        self.frame_load_num_spin.valueChanged.connect(self._sync_tcp_tab3_availability)
-        self.frame_load_num_spin.valueChanged.connect(self._update_file_estimates)
-        self.frame_plot_num_spin.valueChanged.connect(self._update_file_estimates)
 
         # Connect display mode signals.
         self.mode_time_radio.toggled.connect(self._on_mode_changed)
@@ -1406,6 +1442,7 @@ class MainWindow(QMainWindow):
         self.tab3_channel_end_spin.valueChanged.connect(self._on_tcp_tab3_settings_changed)
         self.tab3_time_downsample_spin.valueChanged.connect(self._on_tcp_tab3_settings_changed)
         self.tab3_space_downsample_spin.valueChanged.connect(self._on_tcp_tab3_settings_changed)
+        self.tab3_length_comm_spin.valueChanged.connect(self._on_tcp_tab3_settings_changed)
 
     def _connect_tcp_tab3_manager(self):
         """Connect the communication manager to the Tab3 UI."""
@@ -1438,6 +1475,11 @@ class MainWindow(QMainWindow):
     @pyqtSlot(bool)
     def _on_monitor_display_toggled(self, enabled: bool):
         """Enable or disable monitor rendering on plot 3."""
+        self.params.display.monitor_plot_enabled = bool(enabled)
+        if self.acq_thread is not None and hasattr(self.acq_thread, "set_monitor_read_enabled"):
+            self.acq_thread.set_monitor_read_enabled(
+                bool(enabled) and self.params.upload.data_source == DataSource.PHASE
+            )
         if not enabled:
             self._clear_monitor_plot()
         elif self._current_monitor_data is not None:
@@ -1521,9 +1563,6 @@ class MainWindow(QMainWindow):
         """Best-effort dataclass merge used by local settings restore."""
         if not isinstance(values, dict):
             return
-        if isinstance(target, SaveParams) and "blocks_per_file" not in values and "frames_per_file" in values:
-            values = dict(values)
-            values["blocks_per_file"] = values["frames_per_file"]
         for field in fields(target):
             if field.name not in values:
                 continue
@@ -1540,6 +1579,89 @@ class MainWindow(QMainWindow):
             if combo.itemData(index) == value:
                 combo.setCurrentIndex(index)
                 return
+
+
+    @staticmethod
+    def _length_seconds_to_frames(length_s: float, scan_rate: int) -> int:
+        """Convert a positive time length in seconds to runtime frame count."""
+        frames = int(round(float(length_s) * max(1, int(scan_rate))))
+        return max(1, frames)
+
+    @staticmethod
+    def _length_has_integer_frames(length_s: float, scan_rate: int) -> tuple[bool, int]:
+        """Return whether length_s maps exactly to an integer frame count."""
+        frames_float = float(length_s) * max(1, int(scan_rate))
+        frames = int(round(frames_float))
+        return frames > 0 and abs(frames_float - frames) <= 1e-6, max(1, frames)
+
+    @staticmethod
+    def _display_refresh_interval_ms(params: AllParams) -> int:
+        """Return the GUI display consumption interval derived from Length/Plot."""
+        scan_rate = max(1, int(getattr(params.basic, "scan_rate", 1) or 1))
+        frame_plot_num = int(getattr(params.display, "frame_plot_num", 0) or 0)
+        if frame_plot_num <= 0:
+            length_plot_s = float(getattr(params.display, "length_plot_s", 1.0) or 1.0)
+            frame_plot_num = max(1, int(round(length_plot_s * scan_rate)))
+        interval_ms = int(round(frame_plot_num / float(scan_rate) * 1000.0))
+        return max(50, interval_ms)
+
+    def _configure_display_timer(self, params: AllParams) -> None:
+        """Apply the current Length/Plot value to the latest-snapshot GUI timer."""
+        if not hasattr(self, "_display_timer"):
+            return
+        interval_ms = self._display_refresh_interval_ms(params)
+        previous = getattr(self, "_display_timer_interval_ms", None)
+        self._display_timer_interval_ms = interval_ms
+        self._display_timer.start(interval_ms)
+        if previous != interval_ms:
+            length_plot_s = frame_plot_num = None
+            try:
+                length_plot_s = float(getattr(params.display, "length_plot_s", 0.0) or 0.0)
+                frame_plot_num = int(getattr(params.display, "frame_plot_num", 0) or 0)
+            except Exception:
+                pass
+            log.info(
+                "GUI display refresh interval set to %d ms (length_plot_s=%s, plot_frames=%s)",
+                interval_ms,
+                f"{length_plot_s:.3f}" if length_plot_s is not None else "?",
+                frame_plot_num if frame_plot_num is not None else "?",
+            )
+
+    def _sync_length_frame_fields(self, params: AllParams) -> None:
+        """Derive legacy/runtime frame fields from the Length/... second settings."""
+        scan_rate = max(1, int(params.basic.scan_rate))
+        load_frames = self._length_seconds_to_frames(params.display.length_load_s, scan_rate)
+        plot_frames = self._length_seconds_to_frames(params.display.length_plot_s, scan_rate)
+        save_frames = self._length_seconds_to_frames(params.save.length_save_s, scan_rate)
+        file_frames = self._length_seconds_to_frames(params.save.length_file_s, scan_rate)
+        comm_frames = self._length_seconds_to_frames(params.comm.length_comm_s, scan_rate)
+
+        params.display.frame_load_num = load_frames
+        params.display.frame_plot_num = plot_frames
+        params.comm.comm_frame_num = comm_frames
+
+    def _length_frame_summary(self, params: Optional[AllParams] = None) -> tuple[int, int, int, int, int]:
+        """Return derived frame counts: load, plot, save, file, comm."""
+        params = params or self._collect_params()
+        return (
+            max(1, int(params.display.frame_load_num)),
+            max(1, int(params.display.frame_plot_num)),
+            self._length_seconds_to_frames(params.save.length_save_s, params.basic.scan_rate),
+            self._length_seconds_to_frames(params.save.length_file_s, params.basic.scan_rate),
+            max(1, int(params.comm.comm_frame_num)),
+        )
+
+    def _on_length_settings_changed(self, *_args):
+        """Refresh dependent hints after acquisition length settings change."""
+        if not self._is_acquisition_running():
+            try:
+                self.params = self._collect_params()
+                self._configure_display_timer(self.params)
+            except Exception:
+                pass
+        self._update_bz_setting_hints()
+        self._update_file_estimates()
+        self._sync_tcp_tab3_availability()
 
     def _apply_params_to_ui(self, params: AllParams):
         """Apply restored parameters back to the UI controls."""
@@ -1577,8 +1699,8 @@ class MainWindow(QMainWindow):
         else:
             self.mode_time_radio.setChecked(True)
         self.region_index_spin.setValue(params.display.region_index)
-        self.frame_load_num_spin.setValue(getattr(params.display, "frame_load_num", 1024))
-        self.frame_plot_num_spin.setValue(getattr(params.display, "frame_plot_num", getattr(params.display, "frame_num", 1024)))
+        self.length_load_spin.setValue(float(getattr(params.display, "length_load_s", 0.2) or 0.2))
+        self.length_plot_spin.setValue(float(getattr(params.display, "length_plot_s", 1.0) or 1.0))
         self.spectrum_enable_check.setChecked(params.display.spectrum_enable)
         self.rad_check.setChecked(params.display.rad_enable)
         self.waveform_enable_check.setChecked(params.display.waveform_plot_enabled)
@@ -1608,13 +1730,15 @@ class MainWindow(QMainWindow):
             self._sync_shared_filter_settings(reset_tab1=False)
 
         self.save_path_edit.setText(params.save.path)
-        self.blocks_per_file_spin.setValue(params.save.blocks_per_file)
+        self.length_save_spin.setValue(float(getattr(params.save, "length_save_s", 1.0) or 1.0))
+        self.length_file_spin.setValue(float(getattr(params.save, "length_file_s", 10.0) or 10.0))
         self.save_downsample_spin.setValue(max(1, int(getattr(params.save, "storage_downsample_factor", 1) or 1)))
         self._set_combo_to_data(self.storage_format_combo, getattr(params.save, "storage_format", STORAGE_FORMAT_BIN))
         self.bz_zstd_level_spin.setValue(max(1, int(getattr(params.save, "bz_zstd_level", 3) or 3)))
         self.bz_bitshuffle_block_spin.setValue(max(1, int(getattr(params.save, "bz_bitshuffle_block_values", 65536) or 65536)))
-        self.bz_packet_frames_spin.setValue(max(0, int(getattr(params.save, "bz_packet_frames", 0) or 0)))
-        self.bz_file_duration_spin.setValue(max(1, int(getattr(params.save, "bz_file_duration_s", 60) or 60)))
+        self.bz_compression_workers_spin.setValue(max(1, int(getattr(params.save, "bz_compression_workers", 4) or 4)))
+        if hasattr(params, "comm"):
+            self.tab3_length_comm_spin.setValue(float(getattr(params.comm, "length_comm_s", 1.0) or 1.0))
         self._update_storage_format_control_states()
         self._update_bz_setting_hints()
         self._set_save_enable_checked(params.save.enable)
@@ -1700,8 +1824,8 @@ class MainWindow(QMainWindow):
             params.display.mode = DisplayMode.TIME
 
         params.display.region_index = self.region_index_spin.value()
-        params.display.frame_load_num = self.frame_load_num_spin.value()
-        params.display.frame_plot_num = self.frame_plot_num_spin.value()
+        params.display.length_load_s = self.length_load_spin.value()
+        params.display.length_plot_s = self.length_plot_spin.value()
         params.display.spectrum_enable = self.spectrum_enable_check.isChecked()
         # Note: PSD mode now automatically determined by data_type (removed psd_enable)
         params.display.rad_enable = self.rad_check.isChecked()
@@ -1727,13 +1851,15 @@ class MainWindow(QMainWindow):
         # Save params
         params.save.enable = self.save_enable_check.isChecked()
         params.save.path = self.save_path_edit.text()
-        params.save.blocks_per_file = self.blocks_per_file_spin.value()
+        params.save.length_save_s = self.length_save_spin.value()
+        params.save.length_file_s = self.length_file_spin.value()
         params.save.storage_downsample_factor = self.save_downsample_spin.value()
         params.save.storage_format = self._get_selected_storage_format()
         params.save.bz_zstd_level = self.bz_zstd_level_spin.value()
         params.save.bz_bitshuffle_block_values = self.bz_bitshuffle_block_spin.value()
-        params.save.bz_packet_frames = self.bz_packet_frames_spin.value()
-        params.save.bz_file_duration_s = self.bz_file_duration_spin.value()
+        params.save.bz_compression_workers = self.bz_compression_workers_spin.value()
+        params.comm.length_comm_s = self.tab3_length_comm_spin.value()
+        self._sync_length_frame_fields(params)
 
         return params
 
@@ -1747,14 +1873,31 @@ class MainWindow(QMainWindow):
         if not valid:
             return False, msg
 
-        if params.display.frame_load_num <= 0:
-            return False, "FrameLoad must be greater than 0."
+        length_checks = [
+            ("Length/Load", params.display.length_load_s),
+            ("Length/Plot", params.display.length_plot_s),
+            ("Length/Save", params.save.length_save_s),
+            ("Length/File", params.save.length_file_s),
+            ("Length/Comm", params.comm.length_comm_s),
+        ]
+        derived_frames: Dict[str, int] = {}
+        for name, length_s in length_checks:
+            if float(length_s) <= 0:
+                return False, f"{name} must be greater than 0 s."
+            exact, frames = self._length_has_integer_frames(length_s, params.basic.scan_rate)
+            if not exact:
+                return False, f"{name} must map to an integer frame count at Scan={params.basic.scan_rate} Hz."
+            derived_frames[name] = frames
 
-        if params.display.frame_plot_num <= 0:
-            return False, "FramePlot must be greater than 0."
-
-        if params.display.frame_plot_num > params.display.frame_load_num:
-            return False, "FramePlot must not exceed FrameLoad."
+        load_frames = derived_frames["Length/Load"]
+        if derived_frames["Length/Plot"] % load_frames != 0:
+            return False, "Length/Plot must be an integer multiple of Length/Load."
+        if derived_frames["Length/Save"] % load_frames != 0:
+            return False, "Length/Save must be an integer multiple of Length/Load."
+        if derived_frames["Length/Comm"] % load_frames != 0:
+            return False, "Length/Comm must be an integer multiple of Length/Load."
+        if derived_frames["Length/File"] % derived_frames["Length/Save"] != 0:
+            return False, "Length/File must be an integer multiple of Length/Save."
 
         # Raw data source with 4 channels not supported
         if params.upload.data_source != DataSource.PHASE and params.upload.channel_num == 4:
@@ -1783,10 +1926,8 @@ class MainWindow(QMainWindow):
             return False, "Zstd Level must be between 1 and 22."
         if params.save.bz_bitshuffle_block_values <= 0:
             return False, "Bitshuffle Block must be greater than 0."
-        if params.save.bz_packet_frames < 0:
-            return False, "BZ Packet Frames must be >= 0."
-        if params.save.bz_file_duration_s <= 0:
-            return False, "BZ File(s) must be greater than 0."
+        if params.save.bz_compression_workers < 1 or params.save.bz_compression_workers > 16:
+            return False, "BZ Workers must be between 1 and 16."
 
         return True, ""
 
@@ -1828,6 +1969,7 @@ class MainWindow(QMainWindow):
             "channel_end": self.tab3_channel_end_spin.value(),
             "time_downsample": self.tab3_time_downsample_spin.value(),
             "space_downsample": self.tab3_space_downsample_spin.value(),
+            "comm_frames": self._length_seconds_to_frames(self.tab3_length_comm_spin.value(), self.scan_rate_spin.value()),
             "reconnect_interval_s": 1.0,
             "queue_max_packets": 8,
         }
@@ -1857,7 +1999,8 @@ class MainWindow(QMainWindow):
         data_bytes_text = "-"
         if params.basic.scan_rate > 0 and params.basic.scan_rate % max(1, self.tab3_time_downsample_spin.value()) == 0:
             sample_rate_hz = params.basic.scan_rate // self.tab3_time_downsample_spin.value()
-            samples_per_channel = len(range(0, params.display.frame_load_num, max(1, self.tab3_time_downsample_spin.value())))
+            comm_frames = max(1, int(getattr(params.comm, "comm_frame_num", params.display.frame_load_num)))
+            samples_per_channel = len(range(0, comm_frames, max(1, self.tab3_time_downsample_spin.value())))
             sample_rate_text = f"{sample_rate_hz} Hz"
             packet_duration = samples_per_channel / float(sample_rate_hz)
             duration_text = f"{packet_duration:.6f} s"
@@ -2006,7 +2149,7 @@ class MainWindow(QMainWindow):
         return str(getattr(self.params.save, "storage_format", STORAGE_FORMAT_BIN) or STORAGE_FORMAT_BIN)
 
     def _update_storage_format_control_states(self):
-        """Enable .bz controls only when .bz storage is selected and storage is idle."""
+        """Enable storage parameters according to format and active save state."""
         if not hasattr(self, "storage_format_combo"):
             return
         active = self.data_saver is not None and self.data_saver.is_running
@@ -2015,36 +2158,65 @@ class MainWindow(QMainWindow):
         bz_selected = storage_format == STORAGE_FORMAT_BITSHUFFLE_ZSTD
         self.storage_format_combo.setEnabled(editable)
         for widget in [
+            self.length_save_spin,
+            self.length_file_spin,
+            self.save_downsample_spin,
+        ]:
+            widget.setEnabled(editable)
+        for label in [
+            getattr(self, "length_save_label", None),
+            getattr(self, "length_file_label", None),
+            getattr(self, "save_downsample_label", None),
+        ]:
+            if label is not None:
+                label.setEnabled(editable)
+        for widget in [
             self.bz_zstd_level_spin,
             self.bz_bitshuffle_block_spin,
-            self.bz_packet_frames_spin,
-            self.bz_file_duration_spin,
+            self.bz_compression_workers_spin,
         ]:
             widget.setEnabled(editable and bz_selected)
+        for label in [
+            getattr(self, "bz_zstd_level_label", None),
+            getattr(self, "bz_bitshuffle_block_label", None),
+            getattr(self, "bz_compression_workers_label", None),
+        ]:
+            if label is not None:
+                label.setEnabled(editable and bz_selected)
 
     def _update_bz_setting_hints(self):
-        """Refresh the resolved .bz packet duration hint."""
+        """Refresh resolved Length/... frame-count hints."""
         if not hasattr(self, "bz_packet_hint_label"):
             return
-        scan_rate = max(1, int(self.scan_rate_spin.value() if hasattr(self, "scan_rate_spin") else self.params.basic.scan_rate))
-        packet_setting = int(self.bz_packet_frames_spin.value() if hasattr(self, "bz_packet_frames_spin") else 0)
-        packet_frames = packet_setting if packet_setting > 0 else scan_rate
-        packet_s = packet_frames / float(scan_rate)
-        file_duration_s = int(self.bz_file_duration_spin.value() if hasattr(self, "bz_file_duration_spin") else 60)
-        file_frames = max(1, file_duration_s * scan_rate)
-        packet_count = max(1, (file_frames + packet_frames - 1) // packet_frames)
-        self.bz_packet_hint_label.setText(
-            f"Packet: {packet_frames} frames ({packet_s:.3f}s), File: ~{packet_count} packets"
-        )
+        try:
+            params = self._collect_params()
+            load_frames, plot_frames, save_frames, file_frames, comm_frames = self._length_frame_summary(params)
+            scan_rate = max(1, int(params.basic.scan_rate))
+            save_packets = max(1, file_frames // max(1, save_frames))
+            self.length_load_hint_label.setText(
+                f"Load: {load_frames}fr/{params.display.length_load_s:.3f}s, "
+                f"Plot: {plot_frames}fr/{params.display.length_plot_s:.3f}s, "
+                f"Comm: {comm_frames}fr/{params.comm.length_comm_s:.3f}s"
+            )
+            self.bz_packet_hint_label.setText(
+                f"Save: {save_frames}fr/{params.save.length_save_s:.3f}s, "
+                f"File: {file_frames}fr/{params.save.length_file_s:.3f}s (~{save_packets} packets), "
+                f"Scan={scan_rate}Hz, BZ workers={params.save.bz_compression_workers}"
+            )
+        except Exception:
+            self.length_load_hint_label.setText("Load: --")
+            self.bz_packet_hint_label.setText("Save: --")
 
     def _on_storage_settings_changed(self, *_args):
         """Keep pending save settings synchronized with Tab4."""
         if hasattr(self, "storage_format_combo"):
             self.params.save.storage_format = self._get_selected_storage_format()
+            self.params.save.length_save_s = self.length_save_spin.value()
+            self.params.save.length_file_s = self.length_file_spin.value()
             self.params.save.bz_zstd_level = self.bz_zstd_level_spin.value()
             self.params.save.bz_bitshuffle_block_values = self.bz_bitshuffle_block_spin.value()
-            self.params.save.bz_packet_frames = self.bz_packet_frames_spin.value()
-            self.params.save.bz_file_duration_s = self.bz_file_duration_spin.value()
+            self.params.save.bz_compression_workers = self.bz_compression_workers_spin.value()
+            self._sync_length_frame_fields(self.params)
         self._update_storage_format_control_states()
         self._update_bz_setting_hints()
         self._update_file_estimates()
@@ -2147,12 +2319,24 @@ class MainWindow(QMainWindow):
             if active and saver is not None and hasattr(saver, "get_diagnostics_snapshot"):
                 snapshot = saver.get_diagnostics_snapshot()
                 if snapshot.get("format") == "bz":
+                    worker_alive = snapshot.get("compression_threads_alive", 0)
+                    worker_total = snapshot.get("compression_workers", 0)
+                    slow_packets = snapshot.get('slow_compression_packet_count', 0)
+                    not_rt = snapshot['compression_not_realtime_count']
                     self.bz_realtime_status_label.setText(
-                        f"BZ: cache={snapshot['has_cache']} drop={snapshot['dropped_blocks']} "
-                        f"notRT={snapshot['compression_not_realtime_count']} "
-                        f"ratio={snapshot['last_compression_ratio']:.2f}"
+                        f"BZ: raw={snapshot['raw_queue_size']}/{snapshot['buffer_size']} "
+                        f"pkt={snapshot.get('packet_queue_size', 0)}/{snapshot.get('packet_queue_size_max', 0)} "
+                        f"cmp={snapshot['compressed_queue_size']}/{snapshot['compressed_queue_size_max']} "
+                        f"w={worker_alive}/{worker_total} drop={snapshot['dropped_blocks']} "
+                        f"slow={slow_packets} notRT={not_rt}"
                     )
-                    color = "#b00020" if snapshot["dropped_blocks"] or snapshot["compression_not_realtime_count"] else "green"
+                    has_queue_fault = (
+                        snapshot["dropped_blocks"]
+                        or not_rt
+                        or snapshot.get("packet_queue_full_count", 0)
+                        or snapshot.get("compressed_queue_full_count", 0)
+                    )
+                    color = "#b00020" if has_queue_fault else ("#b26a00" if slow_packets else "green")
                     self.bz_realtime_status_label.setStyleSheet(f"color: {color};")
                 else:
                     self.bz_realtime_status_label.setText("BZ: inactive")
@@ -2170,48 +2354,60 @@ class MainWindow(QMainWindow):
 
         params = params or self.params
         save_path = self.save_path_edit.text().strip() or params.save.path
-        blocks_per_file = self.blocks_per_file_spin.value()
         storage_downsample_factor = self.save_downsample_spin.value()
         storage_format = self._get_selected_storage_format()
+        length_save_s = self.length_save_spin.value()
+        length_file_s = self.length_file_spin.value()
         bz_zstd_level = self.bz_zstd_level_spin.value()
         bz_bitshuffle_block_values = self.bz_bitshuffle_block_spin.value()
-        bz_packet_frames = self.bz_packet_frames_spin.value()
-        bz_file_duration_s = self.bz_file_duration_spin.value()
+        bz_compression_workers = self.bz_compression_workers_spin.value()
 
         params.save.enable = True
         params.save.path = save_path
-        params.save.blocks_per_file = blocks_per_file
+        params.save.length_save_s = length_save_s
+        params.save.length_file_s = length_file_s
         params.save.storage_downsample_factor = storage_downsample_factor
         params.save.storage_format = storage_format
         params.save.bz_zstd_level = bz_zstd_level
         params.save.bz_bitshuffle_block_values = bz_bitshuffle_block_values
-        params.save.bz_packet_frames = bz_packet_frames
-        params.save.bz_file_duration_s = bz_file_duration_s
+        params.save.bz_compression_workers = bz_compression_workers
+        params.comm.length_comm_s = self.tab3_length_comm_spin.value()
+        self._sync_length_frame_fields(params)
+        save_packet_frames = self._length_seconds_to_frames(length_save_s, params.basic.scan_rate)
+        file_frames = self._length_seconds_to_frames(length_file_s, params.basic.scan_rate)
+        packets_per_file = max(1, file_frames // save_packet_frames)
         self._save_file_count_this_run = 0
 
         if storage_format == STORAGE_FORMAT_BITSHUFFLE_ZSTD:
-            resolved_packet_frames = bz_packet_frames if bz_packet_frames > 0 else max(1, int(params.basic.scan_rate))
             log.info(
-                f"Starting Bitshuffle+Zstd data saver to {save_path}, file_duration_s={bz_file_duration_s}, "
-                f"packet_frames={resolved_packet_frames}, zstd_level={bz_zstd_level}, "
-                f"bitshuffle_block={bz_bitshuffle_block_values}, save_ds={storage_downsample_factor}"
+                f"Starting Bitshuffle+Zstd data saver to {save_path}, length_save_s={length_save_s:.3f}, "
+                f"length_file_s={length_file_s:.3f}, packet_frames={save_packet_frames}, "
+                f"file_frames={file_frames}, load_frames={params.display.frame_load_num}, "
+                f"zstd_level={bz_zstd_level}, bitshuffle_block={bz_bitshuffle_block_values}, "
+                f"bz_workers={bz_compression_workers}, save_ds={storage_downsample_factor}"
             )
             saver = BitshuffleZstdFileSaver(
                 save_path,
-                file_duration_s=bz_file_duration_s,
-                packet_frames=bz_packet_frames,
+                file_duration_s=length_file_s,
+                packet_frames=save_packet_frames,
+                file_frames_per_file=file_frames,
                 zstd_level=bz_zstd_level,
                 bitshuffle_block_values=bz_bitshuffle_block_values,
+                compression_workers=bz_compression_workers,
                 buffer_size=OPTIMIZED_BUFFER_SIZES['storage_queue_frames'],
             )
         else:
             log.info(
-                f"Starting block-based data saver to {save_path}, "
-                f"blocks_per_file={blocks_per_file}, save_ds={storage_downsample_factor}"
+                f"Starting packetized .bin data saver to {save_path}, length_save_s={length_save_s:.3f}, "
+                f"length_file_s={length_file_s:.3f}, packet_frames={save_packet_frames}, "
+                f"file_frames={file_frames}, packets_per_file={packets_per_file}, "
+                f"load_frames={params.display.frame_load_num}, save_ds={storage_downsample_factor}"
             )
             saver = BlockBasedFileSaver(
                 save_path,
-                blocks_per_file=blocks_per_file,
+                packet_frames=save_packet_frames,
+                file_duration_s=length_file_s,
+                file_frames_per_file=file_frames,
                 buffer_size=OPTIMIZED_BUFFER_SIZES['storage_queue_frames']
             )
 
@@ -2227,7 +2423,10 @@ class MainWindow(QMainWindow):
             else:
                 filename = saver.start(
                     scan_rate=params.basic.scan_rate,
-                    points_per_frame=self._get_save_points_per_frame(params)
+                    points_per_frame=self._get_save_points_per_frame(params),
+                    channel_num=params.upload.channel_num,
+                    data_source=params.upload.data_source,
+                    storage_downsample_factor=storage_downsample_factor,
                 )
         except Exception as exc:
             log.exception(f"Failed to start data saver: {exc}")
@@ -2246,13 +2445,13 @@ class MainWindow(QMainWindow):
         self.data_saver = saver
         self.params.save.enable = True
         self.params.save.path = save_path
-        self.params.save.blocks_per_file = blocks_per_file
+        self.params.save.length_save_s = length_save_s
+        self.params.save.length_file_s = length_file_s
         self.params.save.storage_downsample_factor = storage_downsample_factor
         self.params.save.storage_format = storage_format
         self.params.save.bz_zstd_level = bz_zstd_level
         self.params.save.bz_bitshuffle_block_values = bz_bitshuffle_block_values
-        self.params.save.bz_packet_frames = bz_packet_frames
-        self.params.save.bz_file_duration_s = bz_file_duration_s
+        self.params.save.bz_compression_workers = bz_compression_workers
         log.info(f"Data saver active: format={storage_format}, file={filename}")
         self._set_storage_downsample_enabled(False)
         self._refresh_save_status_display()
@@ -2283,13 +2482,15 @@ class MainWindow(QMainWindow):
         """Apply save-toggle changes immediately when acquisition is already running."""
         self.params.save.enable = enabled
         self.params.save.path = self.save_path_edit.text().strip()
-        self.params.save.blocks_per_file = self.blocks_per_file_spin.value()
+        self.params.save.length_save_s = self.length_save_spin.value()
+        self.params.save.length_file_s = self.length_file_spin.value()
         self.params.save.storage_downsample_factor = self.save_downsample_spin.value()
         self.params.save.storage_format = self._get_selected_storage_format()
         self.params.save.bz_zstd_level = self.bz_zstd_level_spin.value()
         self.params.save.bz_bitshuffle_block_values = self.bz_bitshuffle_block_spin.value()
-        self.params.save.bz_packet_frames = self.bz_packet_frames_spin.value()
-        self.params.save.bz_file_duration_s = self.bz_file_duration_spin.value()
+        self.params.save.bz_compression_workers = self.bz_compression_workers_spin.value()
+        self.params.comm.length_comm_s = self.tab3_length_comm_spin.value()
+        self._sync_length_frame_fields(self.params)
 
         if enabled:
             if not self._is_acquisition_running():
@@ -2329,6 +2530,7 @@ class MainWindow(QMainWindow):
             return
 
         self.params = params
+        self._configure_display_timer(params)
         self._save_local_params()
         if self.time_space_widget is not None:
             self.time_space_widget.set_scan_rate(params.basic.scan_rate)
@@ -2342,8 +2544,11 @@ class MainWindow(QMainWindow):
         block_duration_ms = params.display.frame_load_num / max(params.basic.scan_rate, 1) * 1000.0
         log.info(f"Parameters: scan_rate={params.basic.scan_rate}, points={params.basic.point_num_per_scan}, "
                  f"channels={params.upload.channel_num}, data_source={params.upload.data_source}, "
-                 f"frame_load={params.display.frame_load_num}, frame_plot={params.display.frame_plot_num}, "
-                 f"block_bytes={block_bytes / 1024 / 1024:.2f}MB, block_duration={block_duration_ms:.1f}ms")
+                 f"length_load_s={params.display.length_load_s:.3f}, length_plot_s={params.display.length_plot_s:.3f}, "
+                 f"load_frames={params.display.frame_load_num}, plot_frames={params.display.frame_plot_num}, "
+                 f"length_save_s={params.save.length_save_s:.3f}, length_file_s={params.save.length_file_s:.3f}, "
+                 f"length_comm_s={params.comm.length_comm_s:.3f}, block_bytes={block_bytes / 1024 / 1024:.2f}MB, "
+                 f"block_duration={block_duration_ms:.1f}ms")
 
         # Configure device (if not simulation mode)
         if not self.simulation_mode:
@@ -2390,6 +2595,10 @@ class MainWindow(QMainWindow):
             self.acq_thread = AcquisitionThread(self.api, self)
 
         self.acq_thread.configure(params)
+        if hasattr(self.acq_thread, "set_monitor_read_enabled"):
+            self.acq_thread.set_monitor_read_enabled(
+                self.monitor_enable_check.isChecked() and params.upload.data_source == DataSource.PHASE
+            )
         self._tcp_settings_snapshot = self.get_tab3_comm_settings()
         self.acq_thread.set_full_data_handler(self._handle_full_data_block)
 
@@ -2419,6 +2628,7 @@ class MainWindow(QMainWindow):
     def _on_stop(self):
         """Handle stop button click"""
         log.info("=== STOP button clicked ===")
+        self._fatal_acq_error_stop_pending = False
 
         # Stop display consumption and restore controls immediately. Hardware cleanup follows.
         self._set_start_btn_ready()
@@ -2484,8 +2694,11 @@ class MainWindow(QMainWindow):
                        self.point_num_spin, self.bypass_spin, self.center_freq_spin,
                        self.channel_combo, self.data_source_combo, self.data_rate_combo,
                        self.rate2phase_combo, self.space_avg_spin, self.merge_points_spin,
-                       self.diff_order_spin, self.detrend_bw_spin, self.polar_div_check]:
+                       self.diff_order_spin, self.detrend_bw_spin, self.polar_div_check,
+                       self.length_load_spin, self.length_plot_spin,
+                       self.tab3_length_comm_spin]:
             widget.setEnabled(enabled)
+        self._update_storage_format_control_states()
 
     # ----- DATA HANDLERS -----
     # Complete blocks stay off the GUI event queue. The GUI consumes only the latest snapshot.
@@ -2672,8 +2885,58 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def _on_error(self, message: str):
         """Handle error from acquisition thread"""
+        sender = self.sender()
+        if sender is not None and sender is not self.acq_thread:
+            log.debug("Ignoring delayed acquisition error from an inactive thread")
+            return
+
         log.error(f"Acquisition error: {message}")
         self.statusBar.showMessage(f"Error: {message}", 5000)
+
+        if self._is_fatal_acquisition_error(message):
+            self._schedule_fatal_acquisition_stop(message)
+
+    def _is_fatal_acquisition_error(self, message: str) -> bool:
+        """Return True for acquisition errors that require a full stop/cleanup."""
+        lowered = message.lower()
+        return (
+            "fatal buffer query error" in lowered
+            or "0xffffffff" in lowered
+            or "driver/device state" in lowered
+        )
+
+    def _schedule_fatal_acquisition_stop(self, message: str):
+        """Stop after fatal acquisition errors without restarting a stale device state."""
+        if self._fatal_acq_error_stop_pending:
+            return
+        if self.acq_thread is None:
+            return
+
+        self._fatal_acq_error_stop_pending = True
+        self._recovery_in_progress = False
+        log.error(
+            "Fatal acquisition error requires device/driver reset before restart. "
+            f"Scheduling stop. error={message}"
+        )
+        QTimer.singleShot(0, self._stop_after_fatal_acquisition_error)
+
+    def _stop_after_fatal_acquisition_error(self):
+        """Run the existing stop path for a fatal acquisition-thread error."""
+        if not self._fatal_acq_error_stop_pending:
+            return
+        if self.acq_thread is None:
+            self._fatal_acq_error_stop_pending = False
+            return
+
+        self.statusBar.showMessage(
+            "Fatal acquisition error: reset PCIe device/driver before restarting",
+            10000,
+        )
+        try:
+            self._on_stop()
+        except Exception as exc:
+            self._fatal_acq_error_stop_pending = False
+            log.exception(f"Fatal acquisition stop failed: {exc}")
 
     # ----- DISPLAY UPDATE METHODS -----
     # Time mode: overlay multiple frames on one plot
@@ -3350,10 +3613,15 @@ class MainWindow(QMainWindow):
             log.info(
                 "Storage queue: format=bz, "
                 f"raw={snapshot['raw_queue_size']}/{snapshot['buffer_size']}, "
+                f"packet={snapshot.get('packet_queue_size', 0)}/{snapshot.get('packet_queue_size_max', 0)}, "
                 f"compressed={snapshot['compressed_queue_size']}/{snapshot['compressed_queue_size_max']}, "
+                f"workers={snapshot.get('compression_threads_alive', 0)}/{snapshot.get('compression_workers', 0)}, "
                 f"pending_frames={snapshot['pending_frames']}/{snapshot['packet_frames']}, "
                 f"cache={snapshot['has_cache']}, dropped={snapshot['dropped_blocks']}, "
+                f"slow_compress={snapshot.get('slow_compression_packet_count', 0)}, "
                 f"not_realtime={snapshot['compression_not_realtime_count']}, "
+                f"packet_full={snapshot.get('packet_queue_full_count', 0)}, "
+                f"compressed_full={snapshot.get('compressed_queue_full_count', 0)}, "
                 f"last_compress_ms={snapshot['last_compress_ms']:.1f}, "
                 f"last_write_ms={snapshot['last_write_ms']:.1f}"
             )
@@ -3385,8 +3653,14 @@ class MainWindow(QMainWindow):
             f"buffer={snapshot['last_buffer_points']}/{snapshot['last_expected_points']}",
             f"waits={snapshot['last_wait_iterations']}",
             f"query_ms={snapshot['last_query_ms']:.1f}",
+            f"query_errors={snapshot.get('consecutive_buffer_query_errors', 0)}/{snapshot.get('buffer_query_error_count', 0)}",
             f"read_ms={snapshot['last_read_ms']:.1f}",
+            f"api_read_ms={snapshot.get('last_api_read_ms', 0.0):.1f}",
+            f"crop_ms={snapshot.get('last_crop_ms', 0.0):.1f}",
+            f"dispatch_ms={snapshot.get('last_dispatch_ms', 0.0):.1f}",
+            f"display_pub_ms={snapshot.get('last_display_publish_ms', 0.0):.1f}",
             f"read_age_s={snapshot['last_successful_read_age_s']:.1f}",
+            f"monitor_enabled={int(bool(snapshot.get('monitor_read_enabled', False)))}",
             f"monitor_ms={snapshot['last_monitor_read_ms']:.1f}",
             f"block_mb={snapshot['last_block_bytes'] / 1024 / 1024:.2f}",
             f"poll_ms={snapshot['polling_interval_ms']:.1f}",
@@ -3397,6 +3671,9 @@ class MainWindow(QMainWindow):
         detail = snapshot.get("current_stage_detail")
         if detail:
             parts.append(f"detail={detail}")
+        query_error = snapshot.get("last_buffer_query_error")
+        if query_error:
+            parts.append(f"query_error={query_error}")
 
         if self.data_saver is not None and hasattr(self.data_saver, "get_diagnostics_snapshot"):
             saver = self.data_saver.get_diagnostics_snapshot()
@@ -3411,10 +3688,15 @@ class MainWindow(QMainWindow):
                 parts.extend([
                     f"save_format=bz",
                     f"save_raw_queue={saver['raw_queue_size']}/{saver['buffer_size']}",
+                    f"save_packet_queue={saver.get('packet_queue_size', 0)}/{saver.get('packet_queue_size_max', 0)}",
                     f"save_compressed_queue={saver['compressed_queue_size']}/{saver['compressed_queue_size_max']}",
+                    f"save_workers={saver.get('compression_threads_alive', 0)}/{saver.get('compression_workers', 0)}",
                     f"save_pending_frames={saver['pending_frames']}/{saver['packet_frames']}",
                     f"save_cache={saver['has_cache']}",
+                    f"save_slow_compress={saver.get('slow_compression_packet_count', 0)}",
                     f"save_not_realtime={saver['compression_not_realtime_count']}",
+                    f"save_packet_full={saver.get('packet_queue_full_count', 0)}",
+                    f"save_compressed_full={saver.get('compressed_queue_full_count', 0)}",
                     f"save_last_compress_ms={saver['last_compress_ms']:.1f}",
                 ])
 
@@ -3590,14 +3872,12 @@ class MainWindow(QMainWindow):
     def _update_file_estimates(self):
         """Update storage file size estimates after storage-only downsampling."""
         try:
-            blocks_per_file = self.blocks_per_file_spin.value()
-            frame_load_num = self.frame_load_num_spin.value()
             point_num = self.point_num_spin.value()
             merge_points = self.merge_points_spin.value()
             channel_num = self.channel_combo.currentData() or 1
             data_source = self.data_source_combo.currentData() or DataSource.PHASE
             storage_downsample_factor = self.save_downsample_spin.value()
-            storage_format = self._get_selected_storage_format()
+            length_file_s = self.length_file_spin.value() if hasattr(self, "length_file_spin") else 10.0
 
             if data_source == DataSource.PHASE and channel_num == 1:
                 total_points = calculate_phase_point_num(point_num, merge_points)
@@ -3615,16 +3895,15 @@ class MainWindow(QMainWindow):
                 source_points_per_frame,
                 storage_downsample_factor,
             )
-
-            if storage_format == STORAGE_FORMAT_BITSHUFFLE_ZSTD:
-                file_duration_s = self.bz_file_duration_spin.value() if hasattr(self, "bz_file_duration_spin") else 60
-                raw_file_size_mb = points_per_frame * max(1, channel_num) * max(1, self.scan_rate_spin.value()) * file_duration_s * 4 / (1024 * 1024)
-                self.file_size_label.setText(f"~{raw_file_size_mb:.1f}MB raw/file")
-            else:
-                block_size_mb = points_per_frame * max(1, frame_load_num) * channel_num * 4 / (1024 * 1024)
-                file_size_mb = block_size_mb * blocks_per_file
-                self.file_size_label.setText(f"~{file_size_mb:.1f}MB/file")
-
+            raw_file_size_mb = (
+                points_per_frame
+                * max(1, channel_num)
+                * max(1, self.scan_rate_spin.value())
+                * float(length_file_s)
+                * 4
+                / (1024 * 1024)
+            )
+            self.file_size_label.setText(f"~{raw_file_size_mb:.1f}MB/{length_file_s:.3g}s")
             self._update_bz_setting_hints()
 
         except Exception as e:

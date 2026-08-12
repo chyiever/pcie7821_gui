@@ -210,7 +210,7 @@ class DisplayParams:
         mode: Display mode (TIME/SPACE - see DisplayMode enum)
         region_index: Spatial position for SPACE mode display
         frame_load_num: Number of frames requested from the DLL buffer per software read block
-        frame_plot_num: Number of frames to use for waveform/PSD/time-space updates
+        frame_plot_num: Number of frames in each waveform/PSD/time-space display window and refresh period
         spectrum_enable: Enable FFT spectrum analysis display
         rad_enable: Convert phase data to radians for display (storage unaffected)
         waveform_plot_enabled: Enable plot 1 waveform updates
@@ -220,12 +220,16 @@ class DisplayParams:
           - Raw data: Power Spectrum
           - Phase data: PSD using scipy.welch
 
-    Constraint: frame_plot_num must not exceed frame_load_num in the current architecture.
+    The UI exposes Length/Load and Length/Plot in seconds. Runtime frame counts
+    are derived from those lengths and scan_rate before acquisition starts.
+    Length/Plot also drives the GUI latest-snapshot refresh interval.
     """
     mode: int = DisplayMode.TIME
     region_index: int = 0                    # Spatial position index for SPACE mode
-    frame_load_num: int = 1024               # Frames to read from FPGA per block
-    frame_plot_num: int = 1024               # Frames to display/analyze per update
+    length_load_s: float = 0.2               # Seconds per DLL read block
+    length_plot_s: float = 1.0               # Seconds per display window/refresh
+    frame_load_num: int = 400                # Derived frames per DLL read block at default 2000 Hz
+    frame_plot_num: int = 2000               # Derived frames per display refresh at default 2000 Hz
     spectrum_enable: bool = True             # Enable frequency domain analysis
     rad_enable: bool = True                  # Display-only radian conversion (default enabled)
     waveform_plot_enabled: bool = False      # Plot 1 switch
@@ -244,13 +248,13 @@ class SaveParams:
         enable: Enable/disable automatic data saving
         path: Directory path for data files (must exist and be writable)
         file_prefix: Optional prefix for generated filenames
-        blocks_per_file: Automatic .bin splitting threshold, counted in complete acquisition blocks
+        length_save_s: Seconds per storage packet/write unit for both .bin and .bz
+        length_file_s: Seconds of data per output file for both .bin and .bz
         storage_downsample_factor: Storage-only point picking factor (1=no downsampling)
         storage_format: File format, either raw .bin or compressed .bz
         bz_zstd_level: Zstd level for .bz packets
         bz_bitshuffle_block_values: Bitshuffle block size in int32 values
-        bz_packet_frames: Frames per compressed packet; 0 means scan_rate frames, about 1 second
-        bz_file_duration_s: Target .bz file duration before rotating to a new file
+        bz_compression_workers: Number of parallel .bz compression workers
 
     Filename Format: {seq}-eDAS-{rate}Hz-{points}pt-{timestamp}.{ms}.bin
     Storage Format: Raw int32 .bin or packetized Bitshuffle+Zstd .bz
@@ -260,13 +264,26 @@ class SaveParams:
     enable: bool = False
     path: str = "D:/eDAS_DATA"               # Default storage directory
     file_prefix: str = ""                    # Optional filename prefix
-    blocks_per_file: int = 10                # Auto-split after N complete acquisition blocks
+    length_save_s: float = 1.0              # Seconds per stored packet/write unit
+    length_file_s: float = 10.0              # Seconds of data per output file
     storage_downsample_factor: int = 1       # Save every Nth point; display/filter paths are unaffected
     storage_format: str = STORAGE_FORMAT_BIN # "bin" keeps the original raw binary saver
     bz_zstd_level: int = 3                   # Default Zstd compression level for .bz
     bz_bitshuffle_block_values: int = 65536  # Bitshuffle block size in int32 values
-    bz_packet_frames: int = 0                # 0 = scan_rate frames, usually a 1 second packet
-    bz_file_duration_s: int = 60             # Rotate .bz files after about 60 seconds
+    bz_compression_workers: int = 4          # Parallel .bz compression workers
+
+
+@dataclass
+class CommParams:
+    """
+    TCP communication packetization parameters.
+
+    Length/Comm is configured in seconds in Tab3 and converted to a frame count
+    before each acquisition session. It must be an integer multiple of
+    Length/Load so outgoing packets are composed of complete acquisition blocks.
+    """
+    length_comm_s: float = 1.0               # Seconds per TCP payload packet
+    comm_frame_num: int = 2000               # Derived frames per TCP packet at default 2000 Hz
 
 
 @dataclass
@@ -290,6 +307,7 @@ class AllParams:
     display: DisplayParams = field(default_factory=DisplayParams)
     save: SaveParams = field(default_factory=SaveParams)
     time_space: TimeSpaceParams = field(default_factory=TimeSpaceParams)
+    comm: CommParams = field(default_factory=CommParams)
 
 
 # ----- GUI OPTION MAPPINGS -----

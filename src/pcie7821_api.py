@@ -478,8 +478,28 @@ class PCIe7821API:
         point_num = ctypes.c_uint()
         with self._lock:
             start = time.perf_counter()
-            self.dll.pcie7821_point_num_per_ch_in_buf_query(ctypes.byref(point_num))
+            result = self.dll.pcie7821_point_num_per_ch_in_buf_query(ctypes.byref(point_num))
             elapsed = (time.perf_counter() - start) * 1000
+
+        if result != 0:
+            log.error(
+                f"query_buffer_points failed: code {result}, "
+                f"points={point_num.value}, elapsed={elapsed:.1f}ms"
+            )
+            raise PCIe7821Error(result, "query_buffer_points")
+
+        # 0xFFFFFFFF is a common invalid sentinel when a signed -1 leaks through
+        # an unsigned output parameter. Never treat it as available DMA data.
+        if point_num.value == 0xFFFFFFFF:
+            log.error(
+                "query_buffer_points returned invalid buffer count 0xFFFFFFFF; "
+                "driver/device state is likely stale or faulted"
+            )
+            raise PCIe7821Error(
+                -5,
+                "query_buffer_points returned invalid buffer count 0xFFFFFFFF; "
+                "reset the PCIe device/driver before starting acquisition again"
+            )
 
         # Only log occasionally to avoid spam (every 100th call or when slow)
         if elapsed > 10:
