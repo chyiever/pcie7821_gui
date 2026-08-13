@@ -71,6 +71,8 @@ class DataSaver:
         self._max_queue_size_seen = 0
         self._last_write_ms = 0.0
         self._last_write_bytes = 0
+        self._last_enqueue_ms = 0.0
+        self._max_enqueue_ms = 0.0
 
     def start(self, file_no: Optional[int] = None, scan_rate: int = 2000) -> str:
         """
@@ -116,6 +118,8 @@ class DataSaver:
         self._max_queue_size_seen = 0
         self._last_write_ms = 0.0
         self._last_write_bytes = 0
+        self._last_enqueue_ms = 0.0
+        self._max_enqueue_ms = 0.0
 
         # Clear queue
         while not self._data_queue.empty():
@@ -175,8 +179,11 @@ class DataSaver:
 
         try:
             # Keep queueing non-blocking; serialization is deferred to the save thread
-            # so the GUI thread only enqueues a reference to the latest numpy block.
+            # so the producer only enqueues a reference to the latest numpy block.
+            enqueue_start = time.perf_counter()
             self._data_queue.put_nowait(data)
+            self._last_enqueue_ms = (time.perf_counter() - enqueue_start) * 1000.0
+            self._max_enqueue_ms = max(self._max_enqueue_ms, self._last_enqueue_ms)
             self._enqueue_count += 1
             queue_size = self._data_queue.qsize()
             self._max_queue_size_seen = max(self._max_queue_size_seen, queue_size)
@@ -192,6 +199,8 @@ class DataSaver:
                 )
             return True
         except queue.Full:
+            self._last_enqueue_ms = (time.perf_counter() - enqueue_start) * 1000.0 if 'enqueue_start' in locals() else 0.0
+            self._max_enqueue_ms = max(self._max_enqueue_ms, self._last_enqueue_ms)
             self._dropped_blocks += 1
             block_bytes = int(data.nbytes) if isinstance(data, np.ndarray) else len(data)
             log.warning(
@@ -259,6 +268,8 @@ class DataSaver:
             "max_queue_size_seen": self._max_queue_size_seen,
             "last_write_ms": self._last_write_ms,
             "last_write_bytes": self._last_write_bytes,
+            "last_enqueue_ms": self._last_enqueue_ms,
+            "max_enqueue_ms": self._max_enqueue_ms,
             "is_running": self._running,
         }
 
@@ -347,6 +358,7 @@ class BlockBasedFileSaver(DataSaver):
         self._total_files_created = 0
         self._scan_rate = 2000
         self._points_per_frame = 0
+        self._source_points_per_frame = 0
         self._channel_num = 1
         self._data_source = 0
         self._storage_downsample_factor = 1
@@ -361,7 +373,8 @@ class BlockBasedFileSaver(DataSaver):
 
     def start(self, file_no: Optional[int] = None, scan_rate: int = 2000,
               points_per_frame: int = 0, channel_num: int = 1,
-              data_source: int = 0, storage_downsample_factor: int = 1) -> str:
+              data_source: int = 0, storage_downsample_factor: int = 1,
+              source_points_per_frame: Optional[int] = None) -> str:
         """Start saving with length-based packet and file splitting capability."""
         if self._running:
             return self._current_filename
@@ -376,6 +389,10 @@ class BlockBasedFileSaver(DataSaver):
 
         self._scan_rate = max(1, int(scan_rate))
         self._points_per_frame = max(1, int(points_per_frame))
+        self._source_points_per_frame = max(
+            self._points_per_frame,
+            int(source_points_per_frame or points_per_frame),
+        )
         self._channel_num = max(1, int(channel_num or 1))
         self._data_source = int(data_source)
         self._storage_downsample_factor = max(1, int(storage_downsample_factor or 1))
@@ -402,6 +419,8 @@ class BlockBasedFileSaver(DataSaver):
         self._max_queue_size_seen = 0
         self._last_write_ms = 0.0
         self._last_write_bytes = 0
+        self._last_enqueue_ms = 0.0
+        self._max_enqueue_ms = 0.0
 
         self._clear_queue(self._data_queue)
         self._current_filename = self._generate_filename()
@@ -411,7 +430,9 @@ class BlockBasedFileSaver(DataSaver):
         log.info(
             f"Started packetized .bin saving to {filepath} "
             f"(packet_frames={self._resolved_packet_frames}, file_frames={self._file_frames_per_file}, "
-            f"file_duration_s={self.file_duration_s:.3f}, queue_capacity={self.buffer_size})"
+            f"source_points={self._source_points_per_frame}, save_points={self._points_per_frame}, "
+            f"save_ds={self._storage_downsample_factor}, file_duration_s={self.file_duration_s:.3f}, "
+            f"queue_capacity={self.buffer_size})"
         )
 
         self._running = True
@@ -464,26 +485,45 @@ class BlockBasedFileSaver(DataSaver):
 
     def _coerce_block_to_frame_matrix(self, data: np.ndarray) -> np.ndarray:
         arr = np.asarray(data)
+        source_points = max(1, int(self._source_points_per_frame or self._points_per_frame))
+        save_points = max(1, int(self._points_per_frame))
+        factor = max(1, int(self._storage_downsample_factor or 1))
+
         if self._channel_num <= 1:
             flat = arr.reshape(-1)
-            frame_count = flat.size // self._points_per_frame
-            valid_items = frame_count * self._points_per_frame
+            frame_count = flat.size // source_points
+            valid_items = frame_count * source_points
             if valid_items < flat.size:
                 dropped = flat.size - valid_items
-                log.warning(f".bin packetizer dropped {dropped} trailing samples that do not fill a frame")
+                log.warning(f".bin packetizer dropped {dropped} trailing samples that do not fill a source frame")
             if frame_count <= 0:
                 return np.empty((0, self._packet_points_per_frame), dtype=arr.dtype)
-            return np.ascontiguousarray(flat[:valid_items].reshape(frame_count, self._points_per_frame))
+            framed = flat[:valid_items].reshape(frame_count, source_points)
+            if factor > 1:
+                framed = framed[:, ::factor]
+            if framed.shape[1] != save_points:
+                raise ValueError(
+                    f"Unexpected .bin save frame width after downsample: expected={save_points}, "
+                    f"actual={framed.shape[1]}, source={source_points}, factor={factor}"
+                )
+            return np.ascontiguousarray(framed)
 
         matrix = arr.reshape(-1, self._channel_num)
-        frame_count = matrix.shape[0] // self._points_per_frame
-        valid_rows = frame_count * self._points_per_frame
+        frame_count = matrix.shape[0] // source_points
+        valid_rows = frame_count * source_points
         if valid_rows < matrix.shape[0]:
             dropped = (matrix.shape[0] - valid_rows) * self._channel_num
-            log.warning(f".bin packetizer dropped {dropped} trailing channel samples that do not fill a frame")
+            log.warning(f".bin packetizer dropped {dropped} trailing channel samples that do not fill a source frame")
         if frame_count <= 0:
             return np.empty((0, self._packet_points_per_frame), dtype=arr.dtype)
-        framed = matrix[:valid_rows, :].reshape(frame_count, self._points_per_frame, self._channel_num)
+        framed = matrix[:valid_rows, :].reshape(frame_count, source_points, self._channel_num)
+        if factor > 1:
+            framed = framed[:, ::factor, :]
+        if framed.shape[1] != save_points:
+            raise ValueError(
+                f"Unexpected .bin save frame width after downsample: expected={save_points}, "
+                f"actual={framed.shape[1]}, source={source_points}, factor={factor}"
+            )
         return np.ascontiguousarray(framed.reshape(frame_count, self._packet_points_per_frame))
 
     def _append_frames_and_emit_packets(self, frames: np.ndarray):
@@ -586,6 +626,8 @@ class BlockBasedFileSaver(DataSaver):
         snapshot.update({
             "format": "bin",
             "packet_frames": self._resolved_packet_frames,
+            "source_points_per_frame": self._source_points_per_frame,
+            "storage_downsample_factor": self._storage_downsample_factor,
             "file_frames_per_file": self._file_frames_per_file,
             "file_frames_written": self._file_frames_written,
             "pending_frames": self._pending_frames,
@@ -684,6 +726,7 @@ class BitshuffleZstdFileSaver(DataSaver):
         self._pending_frames = 0
         self._packet_index = 0
         self._points_per_frame = 0
+        self._source_points_per_frame = 0
         self._packet_points_per_frame = 0
         self._channel_num = 1
         self._data_source = 0
@@ -713,7 +756,8 @@ class BitshuffleZstdFileSaver(DataSaver):
 
     def start(self, file_no: Optional[int] = None, scan_rate: int = 2000,
               points_per_frame: int = 0, channel_num: int = 1,
-              data_source: int = 0, storage_downsample_factor: int = 1) -> str:
+              data_source: int = 0, storage_downsample_factor: int = 1,
+              source_points_per_frame: Optional[int] = None) -> str:
         """Start .bz saving with packetized compression."""
         if self._running:
             return self._current_filename
@@ -728,6 +772,10 @@ class BitshuffleZstdFileSaver(DataSaver):
 
         self._scan_rate = max(1, int(scan_rate))
         self._points_per_frame = max(1, int(points_per_frame))
+        self._source_points_per_frame = max(
+            self._points_per_frame,
+            int(source_points_per_frame or points_per_frame),
+        )
         self._channel_num = max(1, int(channel_num or 1))
         self._data_source = int(data_source)
         self._storage_downsample_factor = max(1, int(storage_downsample_factor or 1))
@@ -768,6 +816,8 @@ class BitshuffleZstdFileSaver(DataSaver):
         self._last_packet_queue_full_log_ts = 0.0
         self._last_compressed_queue_full_log_ts = 0.0
         self._last_slow_compression_log_ts = 0.0
+        self._last_enqueue_ms = 0.0
+        self._max_enqueue_ms = 0.0
 
         self._clear_queue(self._data_queue)
         self._clear_queue(self._packet_queue)
@@ -790,7 +840,8 @@ class BitshuffleZstdFileSaver(DataSaver):
             f"Started Bitshuffle+Zstd saving to {self.save_path / self._current_filename} "
             f"(zstd_level={self.zstd_level}, bitshuffle_block={self.bitshuffle_block_values}, "
             f"packet_frames={self._resolved_packet_frames}, file_duration_s={self.file_duration_s:.3f}, "
-            f"raw_queue=0/{self.buffer_size}, packet_queue=0/{self.packet_queue_size}, "
+            f"source_points={self._source_points_per_frame}, save_points={self._points_per_frame}, "
+            f"save_ds={self._storage_downsample_factor}, raw_queue=0/{self.buffer_size}, packet_queue=0/{self.packet_queue_size}, "
             f"compressed_queue=0/{self.compressed_queue_size}, workers={self.compression_workers}, cache=False)"
         )
         return self._current_filename
@@ -853,7 +904,10 @@ class BitshuffleZstdFileSaver(DataSaver):
         block_bytes = int(data.nbytes) if isinstance(data, np.ndarray) else len(data)
         block_duration_s = self._estimate_block_duration_s(data)
         try:
+            enqueue_start = time.perf_counter()
             self._data_queue.put(data, timeout=self.raw_queue_put_timeout_s)
+            self._last_enqueue_ms = (time.perf_counter() - enqueue_start) * 1000.0
+            self._max_enqueue_ms = max(self._max_enqueue_ms, self._last_enqueue_ms)
             self._enqueue_count += 1
             queue_size = self._data_queue.qsize()
             self._max_queue_size_seen = max(self._max_queue_size_seen, queue_size)
@@ -873,6 +927,8 @@ class BitshuffleZstdFileSaver(DataSaver):
                 )
             return True
         except queue.Full:
+            self._last_enqueue_ms = (time.perf_counter() - enqueue_start) * 1000.0 if 'enqueue_start' in locals() else 0.0
+            self._max_enqueue_ms = max(self._max_enqueue_ms, self._last_enqueue_ms)
             dropped = self._increment_dropped_blocks()
             not_realtime = self._increment_not_realtime_count()
             backlog_s = self.buffer_size * block_duration_s if block_duration_s > 0 else 0.0
@@ -889,7 +945,9 @@ class BitshuffleZstdFileSaver(DataSaver):
     def _estimate_block_duration_s(self, data: np.ndarray) -> float:
         try:
             arr = np.asarray(data)
-            frames = int(arr.size) // max(1, self._packet_points_per_frame)
+            source_points = max(1, int(self._source_points_per_frame or self._points_per_frame))
+            source_packet_points = source_points * max(1, int(self._channel_num or 1))
+            frames = int(arr.size) // source_packet_points
             if frames > 0:
                 return frames / max(1, self._scan_rate)
         except Exception:
@@ -1093,28 +1151,47 @@ class BitshuffleZstdFileSaver(DataSaver):
 
     def _coerce_block_to_frame_matrix(self, data: np.ndarray) -> np.ndarray:
         arr = np.asarray(data, dtype=np.int32)
+        source_points = max(1, int(self._source_points_per_frame or self._points_per_frame))
+        save_points = max(1, int(self._points_per_frame))
+        factor = max(1, int(self._storage_downsample_factor or 1))
+
         if self._channel_num <= 1:
             flat = arr.reshape(-1)
-            frame_count = flat.size // self._points_per_frame
-            valid_items = frame_count * self._points_per_frame
+            frame_count = flat.size // source_points
+            valid_items = frame_count * source_points
             if valid_items < flat.size:
                 dropped = flat.size - valid_items
                 self._dropped_samples += dropped
-                log.warning(f"BZ packetizer dropped {dropped} trailing samples that do not fill a frame")
+                log.warning(f"BZ packetizer dropped {dropped} trailing samples that do not fill a source frame")
             if frame_count <= 0:
                 return np.empty((0, self._packet_points_per_frame), dtype=np.int32)
-            return np.ascontiguousarray(flat[:valid_items].reshape(frame_count, self._points_per_frame))
+            framed = flat[:valid_items].reshape(frame_count, source_points)
+            if factor > 1:
+                framed = framed[:, ::factor]
+            if framed.shape[1] != save_points:
+                raise ValueError(
+                    f"Unexpected BZ save frame width after downsample: expected={save_points}, "
+                    f"actual={framed.shape[1]}, source={source_points}, factor={factor}"
+                )
+            return np.ascontiguousarray(framed)
 
         matrix = arr.reshape(-1, self._channel_num)
-        frame_count = matrix.shape[0] // self._points_per_frame
-        valid_rows = frame_count * self._points_per_frame
+        frame_count = matrix.shape[0] // source_points
+        valid_rows = frame_count * source_points
         if valid_rows < matrix.shape[0]:
             dropped = (matrix.shape[0] - valid_rows) * self._channel_num
             self._dropped_samples += dropped
-            log.warning(f"BZ packetizer dropped {dropped} trailing channel samples that do not fill a frame")
+            log.warning(f"BZ packetizer dropped {dropped} trailing channel samples that do not fill a source frame")
         if frame_count <= 0:
             return np.empty((0, self._packet_points_per_frame), dtype=np.int32)
-        framed = matrix[:valid_rows, :].reshape(frame_count, self._points_per_frame, self._channel_num)
+        framed = matrix[:valid_rows, :].reshape(frame_count, source_points, self._channel_num)
+        if factor > 1:
+            framed = framed[:, ::factor, :]
+        if framed.shape[1] != save_points:
+            raise ValueError(
+                f"Unexpected BZ save frame width after downsample: expected={save_points}, "
+                f"actual={framed.shape[1]}, source={source_points}, factor={factor}"
+            )
         return np.ascontiguousarray(framed.reshape(frame_count, self._packet_points_per_frame))
 
     def _append_frames_and_emit_packets(self, frames: np.ndarray):
@@ -1374,6 +1451,8 @@ class BitshuffleZstdFileSaver(DataSaver):
             "compressed_queue_size_max": self.compressed_queue_size,
             "pending_frames": self._pending_frames,
             "packet_frames": self._resolved_packet_frames,
+            "source_points_per_frame": self._source_points_per_frame,
+            "storage_downsample_factor": self._storage_downsample_factor,
             "file_duration_s": self.file_duration_s,
             "compression_workers": self.compression_workers,
             "compression_threads_alive": sum(1 for thread in self._compress_threads if thread.is_alive()),

@@ -135,6 +135,10 @@ class MainWindow(QMainWindow):
         self._fatal_acq_error_stop_pending = False
         self._full_data_count = 0
         self._save_file_count_this_run = 0
+        self._last_save_enqueue_ms = 0.0
+        self._max_save_enqueue_ms = 0.0
+        self._last_tcp_enqueue_ms = 0.0
+        self._max_tcp_enqueue_ms = 0.0
         self._tcp_settings_snapshot: Dict[str, Any] = {}
 
         # System monitoring
@@ -2419,6 +2423,7 @@ class MainWindow(QMainWindow):
                     channel_num=params.upload.channel_num,
                     data_source=params.upload.data_source,
                     storage_downsample_factor=storage_downsample_factor,
+                    source_points_per_frame=self._get_save_source_points_per_frame(params),
                 )
             else:
                 filename = saver.start(
@@ -2427,6 +2432,7 @@ class MainWindow(QMainWindow):
                     channel_num=params.upload.channel_num,
                     data_source=params.upload.data_source,
                     storage_downsample_factor=storage_downsample_factor,
+                    source_points_per_frame=self._get_save_source_points_per_frame(params),
                 )
         except Exception as exc:
             log.exception(f"Failed to start data saver: {exc}")
@@ -2582,6 +2588,10 @@ class MainWindow(QMainWindow):
         self._gui_update_count = 0
         self._raw_data_count = 0
         self._full_data_count = 0
+        self._last_save_enqueue_ms = 0.0
+        self._max_save_enqueue_ms = 0.0
+        self._last_tcp_enqueue_ms = 0.0
+        self._max_tcp_enqueue_ms = 0.0
         self._last_data_time = time.time()
         self._recovery_in_progress = False
         self._last_raw_display_time = 0  # Force immediate first update
@@ -2707,15 +2717,32 @@ class MainWindow(QMainWindow):
         """Run in the acquisition thread and hand complete blocks to background consumers."""
         self._full_data_count += 1
 
-        if data_source == DataSource.PHASE:
-            self.tcp_tab3_manager.enqueue_phase_data(data, self.params, self._tcp_settings_snapshot)
-
+        # Storage is the highest-priority consumer. Keep this path to one queue put;
+        # storage-only downsampling now happens inside the saver thread.
         saver = self.data_saver
         if saver is not None and saver.is_running:
-            save_data = self._downsample_data_for_storage(data, data_source, channel_num)
-            save_ok = saver.save_block(save_data)
+            save_start = time.perf_counter()
+            save_ok = saver.save_block(data)
+            self._last_save_enqueue_ms = (time.perf_counter() - save_start) * 1000.0
+            self._max_save_enqueue_ms = max(self._max_save_enqueue_ms, self._last_save_enqueue_ms)
             if not save_ok:
                 log.warning(f"Save enqueue failed at full block #{self._full_data_count}")
+            elif self._last_save_enqueue_ms > 5.0:
+                log.warning(
+                    f"Slow save enqueue: {self._last_save_enqueue_ms:.1f}ms, "
+                    f"block={self._full_data_count}, queue={saver.queue_size}/{getattr(saver, 'buffer_size', 0)}"
+                )
+
+        if data_source == DataSource.PHASE:
+            tcp_start = time.perf_counter()
+            self.tcp_tab3_manager.enqueue_phase_data(data, self.params, self._tcp_settings_snapshot)
+            self._last_tcp_enqueue_ms = (time.perf_counter() - tcp_start) * 1000.0
+            self._max_tcp_enqueue_ms = max(self._max_tcp_enqueue_ms, self._last_tcp_enqueue_ms)
+            if self._last_tcp_enqueue_ms > 5.0:
+                log.warning(
+                    f"Slow TCP ingest enqueue: {self._last_tcp_enqueue_ms:.1f}ms, "
+                    f"block={self._full_data_count}"
+                )
 
     def _downsample_data_for_storage(self, data: np.ndarray, data_source: int, channel_num: int) -> np.ndarray:
         """Apply storage-only point picking without changing display, filter, or TCP data."""
@@ -3623,13 +3650,18 @@ class MainWindow(QMainWindow):
                 f"packet_full={snapshot.get('packet_queue_full_count', 0)}, "
                 f"compressed_full={snapshot.get('compressed_queue_full_count', 0)}, "
                 f"last_compress_ms={snapshot['last_compress_ms']:.1f}, "
-                f"last_write_ms={snapshot['last_write_ms']:.1f}"
+                f"last_write_ms={snapshot['last_write_ms']:.1f}, "
+                f"enqueue_ms={snapshot.get('last_enqueue_ms', 0.0):.2f}/{snapshot.get('max_enqueue_ms', 0.0):.2f}"
             )
         else:
             queue_size = self.data_saver.queue_size
             queue_max = getattr(self.data_saver, 'buffer_size', OPTIMIZED_BUFFER_SIZES['storage_queue_frames'])
             dropped = self.data_saver.dropped_blocks
-            log.info(f"Storage queue: {queue_size}/{queue_max}, dropped={dropped}")
+            snapshot = self.data_saver.get_diagnostics_snapshot() if hasattr(self.data_saver, "get_diagnostics_snapshot") else {}
+            log.info(
+                f"Storage queue: {queue_size}/{queue_max}, dropped={dropped}, "
+                f"enqueue_ms={snapshot.get('last_enqueue_ms', 0.0):.2f}/{snapshot.get('max_enqueue_ms', 0.0):.2f}"
+            )
         self._last_storage_queue_log_time = now
 
     def _log_acquisition_diagnostics(self, reason: str, force: bool = False):
@@ -3659,6 +3691,8 @@ class MainWindow(QMainWindow):
             f"crop_ms={snapshot.get('last_crop_ms', 0.0):.1f}",
             f"dispatch_ms={snapshot.get('last_dispatch_ms', 0.0):.1f}",
             f"display_pub_ms={snapshot.get('last_display_publish_ms', 0.0):.1f}",
+            f"save_enqueue_ms={self._last_save_enqueue_ms:.2f}/{self._max_save_enqueue_ms:.2f}",
+            f"tcp_enqueue_ms={self._last_tcp_enqueue_ms:.2f}/{self._max_tcp_enqueue_ms:.2f}",
             f"read_age_s={snapshot['last_successful_read_age_s']:.1f}",
             f"monitor_enabled={int(bool(snapshot.get('monitor_read_enabled', False)))}",
             f"monitor_ms={snapshot['last_monitor_read_ms']:.1f}",
@@ -3675,6 +3709,15 @@ class MainWindow(QMainWindow):
         if query_error:
             parts.append(f"query_error={query_error}")
 
+        if hasattr(self.tcp_tab3_manager, "get_diagnostics_snapshot"):
+            tcp_diag = self.tcp_tab3_manager.get_diagnostics_snapshot()
+            parts.extend([
+                f"tcp_ingest_queue={tcp_diag.get('tcp_ingest_queue', 0)}/{tcp_diag.get('tcp_ingest_queue_max', 0)}",
+                f"tcp_ingest_dropped={tcp_diag.get('tcp_ingest_dropped', 0)}",
+                f"tcp_ingest_ms={tcp_diag.get('tcp_ingest_enqueue_ms', 0.0):.2f}/{tcp_diag.get('tcp_ingest_max_enqueue_ms', 0.0):.2f}",
+                f"tcp_process_ms={tcp_diag.get('tcp_ingest_process_ms', 0.0):.1f}/{tcp_diag.get('tcp_ingest_max_process_ms', 0.0):.1f}",
+            ])
+
         if self.data_saver is not None and hasattr(self.data_saver, "get_diagnostics_snapshot"):
             saver = self.data_saver.get_diagnostics_snapshot()
             parts.extend([
@@ -3683,6 +3726,7 @@ class MainWindow(QMainWindow):
                 f"save_dropped={saver['dropped_blocks']}",
                 f"save_written={saver['blocks_written']}",
                 f"save_last_write_ms={saver['last_write_ms']:.1f}",
+                f"save_enqueue_internal_ms={saver.get('last_enqueue_ms', 0.0):.2f}/{saver.get('max_enqueue_ms', 0.0):.2f}",
             ])
             if saver.get("format") == "bz":
                 parts.extend([

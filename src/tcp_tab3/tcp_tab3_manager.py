@@ -7,7 +7,10 @@
 """
 from __future__ import annotations
 
-from typing import Dict, List
+import threading
+import time
+from collections import deque
+from typing import Deque, Dict, List, Tuple
 
 import numpy as np
 
@@ -36,9 +39,28 @@ class TCPTab3Manager(QObject):
         self._pending_comm_chunks: List[np.ndarray] = []
         self._pending_comm_frames = 0
         self._pending_comm_signature = None
+        self._ingest_queue: Deque[Tuple[object, AllParams, Dict[str, object]]] = deque()
+        self._ingest_queue_max_blocks = 16
+        self._ingest_condition = threading.Condition()
+        self._state_lock = threading.Lock()
+        self._ingest_running = True
+        self._ingest_thread = threading.Thread(target=self._ingest_loop, daemon=True)
+        self._ingest_thread.start()
+        self._ingest_enqueued_blocks = 0
+        self._ingest_dropped_blocks = 0
+        self._ingest_max_queue_seen = 0
+        self._last_ingest_enqueue_ms = 0.0
+        self._max_ingest_enqueue_ms = 0.0
+        self._last_ingest_process_ms = 0.0
+        self._max_ingest_process_ms = 0.0
 
     def shutdown(self) -> None:
         """Release the background worker."""
+        with self._ingest_condition:
+            self._ingest_running = False
+            self._ingest_queue.clear()
+            self._ingest_condition.notify_all()
+        self._ingest_thread.join(timeout=3.0)
         self._worker.shutdown()
 
     def update_enabled(self, enabled: bool, params: AllParams) -> None:
@@ -102,7 +124,17 @@ class TCPTab3Manager(QObject):
             )
             return False
 
-        self._reset_pending_comm_frames()
+        with self._state_lock:
+            self._reset_pending_comm_frames()
+        with self._ingest_condition:
+            self._ingest_queue.clear()
+            self._ingest_enqueued_blocks = 0
+            self._ingest_dropped_blocks = 0
+            self._ingest_max_queue_seen = 0
+            self._last_ingest_enqueue_ms = 0.0
+            self._max_ingest_enqueue_ms = 0.0
+            self._last_ingest_process_ms = 0.0
+            self._max_ingest_process_ms = 0.0
         self._worker.start_session()
         self._session_ready = True
         return True
@@ -110,14 +142,73 @@ class TCPTab3Manager(QObject):
     def stop_session(self) -> None:
         """Stop the current communication session."""
         self._session_ready = False
-        self._reset_pending_comm_frames()
+        with self._ingest_condition:
+            self._ingest_queue.clear()
+            self._ingest_condition.notify_all()
+        with self._state_lock:
+            self._reset_pending_comm_frames()
         self._worker.stop_session()
 
     def enqueue_phase_data(self, phase_data, params: AllParams, settings_dict: Dict[str, object]) -> None:
-        """Queue phase data after aggregating Length/Load blocks into Length/Comm packets."""
+        """Queue one phase block for background TCP ingest without blocking acquisition."""
         if not self._session_ready:
             return
+        enqueue_start = time.perf_counter()
+        settings_snapshot = dict(settings_dict)
+        queue_max = max(4, int(settings_snapshot.get("queue_max_packets", 8)) * 2)
+        with self._ingest_condition:
+            if not self._session_ready:
+                return
+            self._ingest_queue_max_blocks = queue_max
+            while len(self._ingest_queue) >= self._ingest_queue_max_blocks:
+                self._ingest_queue.popleft()
+                self._ingest_dropped_blocks += 1
+            self._ingest_queue.append((phase_data, params, settings_snapshot))
+            self._ingest_enqueued_blocks += 1
+            self._ingest_max_queue_seen = max(self._ingest_max_queue_seen, len(self._ingest_queue))
+            self._last_ingest_enqueue_ms = (time.perf_counter() - enqueue_start) * 1000.0
+            self._max_ingest_enqueue_ms = max(self._max_ingest_enqueue_ms, self._last_ingest_enqueue_ms)
+            self._ingest_condition.notify()
 
+    def get_diagnostics_snapshot(self) -> dict:
+        """Return TCP ingest diagnostics for acquisition snapshots."""
+        with self._ingest_condition:
+            return {
+                "tcp_ingest_queue": len(self._ingest_queue),
+                "tcp_ingest_queue_max": self._ingest_queue_max_blocks,
+                "tcp_ingest_enqueued": self._ingest_enqueued_blocks,
+                "tcp_ingest_dropped": self._ingest_dropped_blocks,
+                "tcp_ingest_max_queue_seen": self._ingest_max_queue_seen,
+                "tcp_ingest_enqueue_ms": self._last_ingest_enqueue_ms,
+                "tcp_ingest_max_enqueue_ms": self._max_ingest_enqueue_ms,
+                "tcp_ingest_process_ms": self._last_ingest_process_ms,
+                "tcp_ingest_max_process_ms": self._max_ingest_process_ms,
+            }
+
+    def _ingest_loop(self) -> None:
+        while True:
+            with self._ingest_condition:
+                while self._ingest_running and not self._ingest_queue:
+                    self._ingest_condition.wait(timeout=0.5)
+                if not self._ingest_running:
+                    return
+                phase_data, params, settings_dict = self._ingest_queue.popleft()
+
+            process_start = time.perf_counter()
+            try:
+                with self._state_lock:
+                    if self._session_ready:
+                        self._process_phase_data(phase_data, params, settings_dict)
+            except Exception as exc:
+                self._emit_error(f"TCP ingest failed: {exc}")
+            finally:
+                elapsed_ms = (time.perf_counter() - process_start) * 1000.0
+                with self._ingest_condition:
+                    self._last_ingest_process_ms = elapsed_ms
+                    self._max_ingest_process_ms = max(self._max_ingest_process_ms, elapsed_ms)
+
+    def _process_phase_data(self, phase_data, params: AllParams, settings_dict: Dict[str, object]) -> None:
+        """Aggregate Length/Load phase blocks into Length/Comm packets in the TCP ingest thread."""
         load_frame_num = max(1, int(params.display.frame_load_num))
         comm_frames = max(
             1,

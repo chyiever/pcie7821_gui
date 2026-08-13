@@ -783,3 +783,13 @@ python build_exe.py --name eDAS20260720-173900 --skip-clean
 - 增加采集诊断字段：`api_read_ms`、`crop_ms`、`dispatch_ms`、`display_pub_ms`、`monitor_read_enabled`，便于后续复测直接定位瓶颈。
 - 调整 `.bz` 存储实时性指标：将单包慢压缩拆为 `slow_compression_packet_count`，`compression_not_realtime_count` 只保留明确队列满/失败等实时链路风险事件，避免误判本地存储失败。
 - 新增分析报告：`docs/2026-08-12日志分析与软件优化.md`，并同步更新 `.bz` 数据存储技术说明。
+
+## 2026-08-13 实时链路保存优先优化
+
+- 针对 2026-08-12 长时间日志中驱动缓冲积压峰值约 32.65 s 的问题，继续优化采集线程到本地保存线程之间的实时链路。
+- 调整完整数据回调优先级：采集线程收到完整块后先执行本地保存入队，再处理 Tab3 TCP 通信 ingest，避免通信聚合推迟保存入队。
+- 将存储专用降采样从主窗口采集回调移入 `.bin`/`.bz` 保存后台线程，采集线程不再执行大块数组点抽取和拼接。
+- 为保存器新增 `last_enqueue_ms`、`max_enqueue_ms`、`source_points_per_frame`、`storage_downsample_factor` 诊断字段，便于复测时直接判断保存入队是否拖慢采集。
+- Tab3 TCP 通信新增后台 ingest 队列和线程，采集线程只做轻量入队；Length/Comm 聚合和通信包准备在 TCP 后台线程完成。TCP ingest 队列满时丢弃最旧通信块，只影响通信，不影响本地保存。
+- 主采集快照新增 `save_enqueue_ms`、`tcp_enqueue_ms`、`tcp_ingest_queue`、`tcp_ingest_dropped`、`tcp_process_ms` 等字段，用于区分保存、通信、GUI、DLL 读取各自耗时。
+- 验证：`python -m py_compile src\data_saver.py src\main_window.py src\tcp_tab3\tcp_tab3_manager.py src\acquisition_thread.py` 通过；保存线程内部降采样小数组测试通过；TCP ingest 启停生命周期测试通过；`git diff --check` 通过。
