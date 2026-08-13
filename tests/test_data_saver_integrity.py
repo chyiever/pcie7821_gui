@@ -89,6 +89,9 @@ class DataSaverIntegrityTests(unittest.TestCase):
             self.assertEqual(diag["dropped_blocks"], 0)
             self.assertEqual(diag["pending_frames"], 0)
             self.assertEqual(diag["packets_written"], 3)
+            self.assertEqual(diag["frames_received"], self.TOTAL_FRAMES)
+            self.assertEqual(diag["frames_written"], self.TOTAL_FRAMES)
+            self.assertEqual(diag["continuity_gap"], 0)
             self.assertEqual(diag["bytes_written"], expected.nbytes)
 
     def test_bz_round_trip_crc_order_tail_rotation_and_downsample(self) -> None:
@@ -127,6 +130,9 @@ class DataSaverIntegrityTests(unittest.TestCase):
             self.assertEqual(diag["pending_frames"], 0)
             self.assertEqual(diag["packets_written"], 3)
             self.assertFalse(diag["has_cache"])
+            self.assertEqual(diag["frames_received"], self.TOTAL_FRAMES)
+            self.assertEqual(diag["frames_written"], self.TOTAL_FRAMES)
+            self.assertEqual(diag["continuity_gap"], 0)
 
     def test_stop_waits_past_old_timeout_without_truncating(self) -> None:
         class DelayedWriter(BlockBasedFileSaver):

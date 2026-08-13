@@ -119,14 +119,18 @@ class AcquisitionThread(QThread):
         self._display_history_frames = 0
         self._display_history_signature = None
         self._display_publish_interval_s = 1.0
+        self._display_publish_tolerance_s = 0.0
         self._last_display_publish_at = 0.0
         self._display_mode = None
         self._display_region_index = 0
         self._display_requires_full_window = False
+        self._display_incremental_full_width = False
         self._monitor_read_enabled = False
         self._full_data_handler: Optional[Callable[[np.ndarray, int, int], None]] = None
         self._last_successful_read_time = 0.0
         self._expected_block_duration_ms = 0.0
+        self._acquisition_started_at = 0.0
+        self._frame_rate_warning_logged = False
 
         # Dynamic polling: switch between fast/slow intervals based on buffer fill.
         # Hysteresis between high/low thresholds prevents oscillation.
@@ -170,10 +174,15 @@ class AcquisitionThread(QThread):
             MIN_GUI_UPDATE_INTERVAL_MS / 1000.0,
             int(params.display.frame_plot_num) / max(1, int(params.basic.scan_rate)),
         )
+        self._display_publish_tolerance_s = min(
+            0.050,
+            max(0.005, block_duration_ms / 1000.0 * 0.15),
+        )
         self._last_display_publish_at = 0.0
         self._display_mode = int(getattr(params.display, "mode", 0))
         self._display_region_index = int(getattr(params.display, "region_index", 0))
         self._display_requires_full_window = False
+        self._display_incremental_full_width = False
         self._monitor_read_enabled = bool(
             self._data_source == DataSource.PHASE
             and getattr(params.display, "monitor_plot_enabled", False)
@@ -192,26 +201,36 @@ class AcquisitionThread(QThread):
         mode: int,
         region_index: int,
         require_full_window: bool,
+        incremental_full_width: bool = False,
     ) -> None:
         """Update the GUI snapshot shape without changing the full-data path."""
-        request = (int(mode), int(region_index), bool(require_full_window))
+        request = (
+            int(mode), int(region_index), bool(require_full_window), bool(incremental_full_width)
+        )
         current = (
             self._display_mode,
             self._display_region_index,
             self._display_requires_full_window,
+            self._display_incremental_full_width,
         )
         if request == current:
             return
 
-        self._display_mode, self._display_region_index, self._display_requires_full_window = request
+        (
+            self._display_mode,
+            self._display_region_index,
+            self._display_requires_full_window,
+            self._display_incremental_full_width,
+        ) = request
         with self._latest_display_lock:
             self._latest_display_data = None
         self._last_display_publish_at = 0.0
         log.info(
-            "Display request changed: mode=%s, region=%d, full_window=%d",
+            "Display request changed: mode=%s, region=%d, full_window=%d, incremental_full_width=%d",
             self._display_mode,
             self._display_region_index,
             int(self._display_requires_full_window),
+            int(self._display_incremental_full_width),
         )
 
     def _set_stage(self, stage: str, detail: str = ""):
@@ -222,10 +241,27 @@ class AcquisitionThread(QThread):
 
     def get_diagnostics_snapshot(self) -> dict:
         """Return a lightweight diagnostic snapshot for stall analysis."""
+        elapsed_s = (
+            time.perf_counter() - self._acquisition_started_at
+            if self._acquisition_started_at > 0.0
+            else 0.0
+        )
+        configured_fps = max(1, int(self._params.basic.scan_rate)) if self._params else 0
+        measured_fps = self._frames_acquired / elapsed_s if elapsed_s > 0.0 else 0.0
+        points_per_frame = max(
+            1,
+            int(self._point_num_after_merge if self._data_source == DataSource.PHASE else self._total_point_num),
+        )
+        pending_frames = self._last_buffer_points / points_per_frame
         return {
             "loop_count": self._loop_count,
             "frames_acquired": self._frames_acquired,
             "bytes_acquired": self._bytes_acquired,
+            "elapsed_s": elapsed_s,
+            "configured_fps": configured_fps,
+            "measured_fps": measured_fps,
+            "measured_fps_ratio": measured_fps / configured_fps if configured_fps > 0 else 0.0,
+            "driver_pending_frames": pending_frames,
             "phase_emit_count": self._phase_emit_count,
             "raw_emit_count": self._raw_emit_count,
             "monitor_emit_count": self._monitor_emit_count,
@@ -432,7 +468,9 @@ class AcquisitionThread(QThread):
         self._consecutive_buffer_query_errors = 0
         self._last_buffer_query_error_message = ""
         self._last_buffer_query_error_log_time = 0.0
+        self._frame_rate_warning_logged = False
         self._last_successful_read_time = time.perf_counter()
+        self._acquisition_started_at = self._last_successful_read_time
         self.clear_latest_display_data()
         self._set_stage("started")
 
@@ -451,6 +489,9 @@ class AcquisitionThread(QThread):
                     log.info(
                         "Status: "
                         f"loops={snapshot['loop_count']}, frames={snapshot['frames_acquired']}, "
+                        f"measured_fps={snapshot['measured_fps']:.1f}, "
+                        f"fps_ratio={snapshot['measured_fps_ratio']:.3f}, "
+                        f"driver_pending_frames={snapshot['driver_pending_frames']:.0f}, "
                         f"bytes={snapshot['bytes_acquired']/1024/1024:.1f}MB, "
                         f"stage={snapshot['current_stage']}, stage_ms={snapshot['stage_elapsed_ms']:.1f}, "
                         f"buffer={snapshot['last_buffer_points']}/{snapshot['last_expected_points']}, "
@@ -461,6 +502,17 @@ class AcquisitionThread(QThread):
                         f"emit_phase={snapshot['phase_emit_count']}, emit_raw={snapshot['raw_emit_count']}, "
                         f"gui_skips={snapshot['gui_skip_count']}"
                     )
+                    if (
+                        snapshot["elapsed_s"] >= 10.0
+                        and snapshot["measured_fps_ratio"] < 0.90
+                        and not self._frame_rate_warning_logged
+                    ):
+                        log.warning(
+                            "Measured output frame rate is below configured scan rate: configured=%dHz, "
+                            "measured=%.1ffps, ratio=%.3f; verify PolarDiv frame semantics and DLL/firmware limits",
+                            snapshot["configured_fps"], snapshot["measured_fps"], snapshot["measured_fps_ratio"],
+                        )
+                        self._frame_rate_warning_logged = True
                     self._last_log_time = now
 
                 # Check for pause
@@ -750,7 +802,8 @@ class AcquisitionThread(QThread):
         now = time.perf_counter()
         return (
             self._last_display_publish_at <= 0.0
-            or now - self._last_display_publish_at >= self._display_publish_interval_s
+            or now - self._last_display_publish_at
+            >= self._display_publish_interval_s - self._display_publish_tolerance_s
         )
 
     def _current_display_history(self) -> np.ndarray:
@@ -771,8 +824,11 @@ class AcquisitionThread(QThread):
         target_frames = max(1, int(self._params.display.frame_plot_num))
         arr = np.asarray(data)
         snapshot_kind = 0
-        if int(data_source) == int(DataSource.PHASE) and not self._display_requires_full_window:
-            snapshot_kind = 1 if int(self._display_mode or 0) == 1 else 2
+        if int(data_source) == int(DataSource.PHASE):
+            if self._display_incremental_full_width:
+                snapshot_kind = 3
+            elif not self._display_requires_full_window:
+                snapshot_kind = 1 if int(self._display_mode or 0) == 1 else 2
         history_target_frames = target_frames if snapshot_kind != 2 else 4
 
         if channel_num == 1:
@@ -833,6 +889,9 @@ class AcquisitionThread(QThread):
             if self._latest_display_data is not None:
                 self._gui_skip_count += 1
                 self._last_display_publish_at = time.perf_counter()
+                if snapshot_kind == 3:
+                    self._display_history_chunks = []
+                    self._display_history_frames = 0
                 self._last_display_publish_ms = (self._last_display_publish_at - start) * 1000.0
                 return
 
@@ -853,6 +912,9 @@ class AcquisitionThread(QThread):
                 channel_num,
                 snapshot_kind,
             )
+        if snapshot_kind == 3:
+            self._display_history_chunks = []
+            self._display_history_frames = 0
 
         self.display_snapshot_ready.emit()
         if data_source == DataSource.PHASE:

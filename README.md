@@ -152,6 +152,7 @@ tcp_packet_bytes = 24 + payload_bytes
 | `docs/2026-03-14-Tab3-DAS数据通信功能开发方案.md` | Tab3 TCP 协议、Length/Comm 聚合和单包长度计算。 |
 | `docs/2026-7-29采集卡挂死原因分析与各个环节单包数据长度梳理.md` | 2026-07-29 挂死原因、重启失败证据和各环节单包长度总表。 |
 | `docs/2026-08-13日志分析与显示流畅性优化.md` | 2026-08-13/14 显示卡顿分析、事件驱动优化、存储完整性预检和复测指标。 |
+| `docs/2026-08-14-latest-log-display-storage-frame-rate-analysis.md` | 2026-08-14 最新日志、BIN/BZ 文件名时间戳、0.4 s 刷新和约 50 kframe/s 实测输出分析。 |
 
 ## 10. 开发注意事项
 

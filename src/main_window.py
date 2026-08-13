@@ -2074,7 +2074,18 @@ class MainWindow(QMainWindow):
         if self.api is None:
             return False
 
-        log.info("Configuring device...")
+        log.info(
+            "Configuring device: clk=%s, trig=%s, scan_rate=%d, pulse_ns=%d, points=%d, "
+            "bypass=%d, center_mhz=%d, channels=%d, data_source=%d, data_rate=%d, "
+            "rate2phase=%d, space_avg=%d, merge=%d, diff=%d, detrend_bw=%.3f, polar_div=%d",
+            params.basic.clk_src, params.basic.trig_dir, params.basic.scan_rate,
+            params.basic.pulse_width_ns, params.basic.point_num_per_scan,
+            params.basic.bypass_point_num, params.basic.center_freq_mhz,
+            params.upload.channel_num, params.upload.data_source, params.upload.data_rate,
+            params.phase_demod.rate2phase, params.phase_demod.space_avg_order,
+            params.phase_demod.merge_point_num, params.phase_demod.diff_order,
+            params.phase_demod.detrend_bw, int(params.phase_demod.polarization_diversity),
+        )
         try:
             self.api.set_clk_src(params.basic.clk_src)
             self.api.set_trig_dir(params.basic.trig_dir)
@@ -3314,6 +3325,21 @@ class MainWindow(QMainWindow):
         spectrum_enabled = bool(self.params.display.spectrum_enable)
         compact_space = snapshot_kind == 1
         compact_time = snapshot_kind == 2
+        incremental_time_space = snapshot_kind == 3
+        if incremental_time_space:
+            display_data, frame_num = self._select_latest_display_frames(
+                data, point_num, channel_num, max(1, int(np.asarray(data).size // (point_num * channel_num))),
+            )
+            if frame_num <= 0:
+                return
+            self.time_space_widget.set_scan_rate(self.params.basic.scan_rate)
+            if channel_num == 1:
+                reshaped_data = np.asarray(display_data).reshape(frame_num, point_num)
+            else:
+                matrix = np.asarray(display_data).reshape(-1, channel_num)
+                reshaped_data = matrix[-frame_num * point_num:, 0].reshape(frame_num, point_num)
+            self.time_space_widget.update_data(reshaped_data, display_scale=phase_scale)
+            return
         if compact_space:
             compact = np.asarray(data)
             frame_num = min(int(self.params.display.frame_plot_num), int(compact.shape[0]))
@@ -3801,6 +3827,10 @@ class MainWindow(QMainWindow):
             f"stage_ms={snapshot['stage_elapsed_ms']:.1f}",
             f"loop={snapshot['loop_count']}",
             f"frames={snapshot['frames_acquired']}",
+            f"configured_fps={snapshot.get('configured_fps', 0)}",
+            f"measured_fps={snapshot.get('measured_fps', 0.0):.1f}",
+            f"fps_ratio={snapshot.get('measured_fps_ratio', 0.0):.3f}",
+            f"driver_pending_frames={snapshot.get('driver_pending_frames', 0.0):.0f}",
             f"buffer={snapshot['last_buffer_points']}/{snapshot['last_expected_points']}",
             f"buffer_ratio={snapshot.get('buffer_ratio', 0.0):.2f}",
             f"backlog_s={snapshot.get('backlog_s', 0.0):.2f}",
@@ -3848,6 +3878,9 @@ class MainWindow(QMainWindow):
                 f"save_dropped={saver['dropped_blocks']}",
                 f"save_written={saver['blocks_written']}",
                 f"save_last_write_ms={saver['last_write_ms']:.1f}",
+                f"save_frames_received={saver.get('frames_received', 0)}",
+                f"save_frames_written={saver.get('frames_written', 0)}",
+                f"save_continuity_gap={saver.get('continuity_gap', 0)}",
                 f"save_enqueue_internal_ms={saver.get('last_enqueue_ms', 0.0):.2f}/{saver.get('max_enqueue_ms', 0.0):.2f}",
             ])
             if saver.get("format") == "bz":
@@ -3913,14 +3946,15 @@ class MainWindow(QMainWindow):
         thread = self.acq_thread
         if thread is None or not hasattr(thread, 'set_display_request'):
             return
+        time_space_active = self._time_space_full_window_required()
         thread.set_display_request(
             int(self.params.display.mode),
             int(self.params.display.region_index),
-            self._time_space_full_window_required()
-            or (
+            (
                 int(self.params.display.mode) == int(DisplayMode.TIME)
                 and bool(self._filter_enabled)
             ),
+            incremental_full_width=time_space_active,
         )
 
     @pyqtSlot(int)

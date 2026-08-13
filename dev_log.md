@@ -815,3 +815,14 @@ python build_exe.py --name eDAS20260720-173900 --skip-clean
 - 现实尺寸 .bin：3 x 53.41 MiB 全部写入，约 1306.6 MiB/s，字节数一致。
 - 现实尺寸 .bz：默认 1 s 包输入 267.03 MiB，压缩约 2683.5 ms，文件 133.62 MiB，CRC/逐点一致且无丢块；4 worker 的 0.2 s 包持续测试约 171 MiB/s，低于约 267 MiB/s 输入速率。高负载长期完整保存优先 .bin，.bz 需提高 Save DS 后复测。
 - 验证：py_compile、5 项 unittest、离屏 Qt 0.4 s 节拍测试、存储现实尺寸基准和 git diff --check 均通过。
+
+## 2026-08-14 05:02 日志显示节拍、存储连续性与真实帧率复核
+
+- 分析 `logs/20260814_050253.log`：0.4 s 显示刷新约 0.8 s 的直接原因是采集块约 0.390~0.409 s 到达，旧节流严格要求满 0.400 s，早到块被跳过后等待下一块；Tab2 还重复执行 Tab1 全窗口处理。
+- 显示发布增加 30 ms 容差；Tab2 改为不重叠增量二维快照，GUI 使用 `snapshot_kind=3` 直接更新 Time-Space，不再经过 Tab1 波形/频谱路径。
+- 结合文件名统计确认 BIN 92 个文件序号 1..92，文件间隔中位数 2.004 s；BZ 42 个文件序号 1..42，文件间隔中位数 2.002 s。两种格式和无存储运行均约 50 kframe/s，排除保存器时间降采样。
+- 每个 BIN 文件 100K 帧、280,000,000 bytes，92 个文件总量和 460 个 20K 包完全匹配；BZ 208 个 20K 包全部写入。该结论证明应用收到的数据完整，但不能仅凭 100K 帧文件证明真实墙钟时长为 1 秒。
+- 50 kframe/s 最可能与 `PolarDiv` 两扫描合一帧有关，仍需关闭 PolarDiv 做 A/B 测试；另修复 DLL 配置 setter 返回码被忽略的问题，并在 INFO 日志输出完整硬件参数。
+- 采集日志新增 `configured_fps`、`measured_fps`、`fps_ratio`、`driver_pending_frames`；BIN/BZ 新增 `frames_received`、`frames_written`、`pending_frames`、`continuity_gap` 完整性摘要，明确 Save DS 仅为空间降采样。
+- 新增分析文档 `docs/2026-08-14-latest-log-display-storage-frame-rate-analysis.md`。
+- 验证：4 个核心模块 `py_compile` 通过；显示节拍与存储完整性共 7 项测试全部通过，包含 390 ms 节拍容差、Tab2 增量快照不重叠、BIN 逐值回读、BZ CRC/包序、尾包、文件轮转、停止排空和接收/写入帧数一致性。

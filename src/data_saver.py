@@ -442,6 +442,8 @@ class BlockBasedFileSaver(DataSaver):
         self._file_frames_per_file = 0
         self._file_frames_written = 0
         self._packets_written = 0
+        self._frames_received = 0
+        self._frames_written = 0
         self._pending_chunks: List[np.ndarray] = []
         self._pending_frames = 0
         self._packets_per_file = self._legacy_blocks_per_file
@@ -485,6 +487,8 @@ class BlockBasedFileSaver(DataSaver):
         self._total_files_created = 1
         self._file_frames_written = 0
         self._packets_written = 0
+        self._frames_received = 0
+        self._frames_written = 0
         self._pending_chunks = []
         self._pending_frames = 0
         self._bytes_written = 0
@@ -602,6 +606,7 @@ class BlockBasedFileSaver(DataSaver):
         return np.ascontiguousarray(framed.reshape(frame_count, self._packet_points_per_frame))
 
     def _append_frames_and_emit_packets(self, frames: np.ndarray):
+        self._frames_received += int(frames.shape[0])
         self._pending_chunks.append(frames)
         self._pending_frames += int(frames.shape[0])
         while self._pending_frames >= self._resolved_packet_frames:
@@ -673,6 +678,7 @@ class BlockBasedFileSaver(DataSaver):
         self._bytes_written += len(payload)
         self._blocks_written += 1
         self._packets_written += 1
+        self._frames_written += int(samples.shape[0])
         self._block_count += 1
         self._file_frames_written += int(samples.shape[0])
 
@@ -690,10 +696,18 @@ class BlockBasedFileSaver(DataSaver):
 
     def stop(self):
         """Stop and update total statistics."""
+        was_running = self._running
         super().stop()
+        if not was_running:
+            return
+        continuity_gap = self._frames_received - self._frames_written - self._pending_frames
         log.info(
-            f"Total files created: {self._total_files_created}, packets={self._packets_written}, "
-            f"Total bytes: {self.total_bytes_all_files}"
+            f"Storage integrity: format=bin, frames_received={self._frames_received}, "
+            f"frames_written={self._frames_written}, pending_frames={self._pending_frames}, "
+            f"continuity_gap={continuity_gap}, files={self._total_files_created}, "
+            f"packets={self._packets_written}, bytes={self.total_bytes_all_files}, "
+            f"storage_downsample_space_only={self._storage_downsample_factor}"
+            f", dropped_blocks={self._dropped_blocks}"
         )
 
     def get_diagnostics_snapshot(self) -> dict:
@@ -707,6 +721,9 @@ class BlockBasedFileSaver(DataSaver):
             "file_frames_written": self._file_frames_written,
             "pending_frames": self._pending_frames,
             "packets_written": self._packets_written,
+            "frames_received": self._frames_received,
+            "frames_written": self._frames_written,
+            "continuity_gap": self._frames_received - self._frames_written - self._pending_frames,
             "bytes_written": self.total_bytes_all_files,
         })
         return snapshot
@@ -813,6 +830,8 @@ class BitshuffleZstdFileSaver(DataSaver):
         self._total_files_created = 0
         self._packets_compressed = 0
         self._packets_written = 0
+        self._frames_received = 0
+        self._frames_written = 0
         self._last_compress_ms = 0.0
         self._max_compress_ms = 0.0
         self._last_compression_ratio = 0.0
@@ -878,6 +897,8 @@ class BitshuffleZstdFileSaver(DataSaver):
         self._packets_compressed = 0
         self._packets_written = 0
         self._last_compress_ms = 0.0
+        self._frames_received = 0
+        self._frames_written = 0
         self._max_compress_ms = 0.0
         self._last_compression_ratio = 0.0
         self._compression_not_realtime_count = 0
@@ -1108,6 +1129,15 @@ class BitshuffleZstdFileSaver(DataSaver):
             f"packet_queue_full={self._packet_queue_full_count}, compressed_queue_full={self._compressed_queue_full_count}, "
             f"workers={self.compression_workers}, max_compress_ms={self._max_compress_ms:.1f}"
         )
+        continuity_gap = self._frames_received - self._frames_written - self._pending_frames
+        log.info(
+            f"Storage integrity: format=bz, frames_received={self._frames_received}, "
+            f"frames_written={self._frames_written}, pending_frames={self._pending_frames}, "
+            f"continuity_gap={continuity_gap}, packet_index_next={self._packet_index}, "
+            f"packets_written={self._packets_written}, dropped_blocks={self._dropped_blocks}, "
+            f"dropped_samples={self._dropped_samples}, "
+            f"storage_downsample_space_only={self._storage_downsample_factor}"
+        )
 
     def _packetizer_loop(self):
         try:
@@ -1260,6 +1290,7 @@ class BitshuffleZstdFileSaver(DataSaver):
         return np.ascontiguousarray(framed.reshape(frame_count, self._packet_points_per_frame))
 
     def _append_frames_and_emit_packets(self, frames: np.ndarray):
+        self._frames_received += int(frames.shape[0])
         self._pending_chunks.append(frames)
         self._pending_frames += int(frames.shape[0])
         while self._pending_frames >= self._resolved_packet_frames:
@@ -1462,6 +1493,7 @@ class BitshuffleZstdFileSaver(DataSaver):
         self._blocks_written += 1
         self._packets_written += 1
         self._file_frames_written += int(packet.metrics.get("frames", 0.0))
+        self._frames_written += int(packet.metrics.get("frames", 0.0))
 
         ratio = float(packet.metrics.get("compression_ratio", self._last_compression_ratio))
         compress_ms = float(packet.metrics.get("compress_ms", self._last_compress_ms))
@@ -1514,6 +1546,9 @@ class BitshuffleZstdFileSaver(DataSaver):
             "packet_queue_size_max": self.packet_queue_size,
             "compressed_queue_size": self._compressed_queue.qsize(),
             "compressed_queue_size_max": self.compressed_queue_size,
+            "frames_received": self._frames_received,
+            "frames_written": self._frames_written,
+            "continuity_gap": self._frames_received - self._frames_written - self._pending_frames,
             "raw_queue_estimated_bytes": self._data_queue.qsize() * self._last_enqueued_block_bytes,
             "packet_queue_estimated_bytes": (
                 self._packet_queue.qsize() * self._resolved_packet_frames * self._packet_points_per_frame * 4

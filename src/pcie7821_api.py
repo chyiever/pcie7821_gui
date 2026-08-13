@@ -346,6 +346,7 @@ class PCIe7821API:
         with self._lock:
             result = self.dll.pcie7821_set_clk_src(clk_src)
         log.debug(f"set_clk_src result: {result}")
+        self._check_result(result, "set_clk_src")
         return result
 
     def set_trig_dir(self, trig_dir: int) -> int:
@@ -359,6 +360,7 @@ class PCIe7821API:
         with self._lock:
             result = self.dll.pcie7821_set_trig_dir(trig_dir)
         log.debug(f"set_trig_dir result: {result}")
+        self._check_result(result, "set_trig_dir")
         return result
 
     def set_scan_rate(self, scan_rate: int) -> int:
@@ -372,6 +374,7 @@ class PCIe7821API:
         with self._lock:
             result = self.dll.pcie7821_set_scan_rate(scan_rate)
         log.debug(f"set_scan_rate result: {result}")
+        self._check_result(result, "set_scan_rate")
         return result
 
     def set_pulse_width(self, pulse_ns: int) -> int:
@@ -385,6 +388,7 @@ class PCIe7821API:
         with self._lock:
             result = self.dll.pcie7821_set_pusle_width(pulse_ns)
         log.debug(f"set_pulse_width result: {result}")
+        self._check_result(result, "set_pulse_width")
         return result
 
     def set_point_num_per_scan(self, point_num: int) -> int:
@@ -398,6 +402,7 @@ class PCIe7821API:
         with self._lock:
             result = self.dll.pcie7821_set_point_num_per_scan(point_num)
         log.debug(f"set_point_num_per_scan result: {result}")
+        self._check_result(result, "set_point_num_per_scan")
         return result
 
     def set_bypass_point_num(self, bypass_num: int) -> int:
@@ -411,6 +416,7 @@ class PCIe7821API:
         with self._lock:
             result = self.dll.pcie7821_set_bypass_point_num(bypass_num)
         log.debug(f"set_bypass_point_num result: {result}")
+        self._check_result(result, "set_bypass_point_num")
         return result
 
     def set_center_freq(self, freq_hz: int) -> int:
@@ -424,6 +430,7 @@ class PCIe7821API:
         with self._lock:
             result = self.dll.pcie7821_set_center_freq(freq_hz)
         log.debug(f"set_center_freq result: {result}")
+        self._check_result(result, "set_center_freq")
         return result
 
     def set_upload_data_param(self, ch_num: int, data_src: int, data_rate: int) -> int:
@@ -439,6 +446,7 @@ class PCIe7821API:
         with self._lock:
             result = self.dll.pcie7821_set_upload_data_param(ch_num, data_src, data_rate)
         log.debug(f"set_upload_data_param result: {result}")
+        self._check_result(result, "set_upload_data_param")
         return result
 
     def set_phase_dem_param(self, rate2phase: int, space_avg_order: int,
@@ -463,6 +471,7 @@ class PCIe7821API:
                 diff_order, detrend_bw, int(polarization_en)
             )
         log.debug(f"set_phase_dem_param result: {result}")
+        self._check_result(result, "set_phase_dem_param")
         return result
 
     # ----- DATA READING -----
