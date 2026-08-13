@@ -1,4 +1,4 @@
-﻿# eDAS 数据存储技术说明（Length 参数模型）
+# eDAS 数据存储技术说明（Length 参数模型）
 
 本文面向开发和现场联调，说明当前 `pcie7821_gui` 的保存链路。自 2026-07-29 起，界面存储参数统一改为以秒为单位的 Length 模型：
 
@@ -175,10 +175,23 @@ phase_rad = phase_int32 / 32767 * pi
 
 `.bz` 文件头会记录更多元数据，但由于 `Length/File` 的运行边界实际以帧数控制，离线工具最好以 packet header 中的 `frames` 为准恢复总帧数，而不是只依赖文件名或目标时长。
 
-## 7. 近期更新（2026-08-12）
+## 10. 近期更新（2026-08-12）
 
 - Tab 3 `.bz` 存储线程保留队列水位和丢弃统计：`raw_queue_size/max`、`packet_queue_size/max`、`compressed_queue_size/max`、`dropped_count`、`packet_queue_full_count`、`compressed_queue_full_count`。
 - `.bz` 压缩实时性指标已拆分：`slow_compression_packet_count` 表示单包压缩耗时超过对应采集时长；`compression_not_realtime_count` 仅表示队列满、打包/压缩失败等明确实时链路风险。
 - Tab 3 存储状态栏现在显示 `.bz dropped / queue / max / slow / notRT / full`，区分“压缩慢但队列健康”和“实时存储链路异常”。
 - `.bz` 停止日志会输出最终队列峰值、丢弃数、慢压缩包数、队列满次数、worker 数和最大压缩耗时，便于从测试日志直接判断是否存在实时存储丢数据。
 - 采集线程周期日志新增 `api_read_ms`、`dispatch_ms`、`display_pub_ms`、`save_slow_compress` 等字段，用于关联采集缓冲积压、GUI 显示压力和本地保存状态。
+## 11. 2026-08-14 完整性保护与容量预算
+
+保存队列现在按实际字节数而不是固定块数分配。启动日志会输出 block_mb、packet_mb、input_mib_s、raw_blocks、raw_backlog_s、packet_items、compressed_items、queue_budget_mb 和 bz_worker_working_set_est_mb。
+
+默认总队列预算上限为 1536 MiB，再根据系统可用内存收缩，并分别约束 raw、packet、compressed 三个阶段。每个阶段至少保留一个槽位，所以超大 packet 的实际最小工作集仍可能超过分配预算；应结合 bz_worker_working_set_est_mb 判断内存风险。
+
+异步保存采用“成功入队即转移数组所有权”的约定。NumPy 数组成功入队后会变为只读，保存和 TCP 后续只能读取；如果队列已满导致入队失败，保存器恢复数组写权限。这样无需再复制几十 MB 数据块，也能避免 DMA 缓冲或其他消费者复用时污染待落盘数据。
+
+停止保存时必须等后台保存线程排空后再关闭文件。旧 .bin 路径固定等待 5 秒，慢盘或大积压时存在后台线程未结束就关闭文件的截断风险；当前实现每 5 秒记录一次等待告警，但不会在写线程仍存活时关闭文件。
+
+自动化测试命令：python -m unittest -v tests.test_data_saver_integrity。测试覆盖 .bin / .bz 逐点回读、.bz CRC、双通道 Save DS、Length/Save 尾包、Length/File 轮转、异步所有权保护、按字节限制队列，以及写盘超过旧 5 秒阈值时的完整排空。
+
+现场高负载基准 100 kHz * 700 point * int32 约为 267 MiB/s。本机 .bin 临时盘测试约 1306.6 MiB/s；默认 1 秒 .bz 包压缩约 2683.5 ms。因此高负载长时间保存优先选择 .bin；使用 .bz 时应通过 Save DS 降低输入速率，并确认队列长期不增长、dropped=0、packet_full=0、compressed_full=0。

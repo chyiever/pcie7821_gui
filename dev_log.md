@@ -793,3 +793,25 @@ python build_exe.py --name eDAS20260720-173900 --skip-clean
 - Tab3 TCP 通信新增后台 ingest 队列和线程，采集线程只做轻量入队；Length/Comm 聚合和通信包准备在 TCP 后台线程完成。TCP ingest 队列满时丢弃最旧通信块，只影响通信，不影响本地保存。
 - 主采集快照新增 `save_enqueue_ms`、`tcp_enqueue_ms`、`tcp_ingest_queue`、`tcp_ingest_dropped`、`tcp_process_ms` 等字段，用于区分保存、通信、GUI、DLL 读取各自耗时。
 - 验证：`python -m py_compile src\data_saver.py src\main_window.py src\tcp_tab3\tcp_tab3_manager.py src\acquisition_thread.py` 通过；保存线程内部降采样小数组测试通过；TCP ingest 启停生命周期测试通过；`git diff --check` 通过。
+
+## 2026-08-13 显示流畅性日志分析与采集优先优化
+
+- 分析 `logs/20260813_230051.log`，确认 `Length/Plot=0.400 s` 已经生效，日志中显示 `GUI display refresh interval set to 400 ms` 且启动参数为 `plot_frames=40000`。用户感觉仍像 1 s 刷新，根因是 GUI 主线程单次显示回调仍有大量 0.5-0.7 s，采集线程显示快照生成也出现秒级 `display_pub_ms`。
+- 日志统计：第一段 `Length/Plot=1.000 s` 时 `_on_phase_data` p50 约 `1276.4 ms`，第二段 `Length/Plot=0.400 s` 时 `_on_phase_data` p50 降至约 `70.9 ms`，但 p90 仍约 `641.8 ms`；驱动缓冲峰值均达到单次读取目标的约 `26.2x`。
+- 数据完整性判断：本次日志没有 `ERROR`、没有 `0xFFFFFFFF`、没有 TCP ingest 丢弃，也没有保存队列丢弃记录；但本次未看到保存器启动/停止记录，不能作为开启本地保存后的无丢失证明。主要风险是显示路径拖慢采集读取，导致驱动缓冲积压。
+- 优化 `src/acquisition_thread.py`：显示历史追加不再对每个 `Length/Load` 块强制复制；如果 GUI 尚未消费上一帧显示快照，采集线程跳过本次大快照生成并记录 `gui_skips`，优先保护读卡、保存和通信链路。
+- 优化 `src/main_window.py`：相位转弧度从整块显示窗口转换改为按实际渲染数组延迟转换；SPACE 模式单点时间序列改为 NumPy 向量化抽取；TIME 模式优先显示最新帧，避免在主线程处理无关历史帧。
+- 优化 `src/time_space_plot.py`：`update_data()` 支持 `display_scale`，在距离裁剪和空间/时间降采样后再做弧度缩放，降低 Tab2 激活时的大数组转换压力。
+- 新增文档 `docs/2026-08-13日志分析与显示流畅性优化.md`，并更新 `README.md` 文档索引和采集/显示链路说明。
+- 验证：`python -m py_compile src\acquisition_thread.py src\main_window.py src\time_space_plot.py` 通过。真实流畅性和保存完整性仍需现场硬件复测，重点观察 `_on_phase_data`、`display_pub_ms`、`buffer/expected`、`save_dropped` 和 `.bz` 队列水位。
+## 2026-08-14 显示事件驱动与数据存储预检
+
+- 分析 logs/20260813_233432.log：第一段 0.4 s 配置下 GUI 回调间隔 p50/p90 约 4.18/5.36 s，_on_phase_data p90=476.8 ms，display_pub_ms p90=31 ms，buffer/expected p50/p90=21.17/24.57x，read_age_s p90=1.7 s。根因是发布和 GUI 定时消费双重节流、大显示快照以及 DLL 读取/内存带宽积压。
+- 显示快照改为信号唤醒、定时器 watchdog；SPACE 只发布 Region 时间序列，TIME 默认只发布最新 4 帧，Time-Space 或 TIME 滤波按需请求完整窗口。
+- PCIe Phase 读取支持 DMA view，采集线程在空间裁剪后仅复制最终有效块；完整数据在进入保存/TCP 前拥有独立连续内存。
+- 存储队列从固定 200 块改为按 block/packet 字节和可用内存计算，避免 53.41 MiB/块时 raw queue 理论占用约 10.68 GiB。日志新增 input_mib_s、queue_mb、raw_backlog_s 和 .bz worker 工作集估算。
+- 保存器成功入队后冻结 NumPy 数组，防止异步落盘前数据被修改；队列满时恢复写权限。.bin 停止保存改为等待后台线程完整排空，不再 5 秒后强行关闭文件。
+- 新增 tests/test_data_saver_integrity.py。5 项测试覆盖 .bin/.bz 逐点一致性、CRC、双通道 Save DS、尾包、轮转、所有权、字节容量和 5.2 s 慢盘停止，全部通过。
+- 现实尺寸 .bin：3 x 53.41 MiB 全部写入，约 1306.6 MiB/s，字节数一致。
+- 现实尺寸 .bz：默认 1 s 包输入 267.03 MiB，压缩约 2683.5 ms，文件 133.62 MiB，CRC/逐点一致且无丢块；4 worker 的 0.2 s 包持续测试约 171 MiB/s，低于约 267 MiB/s 输入速率。高负载长期完整保存优先 .bin，.bz 需提高 Save DS 后复测。
+- 验证：py_compile、5 项 unittest、离屏 Qt 0.4 s 节拍测试、存储现实尺寸基准和 git diff --check 均通过。

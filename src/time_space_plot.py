@@ -677,7 +677,7 @@ class TimeSpacePlotWidget(QWidget):
             self._set_filter_error(message)
             return display_block
 
-    def update_data(self, data: np.ndarray) -> bool:
+    def update_data(self, data: np.ndarray, display_scale: Optional[np.float32] = None) -> bool:
         if not self._plot_enabled:
             return False
 
@@ -689,7 +689,7 @@ class TimeSpacePlotWidget(QWidget):
             self._full_point_num = point_count
             self.pointCountChanged.emit(point_count)
 
-        display_block_info = self._build_display_block(data)
+        display_block_info = self._build_display_block(data, display_scale)
         if display_block_info is None:
             return False
 
@@ -699,7 +699,7 @@ class TimeSpacePlotWidget(QWidget):
         return True
 
     def _build_display_block(
-        self, data_block: np.ndarray
+        self, data_block: np.ndarray, display_scale: Optional[np.float32] = None
     ) -> Optional[Tuple[np.ndarray, float, Tuple[int, int]]]:
         frame_count, point_count = data_block.shape
 
@@ -711,6 +711,9 @@ class TimeSpacePlotWidget(QWidget):
         display_block = data_block[:, start_idx:end_idx]
         if self._space_downsample > 1:
             display_block = display_block[:, :: self._space_downsample]
+        if display_scale is not None:
+            display_block = np.asarray(display_block).astype(np.float32, copy=True)
+            display_block *= display_scale
         display_block = self._apply_realtime_filter(display_block)
         if self._time_downsample > 1:
             display_block = display_block[:: self._time_downsample, :]

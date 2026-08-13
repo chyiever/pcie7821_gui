@@ -547,6 +547,7 @@ class PCIe7821API:
         Args:
             point_num_per_ch: Number of points per channel to read
             channel_num: Number of channels
+            copy: Return an owned array. False exposes a view valid until the next phase read.
 
         Returns:
             Tuple of (data array, points actually returned per channel)
@@ -579,13 +580,19 @@ class PCIe7821API:
         # Return copy of data
         return self._raw_buffer.array[:total_points].copy(), points_returned.value
 
-    def read_phase_data(self, point_num_per_ch: int, channel_num: int) -> Tuple[np.ndarray, int]:
+    def read_phase_data(
+        self,
+        point_num_per_ch: int,
+        channel_num: int,
+        copy: bool = True,
+    ) -> Tuple[np.ndarray, int]:
         """
         Read phase data from device.
 
         Args:
             point_num_per_ch: Number of points per channel to read
             channel_num: Number of channels
+            copy: Return an owned array. False exposes a view valid until the next phase read.
 
         Returns:
             Tuple of (phase data array, points actually returned per channel)
@@ -615,7 +622,9 @@ class PCIe7821API:
         log.debug(f"read_phase_data: requested={point_num_per_ch}, returned={points_returned.value}, "
                   f"time={elapsed:.1f}ms")
 
-        return self._phase_buffer.array[:total_points].copy(), points_returned.value
+        phase_view = self._phase_buffer.array[:total_points]
+        phase_data = phase_view.copy() if copy else phase_view
+        return phase_data, points_returned.value
 
     def read_monitor_data(self, point_num: int, channel_num: int) -> np.ndarray:
         """
@@ -624,6 +633,7 @@ class PCIe7821API:
         Args:
             point_num: Number of points
             channel_num: Number of channels
+            copy: Return an owned array. False exposes a view valid until the next phase read.
 
         Returns:
             Monitor data array

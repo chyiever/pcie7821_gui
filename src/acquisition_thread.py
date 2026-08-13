@@ -53,6 +53,7 @@ class AcquisitionThread(QThread):
     error_occurred = pyqtSignal(str)  # error message
     acquisition_started = pyqtSignal()
     acquisition_stopped = pyqtSignal()
+    display_snapshot_ready = pyqtSignal()
 
     def __init__(self, api: PCIe7821API, parent=None):
         """
@@ -119,6 +120,9 @@ class AcquisitionThread(QThread):
         self._display_history_signature = None
         self._display_publish_interval_s = 1.0
         self._last_display_publish_at = 0.0
+        self._display_mode = None
+        self._display_region_index = 0
+        self._display_requires_full_window = False
         self._monitor_read_enabled = False
         self._full_data_handler: Optional[Callable[[np.ndarray, int, int], None]] = None
         self._last_successful_read_time = 0.0
@@ -167,6 +171,9 @@ class AcquisitionThread(QThread):
             int(params.display.frame_plot_num) / max(1, int(params.basic.scan_rate)),
         )
         self._last_display_publish_at = 0.0
+        self._display_mode = int(getattr(params.display, "mode", 0))
+        self._display_region_index = int(getattr(params.display, "region_index", 0))
+        self._display_requires_full_window = False
         self._monitor_read_enabled = bool(
             self._data_source == DataSource.PHASE
             and getattr(params.display, "monitor_plot_enabled", False)
@@ -179,6 +186,33 @@ class AcquisitionThread(QThread):
                  f"crop=[{params.phase_demod.crop_distance_start}, {params.phase_demod.crop_distance_end}), "
                  f"block_points={block_points_total}, block_bytes={block_bytes_total / 1024 / 1024:.2f}MB, "
                  f"block_duration={block_duration_ms:.1f}ms")
+
+    def set_display_request(
+        self,
+        mode: int,
+        region_index: int,
+        require_full_window: bool,
+    ) -> None:
+        """Update the GUI snapshot shape without changing the full-data path."""
+        request = (int(mode), int(region_index), bool(require_full_window))
+        current = (
+            self._display_mode,
+            self._display_region_index,
+            self._display_requires_full_window,
+        )
+        if request == current:
+            return
+
+        self._display_mode, self._display_region_index, self._display_requires_full_window = request
+        with self._latest_display_lock:
+            self._latest_display_data = None
+        self._last_display_publish_at = 0.0
+        log.info(
+            "Display request changed: mode=%s, region=%d, full_window=%d",
+            self._display_mode,
+            self._display_region_index,
+            int(self._display_requires_full_window),
+        )
 
     def _set_stage(self, stage: str, detail: str = ""):
         """Track the current internal stage for external diagnostics."""
@@ -201,6 +235,17 @@ class AcquisitionThread(QThread):
             "stage_elapsed_ms": (time.perf_counter() - self._current_stage_started_at) * 1000.0,
             "last_buffer_points": self._last_buffer_points,
             "last_expected_points": self._last_expected_points,
+            "buffer_ratio": (
+                self._last_buffer_points / self._last_expected_points
+                if self._last_expected_points > 0
+                else 0.0
+            ),
+            "backlog_s": (
+                self._last_buffer_points / self._last_expected_points
+                * self._expected_block_duration_ms / 1000.0
+                if self._last_expected_points > 0
+                else 0.0
+            ),
             "last_wait_iterations": self._last_wait_iterations,
             "last_query_ms": self._last_query_ms,
             "last_read_ms": self._last_read_ms,
@@ -599,7 +644,11 @@ class AcquisitionThread(QThread):
                 f"estimated_block={points_per_ch * self._channel_num * 4 / 1024 / 1024:.2f}MB"
             )
             api_start = time.perf_counter()
-            phase_data, points_returned = self.api.read_phase_data(points_per_ch, self._channel_num)
+            phase_dma_view, points_returned = self.api.read_phase_data(
+                points_per_ch,
+                self._channel_num,
+                copy=False,
+            )
             self._last_api_read_ms = (time.perf_counter() - api_start) * 1000.0
         except Exception as e:
             log.error(f"Failed to read phase data: {e}")
@@ -608,10 +657,12 @@ class AcquisitionThread(QThread):
         if points_returned != points_per_ch:
             log.warning(f"Phase read returned unexpected point count: requested={points_per_ch}, returned={points_returned}")
 
-        self._bytes_acquired += len(phase_data) * 4  # int = 4 bytes
+        self._bytes_acquired += len(phase_dma_view) * 4  # int = 4 bytes
 
         crop_start = time.perf_counter()
-        phase_data = self._apply_phase_spatial_crop(phase_data)
+        phase_data = self._apply_phase_spatial_crop(phase_dma_view)
+        if np.shares_memory(phase_data, phase_dma_view):
+            phase_data = np.array(phase_data, copy=True, order="C")
         self._last_crop_ms = (time.perf_counter() - crop_start) * 1000.0
         self._last_block_bytes = int(np.asarray(phase_data).nbytes)
         self._last_successful_read_time = time.perf_counter()
@@ -678,7 +729,8 @@ class AcquisitionThread(QThread):
             self._display_history_signature = signature
             self._last_display_publish_at = 0.0
 
-        frame_matrix = np.array(frame_matrix, copy=True, order="C")
+        if not frame_matrix.flags.c_contiguous:
+            frame_matrix = np.ascontiguousarray(frame_matrix)
         if frame_matrix.size:
             self._display_history_chunks.append(frame_matrix)
             self._display_history_frames += int(frame_matrix.shape[0])
@@ -718,6 +770,10 @@ class AcquisitionThread(QThread):
             return
         target_frames = max(1, int(self._params.display.frame_plot_num))
         arr = np.asarray(data)
+        snapshot_kind = 0
+        if int(data_source) == int(DataSource.PHASE) and not self._display_requires_full_window:
+            snapshot_kind = 1 if int(self._display_mode or 0) == 1 else 2
+        history_target_frames = target_frames if snapshot_kind != 2 else 4
 
         if channel_num == 1:
             flat = arr.reshape(-1)
@@ -727,10 +783,21 @@ class AcquisitionThread(QThread):
                 self._last_display_publish_ms = (time.perf_counter() - start) * 1000.0
                 return
             frame_matrix = flat[:valid_points].reshape(frame_count, points_per_frame)
+            if snapshot_kind == 1:
+                region_index = min(max(0, self._display_region_index), points_per_frame - 1)
+                frame_matrix = frame_matrix[:, region_index : region_index + 1]
+            elif snapshot_kind == 2:
+                frame_matrix = frame_matrix[-history_target_frames:]
             self._append_display_history(
                 frame_matrix,
-                target_frames,
-                (int(data_source), channel_num, points_per_frame),
+                history_target_frames,
+                (
+                    int(data_source),
+                    channel_num,
+                    points_per_frame,
+                    snapshot_kind,
+                    self._display_region_index if snapshot_kind == 1 else -1,
+                ),
             )
         else:
             matrix = arr.reshape(-1, channel_num)
@@ -740,15 +807,34 @@ class AcquisitionThread(QThread):
                 self._last_display_publish_ms = (time.perf_counter() - start) * 1000.0
                 return
             frame_matrix = matrix[:valid_rows, :].reshape(frame_count, points_per_frame * channel_num)
+            if snapshot_kind == 1:
+                region_index = min(max(0, self._display_region_index), points_per_frame - 1)
+                start = region_index * channel_num
+                frame_matrix = frame_matrix[:, start : start + channel_num]
+            elif snapshot_kind == 2:
+                frame_matrix = frame_matrix[-history_target_frames:]
             self._append_display_history(
                 frame_matrix,
-                target_frames,
-                (int(data_source), channel_num, points_per_frame),
+                history_target_frames,
+                (
+                    int(data_source),
+                    channel_num,
+                    points_per_frame,
+                    snapshot_kind,
+                    self._display_region_index if snapshot_kind == 1 else -1,
+                ),
             )
 
         if not self._should_publish_display_snapshot():
             self._last_display_publish_ms = (time.perf_counter() - start) * 1000.0
             return
+
+        with self._latest_display_lock:
+            if self._latest_display_data is not None:
+                self._gui_skip_count += 1
+                self._last_display_publish_at = time.perf_counter()
+                self._last_display_publish_ms = (self._last_display_publish_at - start) * 1000.0
+                return
 
         history = self._current_display_history()
         if history.size == 0:
@@ -761,10 +847,14 @@ class AcquisitionThread(QThread):
             display_data = np.ascontiguousarray(history.reshape(-1, channel_num))
 
         with self._latest_display_lock:
-            if self._latest_display_data is not None:
-                self._gui_skip_count += 1
-            self._latest_display_data = (display_data, data_source, channel_num)
+            self._latest_display_data = (
+                display_data,
+                data_source,
+                channel_num,
+                snapshot_kind,
+            )
 
+        self.display_snapshot_ready.emit()
         if data_source == DataSource.PHASE:
             self._phase_emit_count += 1
         else:

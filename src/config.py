@@ -566,7 +566,7 @@ OPTIMIZED_BUFFER_SIZES = {
     'signal_queue_frames': 20,              # Balance latency vs memory usage
 
     # Storage queue: Async file writing buffer (critical for continuous operation)
-    'storage_queue_frames': 200,            # Large buffer prevents data loss during disk I/O stalls
+    'storage_queue_frames': 200,            # Upper bound; runtime also caps queues by estimated bytes
 
     # Display buffer: GUI visualization history
     'display_buffer_frames': 30             # Sufficient for smooth plotting updates

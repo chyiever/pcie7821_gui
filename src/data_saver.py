@@ -22,6 +22,43 @@ from bz_format import (
     pack_bz_file_header,
 )
 
+MIB = 1024 * 1024
+DEFAULT_STORAGE_MEMORY_BUDGET_BYTES = 1536 * MIB
+MIN_STORAGE_MEMORY_BUDGET_BYTES = 64 * MIB
+
+
+def calculate_storage_queue_capacities(
+    block_bytes: int,
+    packet_bytes: int,
+    configured_max_blocks: int = 200,
+    available_memory_bytes: Optional[int] = None,
+) -> Dict[str, int]:
+    """Size asynchronous storage queues by bytes instead of a fixed block count."""
+    block_bytes = max(1, int(block_bytes))
+    packet_bytes = max(1, int(packet_bytes))
+    configured_max_blocks = max(1, int(configured_max_blocks))
+    memory_budget = DEFAULT_STORAGE_MEMORY_BUDGET_BYTES
+    if available_memory_bytes is not None and int(available_memory_bytes) > 0:
+        memory_budget = min(
+            memory_budget,
+            max(MIN_STORAGE_MEMORY_BUDGET_BYTES, int(available_memory_bytes) // 10),
+        )
+
+    stage_budget = max(1, memory_budget // 3)
+    raw_blocks = max(1, min(configured_max_blocks, stage_budget // block_bytes))
+    packet_items = max(1, min(8, stage_budget // packet_bytes))
+    compressed_items = max(1, min(8, stage_budget // packet_bytes))
+    return {
+        "memory_budget_bytes": memory_budget,
+        "raw_blocks": raw_blocks,
+        "packet_items": packet_items,
+        "compressed_items": compressed_items,
+        "estimated_raw_queue_bytes": raw_blocks * block_bytes,
+        "estimated_packet_queue_bytes": packet_items * packet_bytes,
+        "estimated_compressed_queue_bytes": compressed_items * packet_bytes,
+    }
+
+
 log = get_logger("data_saver")
 
 
@@ -58,6 +95,7 @@ class DataSaver:
         self._split_marker = object()
         self._save_thread: Optional[threading.Thread] = None
         self._running = False
+        self._lifecycle_lock = threading.Lock()
         self._file_handle = None
         self._file_no = 0
         self._current_filename = ""
@@ -73,6 +111,7 @@ class DataSaver:
         self._last_write_bytes = 0
         self._last_enqueue_ms = 0.0
         self._max_enqueue_ms = 0.0
+        self._last_enqueued_block_bytes = 0
 
     def start(self, file_no: Optional[int] = None, scan_rate: int = 2000) -> str:
         """
@@ -137,20 +176,23 @@ class DataSaver:
 
     def stop(self):
         """Stop data saving and close file"""
-        if not self._running:
-            return
+        with self._lifecycle_lock:
+            if not self._running:
+                return
+            self._running = False
 
-        self._running = False
+            # The sentinel is ordered under the same lock as producer enqueues.
+            if self._save_thread is not None:
+                try:
+                    self._data_queue.put(None, timeout=1.0)
+                except queue.Full:
+                    log.warning("Save queue full while stopping; waiting to enqueue sentinel")
+                    self._data_queue.put(None)
 
         # Wait for save thread to drain queued data and exit.
         if self._save_thread is not None:
-            try:
-                self._data_queue.put(None, timeout=1.0)
-            except queue.Full:
-                log.warning("Save queue full while stopping; waiting to enqueue sentinel")
-                self._data_queue.put(None)
 
-            self._save_thread.join(timeout=5.0)
+            self._join_thread_until_stopped(self._save_thread, "save thread")
             self._save_thread = None
 
         # Close file after the save thread has finished all pending writes.
@@ -165,49 +207,80 @@ class DataSaver:
                  f"Last write: {self._last_write_ms:.1f}ms/{self._last_write_bytes}B")
 
     def save(self, data: np.ndarray) -> bool:
-        """
-        Queue data for saving.
-
-        Args:
-            data: NumPy array to save (original int32 phase data, no rad conversion applied)
-
-        Returns:
-            True if data was queued, False if queue is full
-        """
-        if not self._running:
+        """Queue one owned array reference for background saving."""
+        queued, enqueue_ms, reason = self._enqueue_owned(data)
+        if reason == "stopped":
             return False
 
-        try:
-            # Keep queueing non-blocking; serialization is deferred to the save thread
-            # so the producer only enqueues a reference to the latest numpy block.
-            enqueue_start = time.perf_counter()
-            self._data_queue.put_nowait(data)
-            self._last_enqueue_ms = (time.perf_counter() - enqueue_start) * 1000.0
-            self._max_enqueue_ms = max(self._max_enqueue_ms, self._last_enqueue_ms)
-            self._enqueue_count += 1
-            queue_size = self._data_queue.qsize()
-            self._max_queue_size_seen = max(self._max_queue_size_seen, queue_size)
-            if (
-                self._enqueue_count <= 3
-                or self._enqueue_count % 20 == 0
-                or queue_size >= max(1, self.buffer_size // 2)
-            ):
-                block_bytes = int(data.nbytes) if isinstance(data, np.ndarray) else len(data)
-                log.debug(
-                    f"Queued save block #{self._enqueue_count}: bytes={block_bytes}, "
-                    f"queue={queue_size}/{self.buffer_size}"
-                )
-            return True
-        except queue.Full:
-            self._last_enqueue_ms = (time.perf_counter() - enqueue_start) * 1000.0 if 'enqueue_start' in locals() else 0.0
-            self._max_enqueue_ms = max(self._max_enqueue_ms, self._last_enqueue_ms)
+        self._last_enqueue_ms = enqueue_ms
+        self._max_enqueue_ms = max(self._max_enqueue_ms, enqueue_ms)
+        block_bytes = int(data.nbytes) if isinstance(data, np.ndarray) else len(data)
+        if not queued:
             self._dropped_blocks += 1
-            block_bytes = int(data.nbytes) if isinstance(data, np.ndarray) else len(data)
             log.warning(
                 f"Save queue full, dropping block: bytes={block_bytes}, "
                 f"dropped={self._dropped_blocks}, queue={self._data_queue.qsize()}/{self.buffer_size}"
             )
             return False
+
+        self._enqueue_count += 1
+        self._last_enqueued_block_bytes = block_bytes
+        queue_size = self._data_queue.qsize()
+        self._max_queue_size_seen = max(self._max_queue_size_seen, queue_size)
+        if (
+            self._enqueue_count <= 3
+            or self._enqueue_count % 20 == 0
+            or queue_size >= max(1, self.buffer_size // 2)
+        ):
+            log.debug(
+                f"Queued save block #{self._enqueue_count}: bytes={block_bytes}, "
+                f"queue={queue_size}/{self.buffer_size}"
+            )
+        return True
+
+    def _enqueue_owned(
+        self,
+        data: np.ndarray,
+        timeout_s: Optional[float] = None,
+    ) -> tuple[bool, float, str]:
+        """Atomically order producer data before the stop sentinel."""
+        enqueue_start = time.perf_counter()
+        with self._lifecycle_lock:
+            if not self._running:
+                return False, 0.0, "stopped"
+            restore_writeable = self._freeze_queued_array(data)
+            try:
+                if timeout_s is None:
+                    self._data_queue.put_nowait(data)
+                else:
+                    self._data_queue.put(data, timeout=max(0.0, float(timeout_s)))
+            except queue.Full:
+                self._restore_queued_array(data, restore_writeable)
+                elapsed_ms = (time.perf_counter() - enqueue_start) * 1000.0
+                return False, elapsed_ms, "full"
+        elapsed_ms = (time.perf_counter() - enqueue_start) * 1000.0
+        return True, elapsed_ms, "queued"
+
+    @staticmethod
+    def _freeze_queued_array(data: np.ndarray) -> bool:
+        """Transfer an ndarray to background consumers without an expensive copy."""
+        if isinstance(data, np.ndarray) and data.flags.writeable:
+            data.flags.writeable = False
+            return True
+        return False
+
+    @staticmethod
+    def _restore_queued_array(data: np.ndarray, restore_writeable: bool) -> None:
+        if restore_writeable and isinstance(data, np.ndarray):
+            data.flags.writeable = True
+
+    @staticmethod
+    def _join_thread_until_stopped(thread: threading.Thread, label: str) -> None:
+        """Wait for queued data to drain; never close a file under a live writer."""
+        while thread.is_alive():
+            thread.join(timeout=5.0)
+            if thread.is_alive():
+                log.warning(f"Waiting for {label} to drain storage queues")
 
     def _save_loop(self):
         """Background thread for saving data"""
@@ -270,6 +343,8 @@ class DataSaver:
             "last_write_bytes": self._last_write_bytes,
             "last_enqueue_ms": self._last_enqueue_ms,
             "max_enqueue_ms": self._max_enqueue_ms,
+            "last_enqueued_block_bytes": self._last_enqueued_block_bytes,
+            "estimated_queue_bytes": self.queue_size * self._last_enqueued_block_bytes,
             "is_running": self._running,
         }
 
@@ -898,37 +973,15 @@ class BitshuffleZstdFileSaver(DataSaver):
         return self.save_block(frame_data)
 
     def save(self, data: np.ndarray) -> bool:
-        if not self._running:
-            return False
-
         block_bytes = int(data.nbytes) if isinstance(data, np.ndarray) else len(data)
         block_duration_s = self._estimate_block_duration_s(data)
-        try:
-            enqueue_start = time.perf_counter()
-            self._data_queue.put(data, timeout=self.raw_queue_put_timeout_s)
-            self._last_enqueue_ms = (time.perf_counter() - enqueue_start) * 1000.0
-            self._max_enqueue_ms = max(self._max_enqueue_ms, self._last_enqueue_ms)
-            self._enqueue_count += 1
-            queue_size = self._data_queue.qsize()
-            self._max_queue_size_seen = max(self._max_queue_size_seen, queue_size)
-            self._log_raw_queue_high_watermark(queue_size, block_bytes, block_duration_s)
-            if (
-                self._enqueue_count <= 3
-                or self._enqueue_count % 20 == 0
-                or queue_size >= max(1, self.buffer_size // 2)
-            ):
-                has_cache = self._has_cache()
-                log.debug(
-                    f"Queued .bz raw block #{self._enqueue_count}: bytes={block_bytes}, "
-                    f"raw_queue={queue_size}/{self.buffer_size}, "
-                    f"packet_queue={self._packet_queue.qsize()}/{self.packet_queue_size}, "
-                    f"compressed_queue={self._compressed_queue.qsize()}/{self.compressed_queue_size}, "
-                    f"pending_frames={self._pending_frames}, cache={has_cache}"
-                )
-            return True
-        except queue.Full:
-            self._last_enqueue_ms = (time.perf_counter() - enqueue_start) * 1000.0 if 'enqueue_start' in locals() else 0.0
-            self._max_enqueue_ms = max(self._max_enqueue_ms, self._last_enqueue_ms)
+        queued, enqueue_ms, reason = self._enqueue_owned(data, self.raw_queue_put_timeout_s)
+        if reason == "stopped":
+            return False
+
+        self._last_enqueue_ms = enqueue_ms
+        self._max_enqueue_ms = max(self._max_enqueue_ms, enqueue_ms)
+        if not queued:
             dropped = self._increment_dropped_blocks()
             not_realtime = self._increment_not_realtime_count()
             backlog_s = self.buffer_size * block_duration_s if block_duration_s > 0 else 0.0
@@ -941,6 +994,25 @@ class BitshuffleZstdFileSaver(DataSaver):
                 f"workers={self.compression_workers}, est_raw_backlog_s={backlog_s:.1f}"
             )
             return False
+
+        self._enqueue_count += 1
+        self._last_enqueued_block_bytes = block_bytes
+        queue_size = self._data_queue.qsize()
+        self._max_queue_size_seen = max(self._max_queue_size_seen, queue_size)
+        self._log_raw_queue_high_watermark(queue_size, block_bytes, block_duration_s)
+        if (
+            self._enqueue_count <= 3
+            or self._enqueue_count % 20 == 0
+            or queue_size >= max(1, self.buffer_size // 2)
+        ):
+            log.debug(
+                f"Queued .bz raw block #{self._enqueue_count}: bytes={block_bytes}, "
+                f"raw_queue={queue_size}/{self.buffer_size}, "
+                f"packet_queue={self._packet_queue.qsize()}/{self.packet_queue_size}, "
+                f"compressed_queue={self._compressed_queue.qsize()}/{self.compressed_queue_size}, "
+                f"pending_frames={self._pending_frames}, cache={self._has_cache()}"
+            )
+        return True
 
     def _estimate_block_duration_s(self, data: np.ndarray) -> float:
         try:
@@ -992,28 +1064,23 @@ class BitshuffleZstdFileSaver(DataSaver):
 
     def stop(self):
         """Stop .bz saving after draining queued raw blocks and the final tail packet."""
-        if not self._running:
-            return
-
-        self._running = False
-        try:
-            self._data_queue.put(None, timeout=1.0)
-        except queue.Full:
-            log.warning("BZ raw queue full while stopping; waiting to enqueue sentinel")
-            self._data_queue.put(None)
+        with self._lifecycle_lock:
+            if not self._running:
+                return
+            self._running = False
+            try:
+                self._data_queue.put(None, timeout=1.0)
+            except queue.Full:
+                log.warning("BZ raw queue full while stopping; waiting to enqueue sentinel")
+                self._data_queue.put(None)
 
         if self._packetizer_thread is not None:
-            self._packetizer_thread.join(timeout=120.0)
-            if self._packetizer_thread.is_alive():
-                log.error("BZ packetizer thread did not stop within timeout")
+            self._join_thread_until_stopped(self._packetizer_thread, "BZ packetizer thread")
             self._packetizer_thread = None
 
         compressors_stopped = True
         for thread in self._compress_threads:
-            thread.join(timeout=120.0)
-            if thread.is_alive():
-                compressors_stopped = False
-                log.error(f"BZ compression worker did not stop within timeout: {thread.name}")
+            self._join_thread_until_stopped(thread, thread.name)
         self._compress_threads = []
 
         if compressors_stopped:
@@ -1022,9 +1089,7 @@ class BitshuffleZstdFileSaver(DataSaver):
             log.error("BZ writer sentinel skipped because compression workers are still alive")
 
         if self._writer_thread is not None:
-            self._writer_thread.join(timeout=120.0)
-            if self._writer_thread.is_alive():
-                log.error("BZ writer thread did not stop within timeout")
+            self._join_thread_until_stopped(self._writer_thread, "BZ writer thread")
             self._writer_thread = None
 
         if self._file_handle is not None:
@@ -1449,6 +1514,13 @@ class BitshuffleZstdFileSaver(DataSaver):
             "packet_queue_size_max": self.packet_queue_size,
             "compressed_queue_size": self._compressed_queue.qsize(),
             "compressed_queue_size_max": self.compressed_queue_size,
+            "raw_queue_estimated_bytes": self._data_queue.qsize() * self._last_enqueued_block_bytes,
+            "packet_queue_estimated_bytes": (
+                self._packet_queue.qsize() * self._resolved_packet_frames * self._packet_points_per_frame * 4
+            ),
+            "compressed_queue_estimated_bytes": (
+                self._compressed_queue.qsize() * self._resolved_packet_frames * self._packet_points_per_frame * 4
+            ),
             "pending_frames": self._pending_frames,
             "packet_frames": self._resolved_packet_frames,
             "source_points_per_frame": self._source_points_per_frame,
