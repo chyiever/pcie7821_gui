@@ -826,3 +826,11 @@ python build_exe.py --name eDAS20260720-173900 --skip-clean
 - 采集日志新增 `configured_fps`、`measured_fps`、`fps_ratio`、`driver_pending_frames`；BIN/BZ 新增 `frames_received`、`frames_written`、`pending_frames`、`continuity_gap` 完整性摘要，明确 Save DS 仅为空间降采样。
 - 新增分析文档 `docs/2026-08-14-latest-log-display-storage-frame-rate-analysis.md`。
 - 验证：4 个核心模块 `py_compile` 通过；显示节拍与存储完整性共 7 项测试全部通过，包含 390 ms 节拍容差、Tab2 增量快照不重叠、BIN 逐值回读、BZ CRC/包序、尾包、文件轮转、停止排空和接收/写入帧数一致性。
+
+## 2026-08-14 大数据量 DAS 上位机开发经验总结
+
+- 综合近三天日志分析、测试 log 分析文档，以及 2026-05 以来关于大块读取卡死、GUI 显示解耦、Length 参数模型、异步保存和数据完整性的历史开发记录，新增开发者经验总结文档 `docs/20260814-大数据量DAS上位机软件开发经验总结文档.md`。
+- 文档围绕四条主线整理：波形和 Time-Space 显示流畅性、应用侧保存完整性与不丢数据策略、软件控制和 STOP 不被底层或 GUI 链路拖死、采集/保存/显示/TCP 的数据流分层设计。
+- 明确本项目形成的核心工程原则：采集优先，完整数据和显示快照分离；GUI 可跳帧但保存必须可验证；保存队列按字节预算；异步数组入队后转移所有权；`.bin` / `.bz` 完整性边界、真实帧率与配置帧率必须分开记录。
+- 将 100 kHz 数据量减半分析纳入经验文档，强调文件帧数连续只能证明应用收到的数据完整写入，不能证明硬件真实扫描周期等于配置值；后续类似软件应同时记录 `configured_fps`、`measured_fps` 和 `fps_ratio`。
+- 本次为文档和日志更新，不修改运行时代码。验证重点为 UTF-8 正确写入、文档路径和源码文件名引用一致、Git 差异检查；随后同步到 GitHub。
