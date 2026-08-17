@@ -1440,6 +1440,7 @@ class MainWindow(QMainWindow):
         self.mode_space_radio.toggled.connect(self._on_mode_changed)
         self.waveform_enable_check.toggled.connect(self._on_waveform_display_toggled)
         self.monitor_enable_check.toggled.connect(self._on_monitor_display_toggled)
+        self.rad_check.toggled.connect(self._on_rad_display_toggled)
 
         # Connect region index changes.
         self.region_index_spin.valueChanged.connect(self._on_region_changed)
@@ -1483,6 +1484,12 @@ class MainWindow(QMainWindow):
         self._reset_tab1_phase_filter()
         if not enabled:
             self._clear_waveform_plot()
+
+    @pyqtSlot(bool)
+    def _on_rad_display_toggled(self, enabled: bool):
+        """Enable or disable display-only phase-to-radian conversion."""
+        self.params.display.rad_enable = bool(enabled)
+        self._sync_acquisition_display_transform()
 
     @pyqtSlot(bool)
     def _on_monitor_display_toggled(self, enabled: bool):
@@ -2863,9 +2870,9 @@ class MainWindow(QMainWindow):
         if latest is None:
             return
 
-        data, data_source, channel_num, snapshot_kind = latest
+        data, data_source, channel_num, snapshot_kind, display_meta = latest
         if data_source == DataSource.PHASE:
-            self._on_phase_data(data, channel_num, snapshot_kind)
+            self._on_phase_data(data, channel_num, snapshot_kind, display_meta)
         else:
             self._on_raw_data(data, data_source, channel_num)
 
@@ -2874,6 +2881,7 @@ class MainWindow(QMainWindow):
         data: np.ndarray,
         channel_num: int,
         snapshot_kind: int = 0,
+        display_meta: Optional[tuple] = None,
     ):
         """Handle one full or Tab1-optimized phase display snapshot."""
         self._data_count += 1
@@ -2895,7 +2903,7 @@ class MainWindow(QMainWindow):
 
         try:
             display_start = time.perf_counter()
-            self._update_phase_display(data, channel_num, phase_scale, snapshot_kind)
+            self._update_phase_display(data, channel_num, phase_scale, snapshot_kind, display_meta)
             display_ms = (time.perf_counter() - display_start) * 1000
             self._gui_update_count += 1
         except Exception as e:
@@ -3219,6 +3227,7 @@ class MainWindow(QMainWindow):
         else:
             self._set_shared_filter_error("")
         self._sync_shared_filter_settings()
+        self._sync_acquisition_display_transform()
 
     def _on_filter_button_clicked(self, checked: bool):
         self._filter_enabled = bool(checked)
@@ -3318,6 +3327,7 @@ class MainWindow(QMainWindow):
         channel_num: int,
         phase_scale: Optional[np.float32] = None,
         snapshot_kind: int = 0,
+        display_meta: Optional[tuple] = None,
     ):
         """Update phase displays without converting the whole GUI window to radians."""
         point_num = self._get_effective_phase_point_count()
@@ -3327,6 +3337,15 @@ class MainWindow(QMainWindow):
         compact_time = snapshot_kind == 2
         incremental_time_space = snapshot_kind == 3
         if incremental_time_space:
+            if display_meta is not None:
+                source_frame_count, block_duration_s, distance_start, distance_end = display_meta
+                self.time_space_widget.set_scan_rate(self.params.basic.scan_rate)
+                self.time_space_widget.append_prepared_block(
+                    data, block_duration_s, source_frame_count, (distance_start, distance_end)
+                )
+                return
+            # Legacy fallback: raw full-width snapshot when the acquisition thread
+            # could not pre-transform the block (e.g. multi-channel PHASE).
             display_data, frame_num = self._select_latest_display_frames(
                 data, point_num, channel_num, max(1, int(np.asarray(data).size // (point_num * channel_num))),
             )
@@ -3956,6 +3975,29 @@ class MainWindow(QMainWindow):
             ),
             incremental_full_width=time_space_active,
         )
+        self._sync_acquisition_display_transform()
+
+    def _sync_acquisition_display_transform(self) -> None:
+        """Forward the display-side rad/crop/downsample transform to the acquisition thread."""
+        thread = self.acq_thread
+        if thread is None or not hasattr(thread, 'set_display_transform'):
+            return
+        tw = self.time_space_widget
+        ts_params = tw.get_parameters() if tw is not None else {}
+        rad_enabled = (
+            bool(self.rad_check.isChecked())
+            if hasattr(self, 'rad_check')
+            else bool(self.params.display.rad_enable)
+        )
+        thread.set_display_transform(
+            rad_enabled,
+            int(ts_params.get("distance_range_start", 0)),
+            int(ts_params.get("distance_range_end", 0)),
+            int(ts_params.get("space_downsample", 1)),
+            int(ts_params.get("time_downsample", 1)),
+            bool(ts_params.get("filter_enabled", False)),
+            str(ts_params.get("filter_spec", "")),
+        )
 
     @pyqtSlot(int)
     def _on_plot_tab_changed(self, _index: int) -> None:
@@ -4145,6 +4187,7 @@ class MainWindow(QMainWindow):
             if self.time_space_widget is not None:
                 self.params = self._collect_params()
                 self._reset_tab1_phase_filter()
+                self._sync_acquisition_display_transform()
                 log.debug("Time-space parameters updated")
         except Exception as e:
             log.warning(f"Error updating time-space parameters: {e}")

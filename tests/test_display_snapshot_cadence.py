@@ -49,8 +49,14 @@ class DisplaySnapshotCadenceTests(unittest.TestCase):
 
         self.assertEqual(first_snapshot[3], 3)
         self.assertEqual(second_snapshot[3], 3)
-        np.testing.assert_array_equal(first_snapshot[0], first)
-        np.testing.assert_array_equal(second_snapshot[0], second)
+
+        # kind=3 now carries the prepared (space, time) display block plus metadata.
+        np.testing.assert_array_equal(first_snapshot[0], first.reshape(2, 6).T)
+        np.testing.assert_array_equal(second_snapshot[0], second.reshape(2, 6).T)
+        self.assertEqual(first_snapshot[4][0], 2)  # source_frame_count
+        self.assertEqual(second_snapshot[4][0], 2)
+        self.assertEqual(first_snapshot[4][2], 0)  # distance_start
+        self.assertEqual(first_snapshot[4][3], 6)  # distance_end
 
 
 if __name__ == "__main__":

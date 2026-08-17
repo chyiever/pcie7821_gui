@@ -20,6 +20,7 @@ from config import (
     resolve_phase_crop_bounds,
 )
 from logger import get_logger
+from realtime_filter import FilterSpecError, RealtimeTimeAxisFilter, parse_filter_spec
 
 # Module logger
 log = get_logger("acq_thread")
@@ -125,6 +126,16 @@ class AcquisitionThread(QThread):
         self._display_region_index = 0
         self._display_requires_full_window = False
         self._display_incremental_full_width = False
+        self._display_rad_enabled = False
+        self._display_distance_start = 0
+        self._display_distance_end = 0
+        self._display_space_downsample = 1
+        self._display_time_downsample = 1
+        self._display_filter_enabled = False
+        self._display_filter_spec = ""
+        self._display_transform_request = None
+        self._time_space_filter = RealtimeTimeAxisFilter(order=2)
+        self._last_display_transform_ms = 0.0
         self._monitor_read_enabled = False
         self._full_data_handler: Optional[Callable[[np.ndarray, int, int], None]] = None
         self._last_successful_read_time = 0.0
@@ -183,6 +194,9 @@ class AcquisitionThread(QThread):
         self._display_region_index = int(getattr(params.display, "region_index", 0))
         self._display_requires_full_window = False
         self._display_incremental_full_width = False
+        self._display_transform_request = None
+        self._time_space_filter.reset_design()
+        self._last_display_transform_ms = 0.0
         self._monitor_read_enabled = bool(
             self._data_source == DataSource.PHASE
             and getattr(params.display, "monitor_plot_enabled", False)
@@ -231,6 +245,64 @@ class AcquisitionThread(QThread):
             self._display_region_index,
             int(self._display_requires_full_window),
             int(self._display_incremental_full_width),
+        )
+
+    def set_display_transform(
+        self,
+        rad_enabled: bool,
+        distance_start: int,
+        distance_end: int,
+        space_downsample: int,
+        time_downsample: int,
+        filter_enabled: bool,
+        filter_spec: str,
+    ) -> None:
+        """Update the display-side transform applied before the GUI receives a snapshot."""
+        request = (
+            bool(rad_enabled),
+            int(distance_start),
+            int(distance_end),
+            max(1, int(space_downsample)),
+            max(1, int(time_downsample)),
+            bool(filter_enabled),
+            str(filter_spec or "").strip(),
+        )
+        if request == self._display_transform_request:
+            return
+
+        self._display_transform_request = request
+        (
+            self._display_rad_enabled,
+            self._display_distance_start,
+            self._display_distance_end,
+            self._display_space_downsample,
+            self._display_time_downsample,
+            self._display_filter_enabled,
+            self._display_filter_spec,
+        ) = request
+
+        self._time_space_filter.reset_design()
+        scan_rate = max(1, int(self._params.basic.scan_rate)) if self._params is not None else 1
+        if self._display_filter_enabled:
+            try:
+                self._time_space_filter.configure(
+                    parse_filter_spec(self._display_filter_spec),
+                    scan_rate,
+                )
+            except FilterSpecError as exc:
+                log.warning("Time-space filter unavailable in acquisition thread: %s", exc)
+
+        with self._latest_display_lock:
+            self._latest_display_data = None
+        self._last_display_publish_at = 0.0
+        log.info(
+            "Display transform changed: rad=%d, dist=[%d,%d), space_ds=%d, time_ds=%d, filter=%d",
+            int(self._display_rad_enabled),
+            self._display_distance_start,
+            self._display_distance_end,
+            self._display_space_downsample,
+            self._display_time_downsample,
+            int(self._display_filter_enabled),
         )
 
     def _set_stage(self, stage: str, detail: str = ""):
@@ -289,6 +361,7 @@ class AcquisitionThread(QThread):
             "last_crop_ms": self._last_crop_ms,
             "last_dispatch_ms": self._last_dispatch_ms,
             "last_display_publish_ms": self._last_display_publish_ms,
+            "last_display_transform_ms": self._last_display_transform_ms,
             "last_monitor_read_ms": self._last_monitor_read_ms,
             "last_block_bytes": self._last_block_bytes,
             "monitor_read_enabled": self._monitor_read_enabled,
@@ -461,6 +534,7 @@ class AcquisitionThread(QThread):
         self._last_crop_ms = 0.0
         self._last_dispatch_ms = 0.0
         self._last_display_publish_ms = 0.0
+        self._last_display_transform_ms = 0.0
         self._last_monitor_read_ms = 0.0
         self._last_block_bytes = 0
         self._last_display_publish_at = 0.0
@@ -813,6 +887,56 @@ class AcquisitionThread(QThread):
             return np.ascontiguousarray(self._display_history_chunks[0])
         return np.ascontiguousarray(np.concatenate(self._display_history_chunks, axis=0))
 
+    def _apply_time_space_display_filter(self, block: np.ndarray) -> np.ndarray:
+        """Apply the stateful time-axis filter to one rad-scaled display block."""
+        if not self._display_filter_enabled:
+            return block
+        scan_rate = max(1, int(self._params.basic.scan_rate)) if self._params is not None else 1
+        try:
+            spec = parse_filter_spec(self._display_filter_spec)
+            return self._time_space_filter.process(block, spec, scan_rate)
+        except FilterSpecError as exc:
+            log.warning("Time-space filter skipped in acquisition thread: %s", exc)
+            return block
+
+    def _build_time_space_display_block(self, frame_matrix: np.ndarray):
+        """Apply rad conversion, distance crop and downsampling to one display history window.
+
+        Returns a ``(display_block, source_frame_count, block_duration_s, distance_start,
+        distance_end)`` tuple where ``display_block`` is the ``(space, time)`` float32
+        array ready for ``ImageItem.setImage``, or ``None`` when nothing remains.
+        """
+        frame_count, point_count = frame_matrix.shape
+        start = max(0, min(self._display_distance_start, max(0, point_count - 1)))
+        end = (
+            point_count
+            if self._display_distance_end <= 0
+            else min(point_count, max(start + 1, self._display_distance_end))
+        )
+        if start >= end:
+            return None
+
+        block = frame_matrix[:, start:end]
+        if self._display_space_downsample > 1:
+            block = block[:, :: self._display_space_downsample]
+        if self._display_rad_enabled:
+            block = np.asarray(block).astype(np.float32, copy=True)
+            block *= np.float32(np.pi / 32767.0)
+        block = self._apply_time_space_display_filter(block)
+        if self._display_time_downsample > 1:
+            block = block[:: self._display_time_downsample, :]
+        if block.size == 0:
+            return None
+
+        block = np.ascontiguousarray(block.T)  # (space, time)
+        scan_rate = (
+            max(1.0, float(self._params.basic.scan_rate))
+            if self._params is not None
+            else 1.0
+        )
+        block_duration_s = frame_count / scan_rate
+        return block, frame_count, block_duration_s, start, end
+
     def _publish_latest_display_data(self, data: np.ndarray, data_source: int, channel_num: int):
         """Refresh the overwriteable GUI snapshot at the GUI display cadence."""
         start = time.perf_counter()
@@ -900,7 +1024,17 @@ class AcquisitionThread(QThread):
             self._last_display_publish_ms = (time.perf_counter() - start) * 1000.0
             return
 
-        if channel_num == 1:
+        display_meta = None
+        if snapshot_kind == 3 and data_source == DataSource.PHASE and channel_num == 1:
+            transform_start = time.perf_counter()
+            transformed = self._build_time_space_display_block(history)
+            self._last_display_transform_ms = (time.perf_counter() - transform_start) * 1000.0
+            if transformed is None:
+                self._last_display_publish_ms = (time.perf_counter() - start) * 1000.0
+                return
+            display_data, source_frame_count, block_duration_s, distance_start, distance_end = transformed
+            display_meta = (source_frame_count, block_duration_s, distance_start, distance_end)
+        elif channel_num == 1:
             display_data = np.ascontiguousarray(history.reshape(-1))
         else:
             display_data = np.ascontiguousarray(history.reshape(-1, channel_num))
@@ -911,6 +1045,7 @@ class AcquisitionThread(QThread):
                 data_source,
                 channel_num,
                 snapshot_kind,
+                display_meta,
             )
         if snapshot_kind == 3:
             self._display_history_chunks = []

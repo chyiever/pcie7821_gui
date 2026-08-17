@@ -698,6 +698,33 @@ class TimeSpacePlotWidget(QWidget):
         self._schedule_display_update()
         return True
 
+    def append_prepared_block(
+        self,
+        display_block: np.ndarray,
+        block_duration_s: float,
+        source_frame_count: int,
+        distance_bounds: Tuple[int, int],
+    ) -> bool:
+        """Append an acquisition-thread-prepared ``(space, time)`` display block.
+
+        The block is already rad-scaled, distance-cropped and time/space downsampled,
+        so the GUI only manages the rolling buffer and schedules the image redraw.
+        """
+        if not self._plot_enabled:
+            return False
+
+        if display_block.ndim != 2 or display_block.size == 0:
+            return False
+
+        self._append_display_block(
+            np.ascontiguousarray(display_block),
+            float(block_duration_s),
+            int(source_frame_count),
+            tuple(distance_bounds),
+        )
+        self._schedule_display_update()
+        return True
+
     def _build_display_block(
         self, data_block: np.ndarray, display_scale: Optional[np.float32] = None
     ) -> Optional[Tuple[np.ndarray, float, Tuple[int, int]]]:

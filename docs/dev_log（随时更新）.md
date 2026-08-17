@@ -834,3 +834,42 @@ python build_exe.py --name eDAS20260720-173900 --skip-clean
 - 明确本项目形成的核心工程原则：采集优先，完整数据和显示快照分离；GUI 可跳帧但保存必须可验证；保存队列按字节预算；异步数组入队后转移所有权；`.bin` / `.bz` 完整性边界、真实帧率与配置帧率必须分开记录。
 - 将 100 kHz 数据量减半分析纳入经验文档，强调文件帧数连续只能证明应用收到的数据完整写入，不能证明硬件真实扫描周期等于配置值；后续类似软件应同时记录 `configured_fps`、`measured_fps` 和 `fps_ratio`。
 - 本次为文档和日志更新，不修改运行时代码。验证重点为 UTF-8 正确写入、文档路径和源码文件名引用一致、Git 差异检查；随后同步到 GitHub。
+
+## 2026-08-17 Time-Space 显示变换下放到采集线程
+
+### 背景
+
+根据 `logs/20260817_161814.log`，现场参数 `scan_rate=100000`、`Length/Load=0.200 s`、`Length/Plot=0.400 s`、单通道 PHASE 裁剪 `[50,512)`，Tab2 Time-Space 激活时每个显示快照约 70.5 MB（40000 帧 × 462 点 × int32）。日志中 `_on_phase_data` 持续出现 120-180 ms 的 `Slow _on_phase_data` 警告，`gui_interval_ms` 稳定在约 390-420 ms，说明 GUI 主线程每次仍要处理一个大数组，Tab1 与 Tab2 主观观感不一致。
+
+根因在于：`snapshot_kind=3`（Time-Space 增量全窗口）的显示快照仍以原始 `int32` 全窗口交给 GUI，弧度转换、距离裁剪、空间/时间降采样和转置全部在 GUI 主线程的 `TimeSpacePlotWidget._build_display_block()` 中完成。存储链路早已把降采样下放到保存后台线程，但显示链路尚未做同样处理。
+
+### 修改
+
+- `src/acquisition_thread.py`
+  - 新增 `set_display_transform()`，把 `rad_enabled`、`distance_start/end`、`space_downsample`、`time_downsample`、`filter_enabled`、`filter_spec` 同步到采集线程。
+  - 采集线程新增 `RealtimeTimeAxisFilter` 实例与 `_build_time_space_display_block()`，在 `_publish_latest_display_data()` 中针对 `snapshot_kind=3` 的单通道 PHASE 快照，直接完成弧度缩放、距离裁剪、空间/时间降采样、实时滤波和 `(space, time)` 转置，产出可直接 `setImage` 的浮点小块。
+  - 显示快照元组从 4 元改为 5 元，`snapshot_kind=3` 附带 `(source_frame_count, block_duration_s, distance_start, distance_end)` 元数据。
+  - 诊断快照新增 `last_display_transform_ms`，用于区分采集线程内的显示变换耗时与整体发布耗时。
+
+- `src/main_window.py`
+  - `_drain_latest_display_data()` / `_on_phase_data()` / `_update_phase_display()` 解包 5 元快照并透传 `display_meta`。
+  - `snapshot_kind=3` 走新路径 `time_space_widget.append_prepared_block()`，直接追加已变换块；保留旧 `update_data()` 作为多通道等无法预变换场景的回退。
+  - 新增 `_sync_acquisition_display_transform()`，在启动、Tab 切换、模式/区域/PLOT 状态变化、Time-Space 参数变化、滤波与 rad 开关变化时把显示变换同步到采集线程。
+  - 新增 `rad_check.toggled` 连接，rad 开关变化即时生效并同步。
+
+- `src/time_space_plot.py`
+  - 新增 `append_prepared_block()`，接收采集线程预处理的 `(space, time)` 块，只负责滚动缓冲追加和图像刷新调度，不再做弧度/裁剪/降采样/滤波。
+
+### 影响与边界
+
+- 仅改变 `snapshot_kind=3`（Time-Space 增量全窗口）的显示快照形态；`snapshot_kind=0/1/2`（Tab1 波形/频谱/监测）仍按原样传递，Tab1 的弧度转换仍在 GUI 按最小渲染数组延迟执行。
+- 完整采集数据、保存和 TCP 链路不受影响：`_dispatch_full_data()` 仍先于显示路径接收原始 `int32` 块。
+- 显示侧弧度/裁剪/降采样结果与旧 `_build_display_block()` 逻辑一致，Time-Space 滚动缓冲语义不变。
+- 实时滤波由采集线程内的独立实例承担，滤波开关与截止频率通过 `set_display_transform()` 同步。
+
+### 验证
+
+- `python -m py_compile src\acquisition_thread.py src\main_window.py src\time_space_plot.py` 通过。
+- `python -m unittest discover -s tests -p "test_*.py"` 7 项全部通过，含更新后的 `test_time_space_incremental_snapshots_do_not_overlap`（校验 `snapshot_kind=3` 返回预变换 `(space, time)` 块与元数据）。
+- 离屏自检：`rad=True, dist=[40,100), space_ds=2, time_ds=50` 时，块形状为 `(30, 8)`、dtype `float32`，弧度缩放与 `raw.reshape(400,512)[:, 40:100:2] * (pi/32767)` 逐值一致。
+- 仍需现场硬件复测：观察 `_on_phase_data` 是否回落到几十毫秒量级、`last_display_transform_ms` 是否稳定、`gui_interval_ms` 是否持续接近 400 ms，以及 `buffer/expected` 是否不再长时间积压。
