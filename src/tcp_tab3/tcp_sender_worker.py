@@ -43,7 +43,6 @@ class TCPSenderWorker:
         self._thread.start()
 
         self._pending_connect_after = 0.0
-        self._comm_count = 0
         self._session_started_at = 0.0
         self._stats = {
             "session_active": False,
@@ -66,7 +65,6 @@ class TCPSenderWorker:
         """Reset state for a fresh acquisition session."""
         with self._condition:
             self._queue.clear()
-            self._comm_count = 0
             self._pending_connect_after = 0.0
             self._session_active = True
             self._session_started_at = time.time()
@@ -157,7 +155,7 @@ class TCPSenderWorker:
                     item.phase_data,
                     item.context,
                     item.settings,
-                    self._comm_count,
+                    item.comm_count,
                 )
                 build_ms = (time.perf_counter() - build_start) * 1000
                 if build_ms > 20:
@@ -181,7 +179,6 @@ class TCPSenderWorker:
                 self._socket.sendall(packet.header_bytes)
                 self._socket.sendall(packet.payload_bytes)
                 send_ms = (time.perf_counter() - send_start) * 1000
-                self._comm_count += 1
                 self._stats.update(
                     {
                         "connected": True,

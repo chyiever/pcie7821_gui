@@ -873,3 +873,57 @@ python build_exe.py --name eDAS20260720-173900 --skip-clean
 - `python -m unittest discover -s tests -p "test_*.py"` 7 项全部通过，含更新后的 `test_time_space_incremental_snapshots_do_not_overlap`（校验 `snapshot_kind=3` 返回预变换 `(space, time)` 块与元数据）。
 - 离屏自检：`rad=True, dist=[40,100), space_ds=2, time_ds=50` 时，块形状为 `(30, 8)`、dtype `float32`，弧度缩放与 `raw.reshape(400,512)[:, 40:100:2] * (pi/32767)` 逐值一致。
 - 仍需现场硬件复测：观察 `_on_phase_data` 是否回落到几十毫秒量级、`last_display_transform_ms` 是否稳定、`gui_interval_ms` 是否持续接近 400 ms，以及 `buffer/expected` 是否不再长时间积压。
+
+## 2026-08-18 Tab3 TCP comm_count假对齐风险修复
+
+### 背景
+
+为配合 `wb-monitor` 做 FIP+eDAS 联调，复查了 `src/tcp_tab3/` 的发送链路。当前联调目标约为 100 kHz x 800 点，即每秒 80,000,000 个数；若按现有协议 `float64` 发送，满速 1 s payload 约 610 MiB。
+
+本次发现一个比吞吐更隐蔽的对齐风险：旧实现由 `TCPSenderWorker` 在 `sendall()` 成功后才递增 `_comm_count`。当网络未连接、发送失败或发送队列丢弃旧包时，被丢弃的采集块不会消耗序号。下游 `wb-monitor` 会看到连续的 eDAS `comm_count`，但实际采集时间已经跳过，导致 FIP/eDAS 同序号看似对齐、物理时间不对齐。
+
+### 修改
+
+- `src/tcp_tab3/tcp_types.py`
+  - `PhaseQueueItem` 新增 `comm_count` 字段。
+
+- `src/tcp_tab3/tcp_tab3_manager.py`
+  - 新增 `_next_comm_count`，采集会话开始时清零。
+  - 在 `_append_comm_frames()` 将完整采集帧聚合成一个通信包时立即分配并递增 `comm_count`。
+  - 因此发送队列后续丢旧包、网络重连或发送失败都不会重写已形成包的序号。
+
+- `src/tcp_tab3/tcp_sender_worker.py`
+  - 构包时使用 `item.comm_count`。
+  - 移除“发送成功后递增内部 `_comm_count`”逻辑。
+
+- `tests/test_tcp_tab3_comm_count.py`
+  - 新增测试，验证连续形成的通信包在进入发送队列前已获得 `[0, 1, 2]` 序号。
+
+### 影响
+
+- 接收端现在可以通过 `comm_count` 缺口识别真实 eDAS 数据缺失。
+- FIP/eDAS 联合对齐不再被网络或发送队列丢包掩盖。
+- 统计中的 `last_comm_count` 仍为最后成功发送的包序号，因此现场日志可以同时看到发送成功进度与缺包位置。
+
+### 验证
+
+```text
+python -X utf8 -m py_compile src\tcp_tab3\tcp_types.py src\tcp_tab3\tcp_tab3_manager.py src\tcp_tab3\tcp_sender_worker.py
+python -X utf8 -m unittest tests.test_tcp_tab3_comm_count
+python -X utf8 -m unittest discover -s tests
+```
+
+结果：
+
+```text
+Ran 1 test in 0.002s
+OK
+
+Ran 8 tests in 5.286s
+OK
+```
+
+### 联调关注点
+
+- 若 `tcp_ingest_dropped`、`dropped_packets` 或 `Connect failed` 出现，`wb-monitor` 端应出现对应 `DAS comm_count gap`，不能再表现为 eDAS 序号连续。
+- 满速 1 s 包约 610 MiB，长期联调建议优先在本发送端配置 `time_downsample` 或 `space_downsample`，把下游接收、绘图和联合存储压力降到可持续范围。

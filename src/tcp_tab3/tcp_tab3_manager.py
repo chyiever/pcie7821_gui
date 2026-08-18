@@ -39,6 +39,7 @@ class TCPTab3Manager(QObject):
         self._pending_comm_chunks: List[np.ndarray] = []
         self._pending_comm_frames = 0
         self._pending_comm_signature = None
+        self._next_comm_count = 0
         self._ingest_queue: Deque[Tuple[object, AllParams, Dict[str, object]]] = deque()
         self._ingest_queue_max_blocks = 16
         self._ingest_condition = threading.Condition()
@@ -126,6 +127,7 @@ class TCPTab3Manager(QObject):
 
         with self._state_lock:
             self._reset_pending_comm_frames()
+            self._next_comm_count = 0
         with self._ingest_condition:
             self._ingest_queue.clear()
             self._ingest_enqueued_blocks = 0
@@ -289,12 +291,15 @@ class TCPTab3Manager(QObject):
         self._pending_comm_frames += int(frame_matrix.shape[0])
         while self._pending_comm_frames >= settings.comm_frames:
             packet_matrix = self._take_pending_comm_frames(settings.comm_frames)
+            comm_count = self._next_comm_count
+            self._next_comm_count += 1
             context = AcquisitionContext(
                 scan_rate_hz=int(scan_rate_hz),
                 frame_num=int(packet_matrix.shape[0]),
                 point_num_after_merge=int(point_num_after_merge),
             )
             item = PhaseQueueItem(
+                comm_count=comm_count,
                 phase_data=np.ascontiguousarray(packet_matrix.reshape(-1)),
                 settings=settings,
                 context=context,

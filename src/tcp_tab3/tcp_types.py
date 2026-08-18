@@ -53,6 +53,7 @@ class OutgoingPacket:
 class PhaseQueueItem:
     """One pending acquisition block waiting to be serialized and sent."""
 
+    comm_count: int
     phase_data: np.ndarray
     settings: CommSettings
     context: AcquisitionContext
