@@ -953,3 +953,30 @@ OK
 - `python -X utf8 -m unittest discover -s tests -p "test_*.py"` 8 项全部通过。
 - 数值 round-trip 自检：`int32` 载荷解码值与发送矩阵逐值一致，`rad = int32 / 32767 * pi` 与预期一致，`data_bytes` 由 64 降为 32（减半）。
 - 端到端联调由 `wb-monitor` 侧 `validate_tab3_pipeline.py` 验证通过（`VALIDATION_OK packets_received=3 plot_payloads=3`）。
+
+## 2026-08-20 Tab3 TCP 载荷改小端 int32 消除字节交换
+
+### 背景
+
+现场 100 kHz x 461 通道 int32 联调日志（`logs/20260820_005847.log`）显示 `Slow TCP send` 约 1.4–1.6 s/包、`TCP queue full, dropping oldest packet` 持续出现，接收端丢包率约 38%。根因是带宽饱和：单包 184.4 MB、数据率约 1.48 Gbps，超过 1 Gbps 链路。int32 减半后仍超带宽，但两端大端字节交换成为可消除的额外开销。
+
+### 修改
+
+- `src/tcp_tab3/tcp_packet_builder.py`
+  - 载荷序列化由 `np.asarray(send_matrix, dtype=">i4")` 改为 `np.ascontiguousarray(send_matrix, dtype=np.int32)`，改用 x86 本机小端字节序，去掉每包约 4600 万样本的大端字节交换。
+  - 同步更新模块 docstring 为「小端 int32」口径。
+
+### 文档
+
+- 更新 `docs/2026-03-14-Tab3-DAS数据通信功能开发方案.md`：包体与序列化方式改为小端 `int32`。
+
+### 验证
+
+- `python -X utf8 -m py_compile src\tcp_tab3\tcp_packet_builder.py` 通过。
+- `python -X utf8 -m unittest discover -s tests -p "test_*.py"` 8 项全部通过。
+- 小端 round-trip 自检：int32 载荷解码值与发送矩阵逐值一致，`data_bytes=32` 减半保持。
+- 端到端联调由 `wb-monitor` 侧 `validate_tab3_pipeline.py` 验证通过。
+
+### 结论
+
+小端改动实测把 46.1M 样本构包从约 128 ms 降至约 39 ms，属约 10% 开销优化，无法消除带宽饱和导致的丢包。丢包的根本解法是：在 Tab3 通信参数开启 `time_downsample` 或 `space_downsample`（任一 `=2` 即把 184.4 MB/s 降到约 92.2 MB/s ≈ 0.74 Gbps，落入 1 Gbps），或升级到 10 Gbps 链路。
