@@ -927,3 +927,29 @@ OK
 
 - 若 `tcp_ingest_dropped`、`dropped_packets` 或 `Connect failed` 出现，`wb-monitor` 端应出现对应 `DAS comm_count gap`，不能再表现为 eDAS 序号连续。
 - 满速 1 s 包约 610 MiB，长期联调建议优先在本发送端配置 `time_downsample` 或 `space_downsample`，把下游接收、绘图和联合存储压力降到可持续范围。
+
+## 2026-08-20 Tab3 TCP 载荷由 float64 改为 int32 发送
+
+### 背景
+
+原 Tab3 TCP 载荷为大端 `float64` 弧度，发送端在构包时先做 `phase_rad = phase_int32 / 32767.0 * pi` 再序列化，满速 1 s 包约 610 MiB（100 kHz x 800 点 x 8 字节），对应约 2.95 Gbps，超过常见 1 Gbps 链路，导致下游 `wb-monitor` 每包接收约 3.2 s、timespace 图与 comm 计数增长明显慢于 1 s 节奏。改为直接发送原始 `int32` 相位计数可把载荷减半。
+
+### 修改
+
+- `src/tcp_tab3/tcp_packet_builder.py`
+  - `_reshape_phase_data()` 不再做弧度换算，直接返回 `int32` 的 time × space 矩阵。
+  - `build_packet()` 的 `data_bytes` 由 `channel_count * samples_per_channel * 8` 改为 `* 4`。
+  - 载荷序列化由 `np.asarray(send_matrix, dtype=">f8")` 改为 `dtype=">i4"`。
+  - 移除不再使用的 `import math`，同步更新模块与函数 docstring。
+- 协议口径：发送端只发送原始 `int32` 相位计数，接收端 `wb-monitor` 在解析后按 `phase_rad = phase_int32 / 32767.0 * pi` 恢复弧度。
+
+### 文档
+
+- 更新 `docs/2026-03-14-Tab3-DAS数据通信功能开发方案.md`：载荷类型、单包长度公式、示例与包体序列化方式改为 `int32` 口径，明确弧度换算移到接收端。
+
+### 验证
+
+- `python -X utf8 -m py_compile src\tcp_tab3\tcp_packet_builder.py` 通过。
+- `python -X utf8 -m unittest discover -s tests -p "test_*.py"` 8 项全部通过。
+- 数值 round-trip 自检：`int32` 载荷解码值与发送矩阵逐值一致，`rad = int32 / 32767 * pi` 与预期一致，`data_bytes` 由 64 降为 32（减半）。
+- 端到端联调由 `wb-monitor` 侧 `validate_tab3_pipeline.py` 验证通过（`VALIDATION_OK packets_received=3 plot_payloads=3`）。

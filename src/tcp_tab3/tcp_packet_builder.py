@@ -1,13 +1,12 @@
 """
 `src/tcp_tab3/tcp_packet_builder.py` 负责把一块 PHASE 采集数据转换为 Tab3 所需的 TCP 协议字节流。
 
-当前版本中，包构建步骤非常明确：先按采集上下文把一维相位块恢复成 time × space 矩阵，再执行用户设定的空间范围截取、时域降采样和空域降采样，随后把结果转换为大端 `float64` 载荷，并补齐固定格式头部。
+当前版本中，包构建步骤非常明确：先按采集上下文把一维相位块恢复成 time × space 矩阵，再执行用户设定的空间范围截取、时域降采样和空域降采样，随后把结果按大端 `int32` 序列化为载荷，并补齐固定格式头部。接收端在解析后用 `phase_rad = phase_int32 / 32767 * pi` 恢复弧度，发送端不再做弧度换算。
 
 这里的设计经验是：协议构建必须自带尺寸校验和语义校验，尽量把坏包截留在本地，而不是发送给下游后再排查。
 """
 from __future__ import annotations
 
-import math
 import struct
 
 import numpy as np
@@ -64,9 +63,9 @@ class TCPPacketBuilder:
         samples_per_channel = int(send_matrix.shape[1])
         channel_count = int(send_matrix.shape[0])
         packet_duration_seconds = samples_per_channel / float(sample_rate_hz)
-        data_bytes = channel_count * samples_per_channel * 8
+        data_bytes = channel_count * samples_per_channel * 4
 
-        payload_array = np.asarray(send_matrix, dtype=">f8")
+        payload_array = np.asarray(send_matrix, dtype=">i4")
         payload_bytes = payload_array.reshape(-1, order="C").tobytes()
         if len(payload_bytes) != data_bytes:
             raise TCPPacketBuildError(
@@ -94,7 +93,7 @@ class TCPPacketBuilder:
 
     @staticmethod
     def _reshape_phase_data(phase_data: np.ndarray, context: AcquisitionContext) -> np.ndarray:
-        """Convert the acquisition callback payload into a time x space matrix in radians."""
+        """Convert the acquisition callback payload into a time x space int32 matrix."""
         expected_points = context.frame_num * context.point_num_after_merge
         flat = np.asarray(phase_data)
         if flat.ndim > 1:
@@ -104,6 +103,9 @@ class TCPPacketBuilder:
                 f"Unexpected phase data size: expected={expected_points}, actual={flat.size}."
             )
 
-        # Reuse the existing GUI conversion rule so display and communication stay consistent.
-        rad_data = flat.astype(np.float64, copy=False) / 32767.0 * math.pi
-        return rad_data.reshape(context.frame_num, context.point_num_after_merge)
+        # Keep the raw int32 phase counts unchanged. The receiver converts each
+        # sample to radians via phase_rad = phase_int32 / 32767 * pi. This halves
+        # the payload bytes compared to the previous big-endian float64 format.
+        return flat.astype(np.int32, copy=False).reshape(
+            context.frame_num, context.point_num_after_merge
+        )
